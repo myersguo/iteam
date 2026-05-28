@@ -1,0 +1,81 @@
+{
+  "name": "@myersguo/iteam",
+  "version": "0.1.2",
+  "description": "本地优先的多 Agent 协作工作区——把人、AI Agent、计算机、任务装进同一个聊天室",
+  "type": "module",
+  "license": "MIT",
+  "author": "myersguo",
+  "homepage": "https://github.com/myersguo/iteam#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/myersguo/iteam.git"
+  },
+  "bugs": {
+    "url": "https://github.com/myersguo/iteam/issues"
+  },
+  "keywords": [
+    "agent",
+    "ai",
+    "codex",
+    "claude",
+    "gemini",
+    "mcp",
+    "local-first",
+    "chat",
+    "multi-agent"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "iteam": "./bin/iteam.mjs",
+    "iteam-agent": "./bin/iteam-agent.mjs"
+  },
+  "files": [
+    "bin/iteam.mjs",
+    "bin/iteam-agent.mjs",
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "server": "tsx ./src/server.ts",
+    "daemon": "tsx ./src/server.ts",
+    "agent-daemon": "tsx ./src/agent-daemon.ts",
+    "cli": "tsx ./bin/iteam.ts",
+    "build:web": "vite build",
+    "build:cli": "tsup",
+    "build": "npm run build:web && npm run build:cli",
+    "typecheck": "tsc --noEmit",
+    "smoke": "tsx ./scripts/smoke.ts",
+    "publish:npm": "npm publish --registry=https://registry.npmjs.org",
+    "prepublishOnly": "npm run typecheck && npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "zod": "^4.4.3"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^12.10.0",
+    "mysql2": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "tsup": "^8.5.1",
+    "tsx": "^4.22.3",
+    "typescript": "^5.8.0",
+    "vite": "^6.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
