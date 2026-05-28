@@ -119,6 +119,18 @@ export class MysqlStore extends BaseStore {
       "connect_token",
       "VARCHAR(128) DEFAULT NULL"
     );
+    await this.migrateAgentsModelNullable();
+  }
+
+  private async migrateAgentsModelNullable(): Promise<void> {
+    const [rows] = await this.pool.query<Array<{ IS_NULLABLE: string }>>(
+      "SELECT IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'iteam_agents' AND COLUMN_NAME = 'model'"
+    );
+    const isNullable = Array.isArray(rows) && rows[0] && rows[0].IS_NULLABLE === "YES";
+    if (isNullable) return;
+    console.log("[mysql] migrating iteam_agents.model to nullable...");
+    await this.pool.query(`ALTER TABLE iteam_agents MODIFY COLUMN model VARCHAR(64) DEFAULT NULL`);
+    console.log("[mysql] iteam_agents.model migration complete");
   }
 
   private async addColumnIfMissing(table: string, column: string, definition: string): Promise<void> {

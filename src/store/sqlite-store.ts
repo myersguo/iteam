@@ -89,6 +89,49 @@ export class SqliteStore extends BaseStore {
   // ---------------------------------------------------------------------------
   private runColumnMigrations(): void {
     this.addColumnIfMissing("iteam_computers", "connect_token", "TEXT");
+    this.migrateAgentsModelNullable();
+  }
+
+  // SQLite doesn't support ALTER COLUMN to drop NOT NULL; rebuild the table.
+  private migrateAgentsModelNullable(): void {
+    const cols = this.db
+      .prepare(`PRAGMA table_info(iteam_agents)`)
+      .all() as Array<{ name: string; notnull: number }>;
+    const modelCol = cols.find(c => c.name === "model");
+    if (!modelCol || modelCol.notnull === 0) return; // already nullable
+    console.log("[sqlite] migrating iteam_agents.model to nullable...");
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS iteam_agents_new (
+        id                  TEXT NOT NULL PRIMARY KEY,
+        name                TEXT NOT NULL,
+        handle              TEXT NOT NULL,
+        description         TEXT NOT NULL,
+        runtime             TEXT NOT NULL,
+        model               TEXT,
+        reasoning           TEXT,
+        computer_id         TEXT NOT NULL,
+        status              TEXT NOT NULL,
+        desired_status      TEXT NOT NULL,
+        launch_id           TEXT,
+        pid                 INTEGER,
+        workspace_path      TEXT NOT NULL,
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL,
+        env                 TEXT,
+        last_started_at     TEXT,
+        last_runtime_status TEXT
+      )
+    `);
+    this.db.exec(`
+      INSERT INTO iteam_agents_new
+      SELECT id, name, handle, description, runtime, model, reasoning, computer_id,
+             status, desired_status, launch_id, pid, workspace_path, created_at,
+             updated_at, env, last_started_at, last_runtime_status
+      FROM iteam_agents
+    `);
+    this.db.exec(`DROP TABLE iteam_agents`);
+    this.db.exec(`ALTER TABLE iteam_agents_new RENAME TO iteam_agents`);
+    console.log("[sqlite] iteam_agents.model migration complete");
   }
 
   private addColumnIfMissing(table: string, column: string, ddlType: string): void {

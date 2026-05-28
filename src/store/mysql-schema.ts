@@ -64,7 +64,7 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
       handle              VARCHAR(64)  NOT NULL,
       description         TEXT         NOT NULL,
       runtime             VARCHAR(32)  NOT NULL,
-      model               VARCHAR(64)  NOT NULL,
+      model               VARCHAR(64)  DEFAULT NULL,
       reasoning           VARCHAR(32)  DEFAULT NULL,
       computer_id         VARCHAR(64)  NOT NULL,
       status              VARCHAR(32)  NOT NULL,

@@ -50,7 +50,7 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
     handle              TEXT NOT NULL,
     description         TEXT NOT NULL,
     runtime             TEXT NOT NULL,
-    model               TEXT NOT NULL,
+    model               TEXT,
     reasoning           TEXT,
     computer_id         TEXT NOT NULL,
     status              TEXT NOT NULL,
