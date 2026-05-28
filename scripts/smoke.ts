@@ -1,0 +1,322 @@
+import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const tsxBin = resolve(root, "node_modules/.bin/tsx");
+const home = mkdtempSync(join(tmpdir(), "iteam-smoke-"));
+const port = 18000 + Math.floor(Math.random() * 10000);
+const daemon = spawn(tsxBin, [resolve(root, "src/server.ts"), "--port", String(port)], {
+  env: { ...process.env, ITEAM_HOME: home, ITEAM_PORT: String(port) },
+  stdio: ["ignore", "pipe", "pipe"]
+});
+
+try {
+  await waitForHealth(port);
+  let computers = await get(port, "/api/computers");
+  if (computers.length !== 0) throw new Error("state should not contain seeded computers");
+  const invite = await post(port, "/api/computers/connect-command", { serverUrl: `http://127.0.0.1:${port}` });
+  if (!invite.command.includes("daemon connect")) throw new Error("connect command was not generated");
+  const firstConnect = await post(port, "/api/computers/connect", {
+    token: invite.token,
+    name: "smoke-computer",
+    fingerprint: { id: "SMOKE12345", hostname: "smoke-computer", os: "darwin", arch: "arm64" },
+    daemonVersion: "0.1.0",
+    runtimes: [{ id: "codex", name: "Codex CLI", installed: true }]
+  });
+  if (firstConnect.connectToken !== invite.token) {
+    throw new Error("first connect should bind the invite token to the computer permanently");
+  }
+  const connectToken: string = firstConnect.connectToken;
+  const computerId: string = firstConnect.id;
+  // Re-auth with the same token returns the same record — single-token model:
+  // server never rotates the token, so this is just another heartbeat.
+  const reAuth = await post(port, "/api/computers/connect", {
+    token: connectToken,
+    name: "smoke-computer",
+    fingerprint: { id: "SMOKE12345", hostname: "smoke-computer", os: "darwin", arch: "arm64" },
+    daemonVersion: "0.1.0",
+    runtimes: [{ id: "codex", name: "Codex CLI", installed: true }]
+  });
+  if (reAuth.connectToken !== connectToken) throw new Error("re-auth must return the same persistent token");
+  if (reAuth.id !== computerId) throw new Error("re-auth must return the same computer id");
+  const wrongTokenStatus = await postStatus(port, "/api/computers/connect", {
+    token: "bogus",
+    fingerprint: { id: "SMOKE12345", hostname: "smoke-computer", os: "darwin", arch: "arm64" }
+  });
+  if (wrongTokenStatus !== 401) throw new Error(`expected 401 for wrong token, got ${wrongTokenStatus}`);
+  computers = await get(port, "/api/computers");
+  if (!computers.some((c: any) => c.name === "smoke-computer" && c.connectionId === invite.id)) {
+    throw new Error("computer did not connect");
+  }
+  const agent = await post(port, "/api/agents", {
+    name: "codex",
+    runtime: "codex",
+    model: "gpt-5.5",
+    computerId: computerId
+  });
+  if (agent.status !== "registered" || agent.desiredStatus !== "running") throw new Error("agent was not registered for launch");
+  const dm = await post(port, `/api/direct-messages/agents/${encodeURIComponent(agent.id)}`, {});
+  if (dm.kind !== "dm" || dm.target !== `dm:${agent.id}` || !dm.memberIds.includes(agent.id)) {
+    throw new Error("agent DM channel was not created");
+  }
+  const dmMessage = await post(port, "/api/messages", {
+    target: dm.target,
+    text: "direct hello",
+    authorId: "human-local",
+    defaultAgentId: agent.id
+  });
+  if (dmMessage.threadId !== null) throw new Error("direct messages must not be parsed as threads");
+  const dmMessages = await get(port, `/api/messages/channel/${encodeURIComponent(dm.id)}?limit=10`);
+  if (!dmMessages.some((message: any) => message.id === dmMessage.id && message.target === dm.target)) {
+    throw new Error("direct message was not stored in the DM channel");
+  }
+  const heartbeat = await post(port, "/api/computers/connect", {
+    token: invite.token,
+    name: "smoke-computer",
+    fingerprint: { id: "SMOKE12345", hostname: "smoke-computer", os: "darwin", arch: "arm64" },
+    daemonVersion: "0.1.0",
+    runtimes: [{ id: "codex", name: "Codex CLI", installed: true }]
+  });
+  if (!heartbeat.launchAgents.some((item: any) => item.id === agent.id)) throw new Error("registered agent was not assigned to computer daemon");
+  // runtime-status is a computer-scoped callback: requires X-Iteam-Connection
+  const noAuthStatus = await postStatus(port, `/api/agents/${encodeURIComponent(agent.id)}/runtime-status`, {
+    status: "online"
+  });
+  if (noAuthStatus !== 401) throw new Error(`runtime-status without auth header should be 401, got ${noAuthStatus}`);
+  const wrongAuthStatus = await postStatus(port, `/api/agents/${encodeURIComponent(agent.id)}/runtime-status`, {
+    status: "online"
+  }, { "x-iteam-connection": `${computerId}:not-the-token` });
+  if (wrongAuthStatus !== 401) throw new Error(`runtime-status with wrong token should be 401, got ${wrongAuthStatus}`);
+  await post(port, `/api/agents/${encodeURIComponent(agent.id)}/runtime-status`, {
+    status: "online"
+  }, { "x-iteam-connection": `${computerId}:${connectToken}` });
+  // Phase 4: SSE push channel — open the stream and verify a delivery push
+  // arrives in real time when a new mention is created.
+  const sse = await openSse(port, computerId, connectToken);
+  try {
+    const ready = await sse.waitFor("ready", 2_000);
+    if (!ready || ready.computerId !== computerId) throw new Error("SSE ready event missing computerId");
+    // missing auth → 401
+    const noAuthSse = await fetch(`http://127.0.0.1:${port}/api/computers/${encodeURIComponent(computerId)}/stream`);
+    if (noAuthSse.status !== 401) throw new Error(`SSE without auth should be 401, got ${noAuthSse.status}`);
+    await noAuthSse.body?.cancel();
+    // Sending a message that mentions the running agent should push a
+    // delivery event to our subscriber.
+    const pushed = post(port, "/api/messages", {
+      target: dm.target,
+      text: `@${agent.handle} hello via push`,
+      authorId: "human-local"
+    });
+    const deliveryEvent = await sse.waitFor("delivery", 2_000);
+    if (!deliveryEvent) throw new Error("delivery push event was not received");
+    if (deliveryEvent.agentId !== agent.id) throw new Error("delivery push event targeted wrong agent");
+    await pushed;
+  } finally {
+    sse.close();
+  }
+  const task = await post(port, "/api/tasks", {
+    target: "#all",
+    title: "Write smoke task",
+    assigneeId: agent.id
+  });
+  if (task.status !== "todo" || !task.messageId || !task.threadTarget) throw new Error("task metadata was not created");
+  const channels = await get(port, "/api/channels");
+  const allChannel = channels.find((channel: any) => channel.target === "#all");
+  if (!allChannel) throw new Error("#all channel was not created");
+  const messages = await get(port, `/api/messages/channel/${encodeURIComponent(allChannel.id)}?limit=50`);
+  if (!messages.some((message: any) => message.id === task.messageId && message.type === "task")) throw new Error("task root message was not created");
+  const channel = await post(port, "/api/channels", { name: "rename-source", description: "before" });
+  const channelMessage = await post(port, "/api/messages", {
+    target: channel.target,
+    text: "rename smoke",
+    authorId: "human-local"
+  });
+  const renamedChannel = await patch(port, `/api/channels/${encodeURIComponent(channel.id)}`, {
+    name: "rename-dest",
+    description: "after"
+  });
+  if (renamedChannel.target !== "#rename-dest") throw new Error("channel target was not renamed");
+  const renamedMessages = await get(port, `/api/messages/channel/${encodeURIComponent(channel.id)}?limit=50`);
+  if (!renamedMessages.some((message: any) => message.id === channelMessage.id && message.target === "#rename-dest")) {
+    throw new Error("channel messages were not migrated after rename");
+  }
+  const chineseChannel = await post(port, "/api/channels", { name: "我的", description: "" });
+  if (chineseChannel.name !== "我的" || chineseChannel.target !== "#我的") {
+    throw new Error("unicode channel names should be preserved");
+  }
+  const renamedChineseChannel = await patch(port, `/api/channels/${encodeURIComponent(chineseChannel.id)}`, {
+    name: "中文 频道"
+  });
+  if (renamedChineseChannel.target !== "#中文-频道") {
+    throw new Error("unicode channel rename should preserve non-ascii letters");
+  }
+  const taskHeartbeat = await post(port, "/api/computers/connect", {
+    token: invite.token,
+    name: "smoke-computer",
+    fingerprint: { id: "SMOKE12345", hostname: "smoke-computer", os: "darwin", arch: "arm64" },
+    daemonVersion: "0.1.0",
+    runtimes: [{ id: "codex", name: "Codex CLI", installed: true }]
+  });
+  if (!taskHeartbeat.deliveries.some((delivery: any) => delivery.target === task.threadTarget && delivery.messageId === task.messageId)) {
+    throw new Error("assigned task was not delivered to its thread");
+  }
+  const reply = await post(port, "/api/messages", {
+    target: task.threadTarget,
+    text: "thread reply",
+    authorId: "human-local"
+  });
+  if (reply.threadId !== task.messageId) throw new Error("thread reply did not keep root thread id");
+  const messagesAfterReply = await get(port, `/api/messages/channel/${encodeURIComponent(allChannel.id)}?limit=50`);
+  const taskRootAfterReply = messagesAfterReply.find((message: any) => message.id === task.messageId);
+  if (taskRootAfterReply?.replyCount !== 1) throw new Error("channel messages should include thread reply counts");
+  await patch(port, `/api/tasks/${task.id}`, { status: "in_review" });
+  const tasks = await get(port, "/api/tasks");
+  if (!tasks.some((item: any) => item.id === task.id && item.status === "in_review")) throw new Error("task status was not updated");
+  console.log("smoke ok");
+} finally {
+  daemon.kill("SIGTERM");
+  rmSync(home, { recursive: true, force: true });
+}
+
+async function waitForHealth(port: number): Promise<void> {
+  for (let i = 0; i < 40; i += 1) {
+    try {
+      const health = await get(port, "/api/health");
+      if (health.ok) return;
+    } catch {}
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error("server did not start");
+}
+
+async function get(port: number, path: string): Promise<any> {
+  const response = await fetch(`http://127.0.0.1:${port}${path}`);
+  if (!response.ok) throw new Error(`${response.status} ${path}`);
+  return response.json();
+}
+
+async function post(port: number, path: string, body: unknown, headers: Record<string, string> = {}): Promise<any> {
+  const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) throw new Error(`${response.status} ${path}: ${await response.text()}`);
+  return response.json();
+}
+
+async function postStatus(port: number, path: string, body: unknown, headers: Record<string, string> = {}): Promise<number> {
+  const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify(body)
+  });
+  return response.status;
+}
+
+async function patch(port: number, path: string, body: unknown): Promise<any> {
+  const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) throw new Error(`${response.status} ${path}: ${await response.text()}`);
+  return response.json();
+}
+
+interface SseHandle {
+  waitFor(type: string, timeoutMs: number): Promise<any>;
+  close(): void;
+}
+
+async function openSse(port: number, computerId: string, token: string): Promise<SseHandle> {
+  const controller = new AbortController();
+  const response = await fetch(
+    `http://127.0.0.1:${port}/api/computers/${encodeURIComponent(computerId)}/stream`,
+    {
+      headers: {
+        accept: "text/event-stream",
+        "x-iteam-connection": `${computerId}:${token}`
+      },
+      signal: controller.signal
+    }
+  );
+  if (!response.ok || !response.body) throw new Error(`SSE open failed: ${response.status}`);
+
+  const queue: Array<{ type: string; data: any }> = [];
+  const waiters: Array<{ type: string; resolve: (event: any) => void }> = [];
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let closed = false;
+
+  const dispatch = (type: string, data: any): void => {
+    const idx = waiters.findIndex(w => w.type === type);
+    if (idx !== -1) {
+      const waiter = waiters.splice(idx, 1)[0];
+      waiter.resolve(data);
+    } else {
+      queue.push({ type, data });
+    }
+  };
+
+  (async () => {
+    try {
+      while (!closed) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let separator = buffer.indexOf("\n\n");
+        while (separator !== -1) {
+          const rawEvent = buffer.slice(0, separator);
+          buffer = buffer.slice(separator + 2);
+          let type = "message";
+          let data = "";
+          for (const line of rawEvent.split("\n")) {
+            if (line.startsWith("event:")) type = line.slice(6).trim();
+            else if (line.startsWith("data:")) data += (data ? "\n" : "") + line.slice(5).trim();
+          }
+          if (data) {
+            try {
+              dispatch(type, JSON.parse(data));
+            } catch {
+              // ignore parse errors in smoke test
+            }
+          }
+          separator = buffer.indexOf("\n\n");
+        }
+      }
+    } catch {
+      // ignore — close() handles teardown
+    }
+  })();
+
+  return {
+    waitFor(type, timeoutMs) {
+      return new Promise(resolve => {
+        const idx = queue.findIndex(item => item.type === type);
+        if (idx !== -1) {
+          resolve(queue.splice(idx, 1)[0].data);
+          return;
+        }
+        const timer = setTimeout(() => {
+          const waiterIdx = waiters.findIndex(w => w.resolve === wrapped);
+          if (waiterIdx !== -1) waiters.splice(waiterIdx, 1);
+          resolve(null);
+        }, timeoutMs);
+        const wrapped = (data: any) => {
+          clearTimeout(timer);
+          resolve(data);
+        };
+        waiters.push({ type, resolve: wrapped });
+      });
+    },
+    close() {
+      closed = true;
+      controller.abort();
+    }
+  };
+}

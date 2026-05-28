@@ -1,0 +1,25 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+
+# local data / state
+.iteam/
+state.json
+state.db
+state.db-journal
+*.log
+
+# environment
+.env
+.env.local
+
+# editors
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# npm pack output
+*.tgz
