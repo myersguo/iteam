@@ -6,8 +6,7 @@
 // today; long-lived ACP/stream-json drivers will replace some of these later.
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { join } from "node:path";
-import { defaultHome, nowIso } from "../lib.js";
+import { nowIso } from "../lib.js";
 import { agentEnv, prepareAgentWorkspace, type AgentWorkspaceLayout } from "../workspace.js";
 import type { Agent, DeliveryWithContext } from "../types.js";
 import type { AgentDriver, AgentEventListener, DeliverResult, DeliveryMode, DriverCapabilities } from "./driver.js";
@@ -57,7 +56,6 @@ export class OneshotDriver implements AgentDriver {
   }
 
   async deliver(agent: Agent, delivery: DeliveryWithContext, prompt: string): Promise<DeliverResult> {
-    const cwd = agent.workspacePath || join(defaultHome(), "agents", agent.id);
     const workspace = prepareAgentWorkspace({
       agent,
       serverUrl: this.serverUrl,
@@ -65,6 +63,9 @@ export class OneshotDriver implements AgentDriver {
       computerId: this.computerId,
       connectToken: this.connectToken
     });
+    // Use workspace.dir (which already includes the cross-host fallback) so
+    // we don't spawn into a path that doesn't exist on this machine.
+    const cwd = workspace.dir;
     const spec = buildOneShotSpec(agent, prompt);
     const tag = `[Agent ${agent.id} ${agent.runtime}]`;
     console.log(`[${nowIso()}] ${tag} Delivery received (delivery=${delivery.id}, prompt-bytes=${prompt.length})`);

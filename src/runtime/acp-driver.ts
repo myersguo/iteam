@@ -10,8 +10,7 @@
 // Wire details follow the ACP spec at https://agentclientprotocol.com/.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { join } from "node:path";
-import { defaultHome, nowIso } from "../lib.js";
+import { nowIso } from "../lib.js";
 import { agentEnv, prepareAgentWorkspace, type AgentWorkspaceLayout } from "../workspace.js";
 import type { Agent, DeliveryWithContext } from "../types.js";
 import type { AgentDriver, AgentEventListener, DeliverResult, DeliveryMode, DriverCapabilities } from "./driver.js";
@@ -96,7 +95,6 @@ export class AcpDriver implements AgentDriver {
   }
 
   private async doStart(agent: Agent): Promise<void> {
-    const cwd = agent.workspacePath || join(defaultHome(), "agents", agent.id);
     const workspace = prepareAgentWorkspace({
       agent,
       serverUrl: this.serverUrl,
@@ -104,6 +102,9 @@ export class AcpDriver implements AgentDriver {
       computerId: this.computerId,
       connectToken: this.connectToken
     });
+    // workspace.dir incorporates the cross-host fallback when the server's
+    // recorded workspacePath isn't writable on this machine.
+    const cwd = workspace.dir;
     const spec = buildAcpSpec(agent, workspace);
     const child = spawn(spec.command, spec.args, {
       cwd,

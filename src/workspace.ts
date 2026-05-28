@@ -27,6 +27,27 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
 
 /**
+ * Try to mkdir `<requested>/.iteam` recursively; on failure (ENOENT/EACCES from
+ * a path the daemon can't reach — e.g. the server's home doesn't exist here),
+ * fall back to `<localDir>/.iteam` so deliveries still complete on the
+ * daemon's own filesystem.
+ */
+function ensureWritableAgentDir(requested: string, localDir: string): string {
+  try {
+    mkdirSync(join(requested, ".iteam"), { recursive: true });
+    return requested;
+  } catch (error) {
+    if (requested === localDir) throw error;
+    console.warn(
+      `[workspace] cannot create ${requested}/.iteam (${(error as Error).message}); ` +
+      `falling back to local workspace ${localDir}`
+    );
+    mkdirSync(join(localDir, ".iteam"), { recursive: true });
+    return localDir;
+  }
+}
+
+/**
  * Resolve a runtime entry as { command, args }. When a bundled .mjs sibling
  * exists (published package), spawn `node bundled.mjs`. Otherwise (dev), use
  * `npx tsx src/<name>.ts` so the same code path keeps working.
@@ -57,9 +78,16 @@ export interface PrepareAgentWorkspaceArgs {
 }
 
 export function prepareAgentWorkspace({ agent, serverUrl, launchId, computerId, connectToken }: PrepareAgentWorkspaceArgs): AgentWorkspaceLayout {
-  const dir = agent.workspacePath || join(defaultHome(), "agents", agent.id);
+  // agent.workspacePath was set on the server (core.ts) using the server
+  // process's own home. When the daemon runs on a different machine — or even
+  // the same machine with a different resolved $HOME (e.g. auto-mounted
+  // /home/<user> that doesn't exist on this box) — that path may not be
+  // writable. Try the server-provided path first, then fall back to the
+  // daemon's local home so deliveries still work cross-host.
+  const localDir = join(defaultHome(), "agents", agent.id);
+  const requestedDir = agent.workspacePath || localDir;
+  const dir = ensureWritableAgentDir(requestedDir, localDir);
   const internal = join(dir, ".iteam");
-  mkdirSync(internal, { recursive: true });
 
   const memoryPath = join(dir, "MEMORY.md");
   if (!existsSync(memoryPath)) {
