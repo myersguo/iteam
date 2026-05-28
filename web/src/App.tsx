@@ -2383,6 +2383,36 @@ function ComputersView({
   );
 }
 
+// navigator.clipboard is only defined in secure contexts (HTTPS or
+// localhost/127.0.0.1). On plain HTTP LAN access (e.g. http://10.0.0.5:4318)
+// it's undefined and calling .writeText throws TypeError. Fall back to the
+// legacy textarea + execCommand("copy") path which still works there.
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // fall through
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "-1000px";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 function ComputerConnectCommand({ computer }: { computer: ComputerEntity }) {
   const command = useMemo(() => {
     const origin = window.location.origin;
@@ -2400,11 +2430,12 @@ function ComputerConnectCommand({ computer }: { computer: ComputerEntity }) {
     ].join(" ");
   }, [computer.connectToken]);
 
+  const [copied, setCopied] = useState(false);
   async function copy() {
-    try {
-      await navigator.clipboard.writeText(command);
-    } catch {
-      // best-effort; older browsers / non-https contexts may reject
+    const ok = await copyToClipboard(command);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
     }
   }
 
@@ -2422,7 +2453,7 @@ function ComputerConnectCommand({ computer }: { computer: ComputerEntity }) {
             </code>
           </div>
           <button className="terminal-copy" title="Copy" onClick={copy}>
-            <Copy size={14} /> Copy
+            <Copy size={14} /> {copied ? "Copied" : "Copy"}
           </button>
         </div>
       </div>
@@ -2439,8 +2470,13 @@ function ConnectComputerModal({
   connectedComputer: ComputerEntity | null;
   onClose: () => void;
 }) {
+  const [copied, setCopied] = useState(false);
   async function copyCommand() {
-    await navigator.clipboard.writeText(invite.command);
+    const ok = await copyToClipboard(invite.command);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }
   }
 
   return (
@@ -2473,7 +2509,7 @@ function ConnectComputerModal({
               <span className="prompt">$</span> {invite.command}
             </code>
             <button className="terminal-copy" title="Copy" onClick={copyCommand}>
-              <Copy size={14} /> Copy
+              <Copy size={14} /> {copied ? "Copied" : "Copy"}
             </button>
           </div>
         </div>
