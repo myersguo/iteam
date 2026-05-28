@@ -18,10 +18,10 @@ function usage(): void {
   console.log(`iTeam local multi-agent workspace
 
 Usage:
-  iteam server start [--port 4318]
+  iteam server start [--host 0.0.0.0] [--port 4318]
   iteam server status
   iteam agent-daemon connect --server-url <url> --connect-token <token> [--name computer-name]
-  iteam web
+  iteam web   # prints the daemon URL (the daemon already serves the bundle); runs vite dev only in a source checkout
   iteam computer list
   iteam agent create <name> [--runtime codex|claude|gemini|trae]
   iteam agent list
@@ -64,11 +64,13 @@ async function main(): Promise<void> {
 
   if ((area === "server" || area === "daemon") && action === "start") {
     const port = readFlag("--port", process.env.ITEAM_PORT || "4318");
+    const host = readFlag("--host", process.env.ITEAM_HOST || "0.0.0.0");
     const entry = resolveEntry("server");
-    const child = spawn(entry.argv[0], [...entry.argv.slice(1), "--port", String(port)], {
-      stdio: "inherit",
-      env: process.env
-    });
+    const child = spawn(
+      entry.argv[0],
+      [...entry.argv.slice(1), "--port", String(port), "--host", String(host)],
+      { stdio: "inherit", env: process.env }
+    );
     child.on("exit", code => process.exit(code ?? 0));
     return;
   }
@@ -96,12 +98,23 @@ async function main(): Promise<void> {
   }
 
   if (area === "web") {
-    const child = spawn("npm", ["run", "dev"], {
-      cwd: root,
-      stdio: "inherit",
-      env: process.env
-    });
-    child.on("exit", code => process.exit(code ?? 0));
+    // In a checkout (dev mode), vite is available — keep the HMR workflow.
+    // In a published global install, vite isn't bundled; the daemon already
+    // serves the prebuilt bundle on its own port, so just print the URL.
+    const viteBin = resolve(root, "node_modules/.bin/vite");
+    if (existsSync(viteBin)) {
+      const child = spawn(viteBin, ["--host", process.env.ITEAM_HOST || "127.0.0.1"], {
+        cwd: root,
+        stdio: "inherit",
+        env: process.env
+      });
+      child.on("exit", code => process.exit(code ?? 0));
+      return;
+    }
+    console.log(`iTeam web is served by the daemon. Start it with:`);
+    console.log(`  iteam server start`);
+    console.log(`Then open ${baseUrl}/ in your browser.`);
+    console.log(`(Override with ITEAM_URL or pass --host 0.0.0.0 to expose externally.)`);
     return;
   }
 

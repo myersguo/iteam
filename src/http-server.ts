@@ -13,8 +13,26 @@ import { parseJsonBody, sendJson, sendText } from "./lib.js";
 import { HttpError, type IteamCore } from "./core.js";
 import type { StoreEvent } from "./types.js";
 
-const moduleRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const DEFAULT_STATIC_DIR = resolve(moduleRoot, "dist");
+// Locate <pkg>/dist regardless of whether this file runs from source
+// (src/http-server.ts → pkg root one level up) or from the tsup bundle
+// (dist/cli/server.mjs → pkg root two levels up). Walk upward looking for
+// the package.json so both layouts resolve correctly.
+const DEFAULT_STATIC_DIR = resolveDefaultStaticDir();
+
+function resolveDefaultStaticDir(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  let dir = here;
+  for (let i = 0; i < 5; i++) {
+    if (existsSync(resolve(dir, "package.json"))) {
+      return resolve(dir, "dist");
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  // Fallback to the historical behaviour if package.json isn't found.
+  return resolve(here, "..", "dist");
+}
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",

@@ -11,7 +11,7 @@ import { startHttpServer } from "./http-server.js";
 import { acquireLock, LockHeldError } from "./machine-lock.js";
 
 const port = Number(readArg("--port", process.env.ITEAM_PORT || "4318"));
-const host = readArg("--host", "127.0.0.1") || "127.0.0.1";
+const host = readArg("--host", process.env.ITEAM_HOST || "0.0.0.0") || "0.0.0.0";
 const home = process.env.ITEAM_HOME || defaultHome();
 const lockPath = join(home, "daemon.lock");
 const serveWeb = resolveServeWeb();
