@@ -44,7 +44,7 @@ export interface Agent {
   handle: string;
   description: string;
   runtime: AgentRuntime;
-  model: string;
+  model: string | null;
   reasoning?: string;
   computerId: string;
   status: AgentStatus;

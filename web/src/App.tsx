@@ -186,7 +186,7 @@ function App() {
   const [agentDescription, setAgentDescription] = useState("");
   const [runtime, setRuntime] = useState("codex");
   const [agentComputerId, setAgentComputerId] = useState("");
-  const [agentModel, setAgentModel] = useState("gpt-5.5");
+  const [agentModel, setAgentModel] = useState("");
   const [connectInvite, setConnectInvite] = useState<ConnectInvite | null>(null);
   const [createAgentOpen, setCreateAgentOpen] = useState(false);
   const [createChannelOpen, setCreateChannelOpen] = useState(false);
@@ -397,7 +397,7 @@ function App() {
     refresh();
   }
 
-  async function updateAgent(agentId: string, patch: { name?: string; description?: string }) {
+  async function updateAgent(agentId: string, patch: { name?: string; description?: string; model?: string | null }) {
     await api.patch(`/api/agents/${agentId}`, patch);
     refresh();
   }
@@ -1480,18 +1480,24 @@ function MembersView({
   selectedAgent: Agent | null;
   openCreateAgent: () => void;
   openAgentDm: (agent: Agent) => void;
-  updateAgent: (agentId: string, patch: { name?: string; description?: string }) => Promise<void>;
+  updateAgent: (agentId: string, patch: { name?: string; description?: string; model?: string | null }) => Promise<void>;
   refresh: () => void;
 }) {
   const [renameValue, setRenameValue] = useState("");
   const [renameError, setRenameError] = useState("");
   const [renameBusy, setRenameBusy] = useState(false);
+  const [modelValue, setModelValue] = useState("");
+  const [modelError, setModelError] = useState("");
+  const [modelBusy, setModelBusy] = useState(false);
 
   useEffect(() => {
     setRenameValue(selectedAgent?.name || "");
     setRenameError("");
     setRenameBusy(false);
-  }, [selectedAgent?.id, selectedAgent?.name]);
+    setModelValue(selectedAgent?.model || "");
+    setModelError("");
+    setModelBusy(false);
+  }, [selectedAgent?.id, selectedAgent?.name, selectedAgent?.model]);
 
   async function toggle(agent: Agent) {
     await api.post(`/api/agents/${agent.id}/${isAgentStopped(agent) ? "start" : "stop"}`);
@@ -1509,6 +1515,20 @@ function MembersView({
       setRenameError((err as Error).message || "Failed to rename agent");
     } finally {
       setRenameBusy(false);
+    }
+  }
+
+  async function saveModel(agent: Agent) {
+    const model = modelValue.trim() || null;
+    if (model === agent.model || modelBusy) return;
+    setModelBusy(true);
+    setModelError("");
+    try {
+      await updateAgent(agent.id, { model });
+    } catch (err) {
+      setModelError((err as Error).message || "Failed to update model");
+    } finally {
+      setModelBusy(false);
     }
   }
 
@@ -1578,10 +1598,27 @@ function MembersView({
                   <dt>Runtime</dt>
                   <dd>{selectedAgent.runtime}</dd>
                 </div>
+              <label className="profile-rename">
+                <span>Model</span>
                 <div>
-                  <dt>Model</dt>
-                  <dd>{selectedAgent.model || "—"}</dd>
+                  <input
+                    value={modelValue}
+                    onChange={event => setModelValue(event.target.value)}
+                    onKeyDown={event => {
+                      if (event.key === "Enter") saveModel(selectedAgent);
+                    }}
+                    placeholder="empty = use env var"
+                  />
+                  <button
+                    className="btn btn-secondary-on-dark"
+                    disabled={modelValue.trim() === (selectedAgent.model || "") || modelBusy}
+                    onClick={() => saveModel(selectedAgent)}
+                  >
+                    {modelBusy ? "Saving..." : "Save"}
+                  </button>
                 </div>
+                {modelError && <small>{modelError}</small>}
+              </label>
                 <div>
                   <dt>Reasoning</dt>
                   <dd>{selectedAgent.reasoning || "default"}</dd>
@@ -1729,13 +1766,18 @@ function CreateAgentModal({
           </label>
           <label className="field">
             <span>Model</span>
-            <select value={agentModel} onChange={e => setAgentModel(e.target.value)}>
+            <input
+              list="model-options"
+              type="text"
+              value={agentModel}
+              onChange={e => setAgentModel(e.target.value)}
+              placeholder="empty = use env var"
+            />
+            <datalist id="model-options">
               {modelsFor(runtime).map(model => (
-                <option value={model} key={model}>
-                  {model}
-                </option>
+                <option value={model} key={model} />
               ))}
-            </select>
+            </datalist>
           </label>
         </div>
 
@@ -1841,10 +1883,9 @@ function runtimeLabel(runtime: string): string {
 }
 
 function defaultModel(runtime: string): string {
-  if (runtime === "claude") return "sonnet";
-  if (runtime === "gemini") return "gemini-2.5-pro";
-  if (runtime === "trae") return "Doubao-Seed-1.8";
-  return "gpt-5.5";
+  // Empty by default so Claude CLI reads ANTHROPIC_MODEL from the environment.
+  // Users can still pick a preset from the datalist or type a custom model ID.
+  return "";
 }
 
 function modelsFor(runtime: string): string[] {

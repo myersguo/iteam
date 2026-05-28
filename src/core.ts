@@ -68,6 +68,7 @@ export interface AgentCreateInput {
 export interface AgentPatchInput {
   name?: string;
   description?: string;
+  model?: string | null;
 }
 
 export interface ChannelCreateInput {
@@ -715,7 +716,7 @@ export class IteamCore {
         handle: input.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-"),
         description: input.description || "Local AI teammate",
         runtime: input.runtime as Agent["runtime"],
-        model: input.model || defaultModelForRuntime(input.runtime),
+        model: input.model || null,
         reasoning: input.reasoning || "medium",
         computerId: computer.id,
         status: "registered",
@@ -757,6 +758,7 @@ export class IteamCore {
         current.handle = handle;
       }
       if (input.description !== undefined) current.description = input.description.trim();
+      if (input.model !== undefined) current.model = input.model || null;
       current.updatedAt = this.clock();
       return current;
     });

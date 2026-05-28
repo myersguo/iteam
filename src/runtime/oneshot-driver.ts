@@ -197,27 +197,16 @@ function oneshotTimeoutMs(runtime: string): number {
 
 function buildOneShotSpec(agent: Agent, prompt: string): RuntimeSpec {
   if (agent.runtime === "codex") {
-    return {
-      command: "codex",
-      args: [
-        "exec",
-        "--skip-git-repo-check",
-        "--sandbox", "read-only",
-        "-m", agent.model || "gpt-5.5",
-        prompt
-      ]
-    };
+    const codexArgs = ["exec", "--skip-git-repo-check", "--sandbox", "read-only"];
+    if (agent.model) codexArgs.push("-m", agent.model);
+    codexArgs.push(prompt);
+    return { command: "codex", args: codexArgs };
   }
   if (agent.runtime === "claude") {
-    return {
-      command: "claude",
-      args: [
-        "-p",
-        "--permission-mode", "bypassPermissions",
-        "--model", agent.model || "sonnet",
-        prompt
-      ]
-    };
+    const claudeArgs = ["-p", "--permission-mode", "bypassPermissions"];
+    if (agent.model) claudeArgs.push("--model", agent.model);
+    claudeArgs.push(prompt);
+    return { command: "claude", args: claudeArgs };
   }
   if (agent.runtime === "gemini") {
     // `--yolo` auto-approves tool actions; `--approval-mode yolo` is the

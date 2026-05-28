@@ -371,22 +371,22 @@ function buildRuntimeSpec({ agent, workspace }: BuildRuntimeSpecArgs): RuntimeSp
   }
 
   if (agent.runtime === "claude") {
-    return {
-      command: "claude",
-      args: [
-        "--allow-dangerously-skip-permissions",
-        "--dangerously-skip-permissions",
-        "--verbose",
-        "--permission-mode", "bypassPermissions",
-        "--output-format", "stream-json",
-        "--input-format", "stream-json",
-        "--model", agent.model || "sonnet",
-        "--disallowed-tools", "EnterPlanMode,ExitPlanMode,ScheduleWakeup,CronCreate,CronList,CronDelete",
-        "--append-system-prompt-file", workspace.systemPromptPath,
-        "--mcp-config", workspace.claudeMcpConfigPath,
-        "--strict-mcp-config"
-      ]
-    };
+    const args = [
+      "--allow-dangerously-skip-permissions",
+      "--dangerously-skip-permissions",
+      "--verbose",
+      "--permission-mode", "bypassPermissions",
+      "--output-format", "stream-json",
+      "--input-format", "stream-json",
+      "--disallowed-tools", "EnterPlanMode,ExitPlanMode,ScheduleWakeup,CronCreate,CronList,CronDelete",
+      "--append-system-prompt-file", workspace.systemPromptPath,
+      "--mcp-config", workspace.claudeMcpConfigPath,
+      "--strict-mcp-config"
+    ];
+    // Only pass --model if explicitly set; otherwise Claude CLI reads ANTHROPIC_MODEL
+    // from the environment (useful for Ark/compatible endpoints with endpoint IDs).
+    if (agent.model) args.push("--model", agent.model);
+    return { command: "claude", args };
   }
 
   if (agent.runtime === "gemini") {
