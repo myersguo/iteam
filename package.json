@@ -1,6 +1,6 @@
 {
   "name": "@myersguo/iteam",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "本地优先的多 Agent 协作工作区——把人、AI Agent、计算机、任务装进同一个聊天室",
   "type": "module",
   "license": "MIT",
