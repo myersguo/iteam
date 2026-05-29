@@ -49,6 +49,7 @@
     "build": "npm run build:web && npm run build:cli",
     "typecheck": "tsc --noEmit",
     "smoke": "tsx ./scripts/smoke.ts",
+    "release": "npm version patch && npm run publish:npm",
     "publish:npm": "npm publish --registry=https://registry.npmjs.org",
     "prepublishOnly": "npm run typecheck && npm run build"
   },
