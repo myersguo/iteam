@@ -19,7 +19,8 @@ import { JsonRpcStdioClient } from "./jsonrpc.js";
 
 /** ACP protocol version this client speaks. Negotiated down on initialize. */
 const PROTOCOL_VERSION = 1;
-const TURN_TIMEOUT_MS = 120000;
+const TURN_TIMEOUT_MS = 300000;
+const PROCESS_POOL_SIZE = 3;
 
 interface AcpRuntimeSpec {
   command: string;
@@ -33,14 +34,16 @@ export interface AcpDriverOptions {
   connectToken?: string;
 }
 
-interface SessionState {
+interface ProcessState {
+  child: ChildProcessWithoutNullStreams;
+  rpc: JsonRpcStdioClient;
   sessionId: string;
   workspace: AgentWorkspaceLayout;
+  inflight: Promise<unknown>;
 }
 
 export class AcpDriver implements AgentDriver {
   readonly runtime: string;
-  /** ACP holds a long-lived session, so new prompts deliver directly. */
   readonly deliveryMode: DeliveryMode = "direct";
   readonly capabilities: DriverCapabilities = {
     lifecycle: "persistent",
@@ -53,12 +56,10 @@ export class AcpDriver implements AgentDriver {
   private launchId: string;
   private computerId?: string;
   private connectToken?: string;
-  private child: ChildProcessWithoutNullStreams | null = null;
-  private rpc: JsonRpcStdioClient | null = null;
-  private session: SessionState | null = null;
-  private startPromise: Promise<void> | null = null;
-  /** One concurrent prompt at a time per session — direct delivery mode. */
-  private inflight: Promise<unknown> = Promise.resolve();
+  
+  private processes: ProcessState[] = [];
+  private nextProcessIndex = 0;
+  private startPromises: Promise<void>[] = [];
 
   constructor(runtime: string, opts: AcpDriverOptions) {
     this.runtime = runtime;
@@ -74,10 +75,9 @@ export class AcpDriver implements AgentDriver {
   }
 
   isAlive(): boolean {
-    if (!this.child) return false;
-    if (this.child.exitCode !== null) return false;
-    if (this.child.signalCode !== null) return false;
-    return true;
+    // Alive if at least one process in the pool is alive
+    if (this.processes.length === 0 && this.startPromises.length === 0) return false;
+    return this.processes.some(p => p.child.exitCode === null && p.child.signalCode === null);
   }
 
   private emit(event: AgentEvent): void {
@@ -85,25 +85,41 @@ export class AcpDriver implements AgentDriver {
   }
 
   async start(agent: Agent): Promise<void> {
-    if (this.session) return;
-    if (this.startPromise) return this.startPromise;
-    this.startPromise = this.doStart(agent).catch(error => {
-      this.startPromise = null;
-      throw error;
-    });
-    return this.startPromise;
+    // Start up to PROCESS_POOL_SIZE processes
+    while (this.processes.length + this.startPromises.length < PROCESS_POOL_SIZE) {
+      const processIndex = this.processes.length + this.startPromises.length;
+      const p = this.doStart(agent, processIndex).catch(error => {
+        this.startPromises = this.startPromises.filter(x => x !== p);
+        throw error;
+      });
+      this.startPromises.push(p);
+    }
+    if (this.startPromises.length > 0) {
+      await Promise.all(this.startPromises);
+    }
   }
 
-  private async doStart(agent: Agent): Promise<void> {
+  private async doStart(agent: Agent, processIndex: number): Promise<void> {
+    const poolAgent = { ...agent };
+    const path = await import("node:path");
+    const lib = await import("../lib.js");
+    const baseLocalDir = path.join(lib.defaultHome(), "agents", agent.id);
+    const baseRequestedDir = agent.workspacePath || baseLocalDir;
+    poolAgent.workspacePath = `${baseRequestedDir}-pool-${processIndex}`;
+
     const workspace = prepareAgentWorkspace({
-      agent,
+      agent: poolAgent,
       serverUrl: this.serverUrl,
       launchId: this.launchId,
       computerId: this.computerId,
       connectToken: this.connectToken
     });
-    // workspace.dir incorporates the cross-host fallback when the server's
-    // recorded workspacePath isn't writable on this machine.
+    
+    // Restore the original agent ID in bridgeArgs so the chat bridge authenticates correctly
+    workspace.bridgeArgs = workspace.bridgeArgs.map(arg => 
+      arg === poolAgent.id ? agent.id : arg
+    );
+    
     const cwd = workspace.dir;
     const spec = buildAcpSpec(agent, workspace);
     const child = spawn(spec.command, spec.args, {
@@ -111,29 +127,26 @@ export class AcpDriver implements AgentDriver {
       env: agentEnv({ agent, serverUrl: this.serverUrl, workspace }),
       stdio: ["pipe", "pipe", "pipe"]
     }) as ChildProcessWithoutNullStreams;
-    this.child = child;
+
+    let processState: ProcessState | null = null;
 
     child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
       this.emit({
         type: "exited",
         agentId: agent.id,
         launchId: this.launchId,
-        sessionId: this.session?.sessionId,
+        sessionId: processState?.sessionId,
         at: nowIso(),
         code,
         signal
       });
-      this.session = null;
-      this.rpc = null;
-      this.child = null;
-      this.startPromise = null;
+      this.processes = this.processes.filter(p => p !== processState);
     });
 
     const rpc = new JsonRpcStdioClient(child, {
       onRequest: (method, params) => this.handleAgentRequest(method, params),
-      onNotification: (method, params) => this.handleAgentNotification(agent, method, params)
+      onNotification: (method, params) => this.handleAgentNotification(agent, method, params, processState?.sessionId)
     });
-    this.rpc = rpc;
 
     // 1) initialize
     await rpc.request("initialize", {
@@ -145,53 +158,76 @@ export class AcpDriver implements AgentDriver {
       clientInfo: { name: "iteam-daemon", version: "0.1.0" }
     });
 
-    // 2) session/new — ACP needs absolute cwd + mcpServers (chat bridge).
+    // 2) session/new
     const sessionResult = await rpc.request<{ sessionId: string }>("session/new", {
       cwd,
       mcpServers: buildMcpServers(workspace)
     });
-    this.session = { sessionId: sessionResult.sessionId, workspace };
+
+    processState = {
+      child,
+      rpc,
+      sessionId: sessionResult.sessionId,
+      workspace,
+      inflight: Promise.resolve()
+    };
+    
+    this.processes.push(processState);
+
+    // Remove from startPromises since it's fully started
+    // (the filter logic in start() handles this indirectly, but we can't easily access `p` here)
 
     this.emit({
       type: "session_started",
       agentId: agent.id,
       launchId: this.launchId,
-      sessionId: sessionResult.sessionId,
+      sessionId: processState.sessionId,
       at: nowIso()
     });
   }
 
   async deliver(agent: Agent, _delivery: DeliveryWithContext, prompt: string): Promise<DeliverResult> {
     await this.start(agent);
-    if (!this.rpc || !this.session) throw new Error("acp session not initialized");
-    const session = this.session;
-    const rpc = this.rpc;
+    if (this.processes.length === 0) throw new Error("acp processes not initialized");
 
-    // Serialize prompts on this session to match the ACP "one turn at a time"
-    // contract. Each prompt waits for the previous turn to fully complete.
-    const turn = this.inflight.then(() => this.runTurn(agent, rpc, session, prompt));
-    this.inflight = turn.catch(() => {});
+    // Round-robin across the process pool
+    const processState = this.processes[this.nextProcessIndex % this.processes.length];
+    this.nextProcessIndex++;
+
+    const turn = processState.inflight.then(() => this.runTurn(agent, processState, prompt));
+    processState.inflight = turn.catch(() => {});
     return turn;
   }
 
   private async runTurn(
     agent: Agent,
-    rpc: JsonRpcStdioClient,
-    session: SessionState,
+    processState: ProcessState,
     prompt: string
   ): Promise<DeliverResult> {
+    const { rpc, sessionId } = processState;
     const accumulator: string[] = [];
     const offEvent = this.on(event => {
       if (event.type !== "message_chunk") return;
-      if (event.sessionId && event.sessionId !== session.sessionId) return;
+      if (event.sessionId && event.sessionId !== sessionId) return;
       if (event.text) accumulator.push(event.text);
     });
 
+    const MAX_PROMPT_BYTES = 64000;
+    let finalPrompt = prompt;
+    if (Buffer.byteLength(prompt, "utf8") > MAX_PROMPT_BYTES) {
+      const truncated = Buffer.from(prompt.slice(0, Math.floor(MAX_PROMPT_BYTES * 0.8)), "utf8")
+        .toString("utf8")
+        .slice(0, Math.floor(MAX_PROMPT_BYTES * 0.8));
+      finalPrompt = truncated + "\n\n[Note: prompt was truncated due to length limits]";
+      console.log(`[${nowIso()}] [AcpDriver] prompt truncated: ${Buffer.byteLength(prompt, "utf8")} -> ${Buffer.byteLength(finalPrompt, "utf8")} bytes (session=${sessionId})`);
+    }
+
     try {
+      console.log(`[${nowIso()}] [AcpDriver] session/prompt (session=${sessionId}, prompt-bytes=${Buffer.byteLength(finalPrompt, "utf8")})`);
       const result = await withTimeout(
         rpc.request<{ stopReason: string }>("session/prompt", {
-          sessionId: session.sessionId,
-          prompt: [{ type: "text", text: prompt }]
+          sessionId: sessionId,
+          prompt: [{ type: "text", text: finalPrompt }]
         }),
         TURN_TIMEOUT_MS,
         `${agent.runtime} response timed out`
@@ -201,7 +237,7 @@ export class AcpDriver implements AgentDriver {
         type: "turn_end",
         agentId: agent.id,
         launchId: this.launchId,
-        sessionId: session.sessionId,
+        sessionId: sessionId,
         at: nowIso(),
         text,
         reason: result.stopReason
@@ -213,12 +249,19 @@ export class AcpDriver implements AgentDriver {
         type: "error",
         agentId: agent.id,
         launchId: this.launchId,
-        sessionId: session.sessionId,
+        sessionId: sessionId,
         at: nowIso(),
         message: err.message
       });
       if (err.message.includes("timed out")) {
-        this.stop(agent).catch(() => {});
+        try {
+          rpc.notify("session/cancel", { sessionId: sessionId });
+        } catch {}
+        // Kill just this specific process
+        try {
+          processState.child.kill("SIGTERM");
+        } catch {}
+        this.processes = this.processes.filter(p => p !== processState);
       }
       throw err;
     } finally {
@@ -227,8 +270,6 @@ export class AcpDriver implements AgentDriver {
   }
 
   private async handleAgentRequest(method: string, params: unknown): Promise<unknown> {
-    // ACP servers may ask the client for permission before running tools. We
-    // run in autonomous-daemon mode, so always approve the first option.
     if (method === "session/request_permission") {
       const opts = (params as { options?: { optionId: string }[] } | null)?.options || [];
       const choice = opts[0]?.optionId;
@@ -238,11 +279,10 @@ export class AcpDriver implements AgentDriver {
           : { outcome: "cancelled" }
       };
     }
-    // Filesystem / terminal / unhandled request — not supported in v1.
     throw new Error(`unsupported acp request: ${method}`);
   }
 
-  private handleAgentNotification(agent: Agent, method: string, params: unknown): void {
+  private handleAgentNotification(agent: Agent, method: string, params: unknown, boundSessionId?: string): void {
     if (method !== "session/update") return;
     const payload = (params || {}) as {
       sessionId?: string;
@@ -250,7 +290,7 @@ export class AcpDriver implements AgentDriver {
     };
     const update = payload.update || {};
     const kind = String(update.sessionUpdate || "");
-    const sessionId = payload.sessionId || this.session?.sessionId;
+    const sessionId = payload.sessionId || boundSessionId;
 
     switch (kind) {
       case "agent_message_chunk": {
@@ -313,31 +353,24 @@ export class AcpDriver implements AgentDriver {
         return;
       }
       default:
-        // plan / available_commands_update / mode updates are not modeled yet.
         return;
     }
   }
 
   async stop(_agent: Agent): Promise<void> {
-    if (this.session && this.rpc) {
+    for (const processState of this.processes) {
       try {
-        this.rpc.notify("session/cancel", { sessionId: this.session.sessionId });
-      } catch {
-        // Best effort — child may already be closing.
+        processState.rpc.notify("session/cancel", { sessionId: processState.sessionId });
+      } catch {}
+      processState.rpc.stop();
+      if (!processState.child.killed) {
+        try {
+          processState.child.kill("SIGTERM");
+        } catch {}
       }
     }
-    this.rpc?.stop();
-    if (this.child && !this.child.killed) {
-      try {
-        this.child.kill("SIGTERM");
-      } catch {
-        // Best effort.
-      }
-    }
-    this.session = null;
-    this.rpc = null;
-    this.child = null;
-    this.startPromise = null;
+    this.processes = [];
+    this.startPromises = [];
   }
 }
 

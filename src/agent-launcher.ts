@@ -118,6 +118,10 @@ export class AgentLauncher {
     this.drivers.set(agent.id, { driver, launchId });
 
     if (agent.runtime === "trae") {
+      // In process pool mode, the agent directory is split into subdirectories (-pool-0, -pool-1, etc.)
+      // But traecli registers MCP globally for the user's config (~/.config/trae.vim/...).
+      // We only need to register the MCP server for the base workspace, since all pool workers
+      // share the same MCP server configuration (they all use the same base agent ID for bridging).
       const workspace = prepareAgentWorkspace({
         agent,
         serverUrl: this.serverUrl,
@@ -140,6 +144,10 @@ export class AgentLauncher {
       command: `${agent.runtime} ${descriptor.capabilities.lifecycle} serve`
     });
     try {
+      // Pass the agent with a unique workspace path for the primary process, 
+      // but only if the driver needs it. Since AcpDriver manages its own pool 
+      // of processes and modifies the workspacePath internally during doStart,
+      // we can just pass the original agent.
       await driver.start?.(agent);
       console.log(`[${nowIso()}] launch ${agent.id} online (launch=${launchId})`);
       await this.report(agent.id, "online", {
@@ -308,6 +316,7 @@ export class AgentLauncher {
     const message = delivery.message;
     if (!agent || !message) throw new Error("delivery is missing agent or message");
     const prompt = formatDeliveryPrompt({ agent, message, delivery });
+    console.log(`[${nowIso()}] deliver ${delivery.id} prompt-bytes=${Buffer.byteLength(prompt, "utf8")} runtime=${agent.runtime}`);
     const driver = this.resolveDriver(agent);
     return driver.deliver(agent, delivery, prompt);
   }
@@ -334,6 +343,24 @@ export class AgentLauncher {
       });
       this.subscribeDriver(agent, driver, launchId);
       this.drivers.set(agent.id, { driver, launchId });
+      
+      if (agent.runtime === "trae") {
+        const workspace = prepareAgentWorkspace({
+          agent,
+          serverUrl: this.serverUrl,
+          launchId,
+          computerId: credentials.computerId,
+          connectToken: credentials.connectToken
+        });
+        registerTraeMcpServer({ agent, workspace }).catch(error => {
+          this.report(agent.id, "output", {
+            launchId,
+            stream: "stderr",
+            text: `[trae] failed to register MCP chat server: ${(error as Error).message}\n`
+          }).catch(() => {});
+        });
+      }
+      
       return driver;
     }
     const descriptor = getRuntimeDescriptor(agent.runtime);

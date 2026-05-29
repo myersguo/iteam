@@ -157,3 +157,12 @@ function readArg(name: string, fallback: string | undefined = undefined): string
   const index = process.argv.indexOf(name);
   return index === -1 ? fallback : process.argv[index + 1];
 }
+
+// Watchdog: exit if the parent process closes our stdin (e.g. traecli exited).
+// This prevents orphan chat-bridge processes from lingering in the background.
+process.stdin.on("close", () => {
+  process.exit(0);
+});
+process.stdin.on("end", () => {
+  process.exit(0);
+});
