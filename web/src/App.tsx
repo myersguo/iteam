@@ -24,6 +24,7 @@ import {
   Users,
   X
 } from "lucide-react";
+import UrlChangeReporter from "./UrlChangeReporter";
 import "./styles.css";
 
 // ---------- types ----------
@@ -463,6 +464,7 @@ function App() {
       className={`app ${sidebarCollapsed ? "is-sidebar-collapsed" : ""} ${resizingSidebar ? "is-sidebar-resizing" : ""}`}
       style={{ ["--sidebar-width" as any]: `${sidebarWidth}px` }}
     >
+      <UrlChangeReporter />
       <nav className="rail" aria-label="Primary">
         <div className="brand">
           <span className="brand-spike" aria-hidden />
