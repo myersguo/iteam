@@ -381,22 +381,6 @@ interface BuildRuntimeSpecArgs {
 }
 
 function buildRuntimeSpec({ agent, workspace }: BuildRuntimeSpecArgs): RuntimeSpec | null {
-  if (agent.runtime === "codex") {
-    return {
-      command: "codex",
-      args: [
-        "app-server",
-        "--listen", "stdio://",
-        "-c", `mcp_servers.chat.command=${JSON.stringify(workspace.bridgeCommand)}`,
-        "-c", `mcp_servers.chat.args=${JSON.stringify(workspace.bridgeArgs)}`,
-        "-c", "mcp_servers.chat.startup_timeout_sec=30",
-        "-c", "mcp_servers.chat.tool_timeout_sec=120",
-        "-c", "mcp_servers.chat.enabled=true",
-        "-c", "mcp_servers.chat.required=true"
-      ]
-    };
-  }
-
   if (agent.runtime === "claude") {
     const args = [
       "--allow-dangerously-skip-permissions",

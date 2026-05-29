@@ -88,7 +88,9 @@ async function main(): Promise<void> {
     const messages = (await Promise.all(targets.map(item => fetchMessages(state, item, limit)))).flat()
       .filter((message: Message) => String(message.text || "").toLowerCase().includes(query))
       .slice(-limit);
-    console.log(formatMessages(state, messages));
+    // 输出 messages,超过 200 用省略号表示
+    const allMessages = formatMessages(state, messages);
+    console.log(allMessages.length > 200 ? allMessages.slice(0, 200) + "..." : allMessages);
     return;
   }
 

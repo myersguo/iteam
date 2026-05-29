@@ -115,7 +115,7 @@ async function heartbeat(): Promise<void> {
         console.error(`[${nowIso()}] report ${delivery.id} (ok) failed: ${err.message}`);
       });
     }).catch((error: Error) => {
-      console.error(`[${nowIso()}] deliver ${delivery.id} failed: ${error.message}`);
+      console.error(`[${nowIso()}] deliver ${delivery.id} failed`);
       reportDeliveryResult(delivery.id, { ok: false, error: error.message }).catch(err => {
         console.error(`[${nowIso()}] report ${delivery.id} (failed) failed: ${err.message}`);
       });

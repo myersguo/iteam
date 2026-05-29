@@ -69,7 +69,6 @@ export class OneshotDriver implements AgentDriver {
     const spec = buildOneShotSpec(agent, prompt);
     const tag = `[Agent ${agent.id} ${agent.runtime}]`;
     console.log(`[${nowIso()}] ${tag} Delivery received (delivery=${delivery.id}, prompt-bytes=${prompt.length})`);
-    console.log(`[${nowIso()}] ${tag} Spawning: ${printableCommand(spec)} (cwd=${cwd})`);
     const startedAt = Date.now();
     try {
       const text = await runOneShot({
@@ -93,7 +92,8 @@ export class OneshotDriver implements AgentDriver {
       });
       return { ok: true, text: trimmed };
     } catch (error) {
-      console.error(`[${nowIso()}] ${tag} Turn failed (delivery=${delivery.id}, took=${Date.now() - startedAt}ms): ${(error as Error).message}`);
+      const errMsg = (error as Error).message;
+      console.error(`[${nowIso()}] ${tag} Turn failed (delivery=${delivery.id}, took=${Date.now() - startedAt}ms): ${errMsg.length > 200 ? errMsg.slice(0, 200) + "..." : errMsg}`);
       throw error;
     }
   }
@@ -141,14 +141,8 @@ function runOneShot({ agent, spec, cwd, workspace, serverUrl, onEvent, launchId,
       lastActivity = Date.now();
     });
     child.stderr?.on("data", (data: Buffer) => {
-      const chunk = data.toString();
-      stderr += chunk;
+      stderr += data.toString();
       lastActivity = Date.now();
-      // Mirror stderr to daemon stdout so operator sees runtime warnings live
-      // (e.g. gemini "YOLO mode is enabled", "Skill conflict detected", trust
-      // errors). Trim trailing newlines to keep one log line per chunk.
-      const trimmed = chunk.replace(/\s+$/, "");
-      if (trimmed) console.error(`[${nowIso()}] ${tag} stderr: ${trimmed}`);
     });
     child.on("error", (error: Error) => {
       clearInterval(timer);
@@ -173,7 +167,25 @@ function runOneShot({ agent, spec, cwd, workspace, serverUrl, onEvent, launchId,
         code,
         signal
       });
-      if (code === 0) {
+      
+      let isSuccess = code === 0;
+      if (agent.runtime === "codex" && code !== 0) {
+        const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
+        for (const line of lines) {
+          try {
+            const event = JSON.parse(line) as {
+              msg?: { type?: string };
+              type?: string;
+            };
+            if (event.msg?.type === "agent_message" || event.type === "agent_message") {
+              isSuccess = true;
+              break;
+            }
+          } catch {}
+        }
+      }
+
+      if (isSuccess) {
         const reply = extractReply(agent.runtime, stdout);
         const failure = detectRuntimeFailure(agent.runtime, stdout, stderr, reply);
         if (failure) {
@@ -278,6 +290,14 @@ export function extractReply(runtime: string, stdout: string): string {
 }
 
 function extractRuntimeError(runtime: string, stdout: string, stderr: string): string {
+  if (runtime === "codex") {
+    // If we can extract a valid reply from stdout, ignore stderr warnings
+    const reply = extractReply(runtime, stdout);
+    if (reply.trim().length > 0) {
+      return "";
+    }
+  }
+
   const err = stderr.trim();
   if (err) return err;
   if (runtime !== "claude") return stdout.trim();
@@ -311,8 +331,16 @@ function extractRuntimeError(runtime: string, stdout: string, stderr: string): s
  */
 function detectRuntimeFailure(runtime: string, stdout: string, _stderr: string, reply: string): string | null {
   if (runtime === "codex") {
+    // If extractReply already got a valid non-error reply, it's a success.
+    // This handles both JSON-line output (app-server mode) and plain text
+    // (one-shot exec mode) — no need to re-scan stdout for agent_message.
+    const trimmed = reply.trim();
+    if (trimmed.length > 0 && !/(ERROR:|Error:|usage limit|rate limit)/i.test(trimmed)) {
+      return null;
+    }
+
+    // No valid reply — check for JSON error events in stdout
     const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
-    let sawAgentMessage = false;
     const errorLines: string[] = [];
     for (const line of lines) {
       try {
@@ -321,9 +349,6 @@ function detectRuntimeFailure(runtime: string, stdout: string, _stderr: string, 
           type?: string;
           message?: string;
         };
-        if (event.msg?.type === "agent_message" || event.type === "agent_message") {
-          sawAgentMessage = true;
-        }
         if (event.msg?.type === "error" && typeof event.msg.message === "string") {
           errorLines.push(event.msg.message);
         }
@@ -334,12 +359,10 @@ function detectRuntimeFailure(runtime: string, stdout: string, _stderr: string, 
         if (/^(ERROR:|Error:)/.test(line)) errorLines.push(line);
       }
     }
-    if (!sawAgentMessage) {
-      if (errorLines.length) return errorLines.join("\n");
-      const candidate = (reply || stdout).trim();
-      if (/(ERROR:|Error:|usage limit|rate limit)/i.test(candidate)) return candidate;
-      return candidate || "codex produced no agent_message";
-    }
+    if (errorLines.length) return errorLines.join("\n");
+    const candidate = trimmed || stdout.trim();
+    if (/(ERROR:|Error:|usage limit|rate limit)/i.test(candidate)) return candidate;
+    return "codex produced no agent_message: " + candidate;
   }
   return null;
 }
