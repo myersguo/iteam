@@ -82,7 +82,7 @@ const UrlChangeReporter = () => {
       window.parent.postMessage(
         {
           type: MESSAGE_TYPE,
-          source: 'iteam',
+          source: 'agent-toolkit',
           url: currentUrl,
           actualUrl: window.location.href,
           pathname: window.location.pathname,
