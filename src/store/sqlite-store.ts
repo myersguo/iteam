@@ -475,8 +475,8 @@ export class SqliteStore extends BaseStore {
           c.fingerprint?.arch ?? null,
           c.status,
           c.daemonVersion,
-          c.runtimes ? JSON.stringify(c.runtimes) : '[]',
-          c.agentIds ? JSON.stringify(c.agentIds) : '[]',
+          c.runtimes !== undefined ? JSON.stringify(c.runtimes) : '[]',
+          c.agentIds !== undefined ? JSON.stringify(c.agentIds) : '[]',
           c.connectionId ?? null,
           c.connectToken ?? null,
           c.createdAt,
@@ -526,7 +526,7 @@ export class SqliteStore extends BaseStore {
           a.workspacePath,
           a.createdAt,
           a.updatedAt,
-          a.env ? JSON.stringify(a.env) : '{}',
+          a.env !== undefined ? JSON.stringify(a.env) : '{}',
           a.lastStartedAt ?? null,
           a.lastRuntimeStatus ? JSON.stringify(a.lastRuntimeStatus) : null
         );
@@ -569,7 +569,7 @@ export class SqliteStore extends BaseStore {
           m.authorId,
           m.type,
           m.text,
-          m.mentions ? JSON.stringify(m.mentions) : '[]',
+          m.mentions !== undefined ? JSON.stringify(m.mentions) : '[]',
           m.createdAt,
           m.threadId ?? null,
           m.taskId ?? null
