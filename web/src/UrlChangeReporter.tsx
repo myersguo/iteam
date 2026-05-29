@@ -96,12 +96,12 @@ const UrlChangeReporter = () => {
     const originalPushState = window.history.pushState;
     const originalReplaceState = window.history.replaceState;
 
-    const patchedPushState: History['pushState'] = function pushState(...args) {
+    const patchedPushState: History['pushState'] = function pushState(this: History, ...args) {
       originalPushState.apply(this, args);
       report();
     };
 
-    const patchedReplaceState: History['replaceState'] = function replaceState(...args) {
+    const patchedReplaceState: History['replaceState'] = function replaceState(this: History, ...args) {
       originalReplaceState.apply(this, args);
       report();
     };
