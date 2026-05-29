@@ -446,6 +446,10 @@ Reply to the current chat message in the indicated reply target. Use the convers
 When another agent is mentioned, address them with their @handle, not their internal id. Ask at most one clear follow-up question.
 Your persistent workspace contains MEMORY.md. If this message depends on older context not shown below, use the local CLI: iteam-agent message read/search/check.
 
+**@Mention rules:**
+- Only @mention another teammate when you genuinely need their input. Do NOT @mention anyone just to acknowledge, confirm, or say you'll wait.
+- If asked to stop, pause, or wait — confirm briefly and STOP. Do not @mention anyone.
+
 Message source target: ${message.target}
 Reply target: ${replyTarget}
 Message author: ${author.name || message.authorId}${author.handle ? ` (@${author.handle})` : ""}

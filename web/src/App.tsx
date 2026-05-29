@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -68,6 +68,7 @@ interface Message {
   createdAt: string;
   taskId?: string;
   replyCount?: number;
+  depth?: number;
 }
 
 interface Task {
@@ -131,6 +132,16 @@ interface MentionMatch {
 // ---------- api ----------
 
 const api = {
+  async fetchMessages(channelTarget: string, before?: string, limit = 10): Promise<Message[]> {
+    const selectedChannel = resolveChannel(
+      await fetch("/api/channels").then(r => r.json()),
+      channelTarget
+    );
+    if (!selectedChannel) return [];
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (before) params.set("before", before);
+    return fetch(`/api/messages/channel/${encodeURIComponent(selectedChannel.id)}?${params}`).then(r => r.json());
+  },
   async getState(channelTarget = "#all"): Promise<AppState> {
     const [humans, agents, channels, tasks, computers] = await Promise.all([
       fetch("/api/humans").then(r => r.json()),
@@ -141,7 +152,7 @@ const api = {
     ]);
     const selectedChannel = resolveChannel(channels, channelTarget);
     const messages = selectedChannel
-      ? await fetch(`/api/messages/channel/${encodeURIComponent(selectedChannel.id)}?limit=50`).then(r => r.json())
+      ? await fetch(`/api/messages/channel/${encodeURIComponent(selectedChannel.id)}?limit=10`).then(r => r.json())
       : [];
     return { humans, agents, channels, messages, tasks, computers, events: [] };
   },
@@ -262,19 +273,29 @@ function App() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   async function refresh(channelTarget = channel) {
     setState(await api.getState(channelTarget));
+  }
+
+  // Debounced refresh for SSE events to avoid rapid duplicate requests
+  function debouncedRefresh(channelTarget = channel) {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = setTimeout(() => refresh(channelTarget), 200);
   }
 
   useEffect(() => {
     refresh(channel);
     const events = new EventSource("/api/events");
-    const refreshCurrentChannel = () => refresh(channel);
-    events.addEventListener("state:changed", refreshCurrentChannel);
-    events.addEventListener("agent:activity", refreshCurrentChannel);
-    events.addEventListener("agent:started", refreshCurrentChannel);
-    events.addEventListener("agent:stopped", refreshCurrentChannel);
-    return () => events.close();
+    events.addEventListener("state:changed", () => debouncedRefresh(channel));
+    events.addEventListener("agent:activity", () => debouncedRefresh(channel));
+    events.addEventListener("agent:started", () => debouncedRefresh(channel));
+    events.addEventListener("agent:stopped", () => debouncedRefresh(channel));
+    return () => {
+      events.close();
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    };
   }, [channel]);
 
   useEffect(() => {
@@ -923,8 +944,13 @@ function ChatView({
   setTab: (tab: "chat" | "tasks") => void;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const [mentionMatch, setMentionMatch] = useState<MentionMatch | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
+  const [olderMessages, setOlderMessages] = useState<Message[]>([]);
+  const [hasMore, setHasMore] = useState(true);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const oldestIdRef = useRef<string | null>(null);
   const mentionMembers = useMemo(() => getMentionMembers(state, channel), [state, channel]);
   const mentionOptions = useMemo(() => {
     if (!mentionMatch) return [];
@@ -935,6 +961,85 @@ function ChatView({
       )
       .slice(0, 8);
   }, [mentionMatch, mentionMembers]);
+
+  // Reset pagination when channel changes
+  useEffect(() => {
+    setOlderMessages([]);
+    setHasMore(true);
+    oldestIdRef.current = null;
+  }, [channel]);
+
+  const previousScrollHeightRef = useRef(0);
+  const previousScrollTopRef = useRef(0);
+
+  async function loadOlder() {
+    if (!hasMore || loadingOlder) return;
+    const cursor = oldestIdRef.current || (messages.length > 0 ? messages[0].id : null);
+    if (!cursor) { setHasMore(false); return; }
+    setLoadingOlder(true);
+
+    if (listRef.current) {
+      previousScrollHeightRef.current = listRef.current.scrollHeight;
+      previousScrollTopRef.current = listRef.current.scrollTop;
+    }
+
+    try {
+      const older = await api.fetchMessages(channel, cursor);
+      if (older.length === 0) {
+        setHasMore(false);
+      } else {
+        oldestIdRef.current = older[0].id;
+        setOlderMessages(prev => {
+          const existing = new Set(prev.map(m => m.id));
+          const unique = older.filter(m => !existing.has(m.id));
+          return [...unique, ...prev];
+        });
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoadingOlder(false);
+    }
+  }
+
+  // Keep a ref to loadOlder so the scroll handler always calls the latest version
+  const loadOlderRef = useRef(loadOlder);
+  loadOlderRef.current = loadOlder;
+
+  // Use IntersectionObserver on the top element to trigger load
+  const topObserverRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = topObserverRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      entries => {
+        if (entries[0].isIntersecting) {
+          loadOlderRef.current();
+        }
+      },
+      { root: listRef.current, rootMargin: "100px 0px 0px 0px" }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [tab]);
+
+  const allMessages = useMemo(() => {
+    const existing = new Set(messages.map(m => m.id));
+    const uniqueOlder = olderMessages.filter(m => !existing.has(m.id));
+    return [...uniqueOlder, ...messages];
+  }, [olderMessages, messages]);
+
+  // Restore scroll position after loading older messages
+  useLayoutEffect(() => {
+    if (listRef.current && previousScrollHeightRef.current > 0) {
+      const newScrollHeight = listRef.current.scrollHeight;
+      const heightDifference = newScrollHeight - previousScrollHeightRef.current;
+      if (heightDifference > 0) {
+        listRef.current.scrollTop = previousScrollTopRef.current + heightDifference;
+      }
+      previousScrollHeightRef.current = 0;
+    }
+  }, [allMessages]);
 
   function refreshMention(target: HTMLTextAreaElement | null = textareaRef.current) {
     if (!target) return;
@@ -1006,15 +1111,20 @@ function ChatView({
       </div>
       {tab === "chat" ? (
         <>
-          <div className="message-list">
-            {messages.length === 0 && (
+          <div className="message-list" ref={listRef}>
+            <div ref={topObserverRef} style={{ height: 1, flexShrink: 0 }} />
+            {loadingOlder && <div className="message-loading">Loading older messages...</div>}
+            {!hasMore && allMessages.length > 0 && (
+              <div className="message-loading">Beginning of channel</div>
+            )}
+            {allMessages.length === 0 && (
               <div className="message-empty">
                 <span className="brand-spike" aria-hidden />
                 <h3>Quiet here.</h3>
                 <p>Drop a thought, summon an agent with @, or kick off a task.</p>
               </div>
             )}
-            {messages.map(m => (
+            {allMessages.map(m => (
               <MessageRow key={m.id} message={m} state={state} openThread={openThread} />
             ))}
           </div>
@@ -1125,6 +1235,9 @@ function MessageRow({
       <div className="msg-body">
         <header>
           <strong>{author.name}</strong>
+          {message.depth !== undefined && message.depth > 0 && (
+            <span className="depth-badge" title={`第 ${message.depth + 1} 轮`}>R{message.depth + 1}</span>
+          )}
           <Tooltip label={new Date(message.createdAt).toLocaleString()}>
             <small>{new Date(message.createdAt).toLocaleTimeString()}</small>
           </Tooltip>

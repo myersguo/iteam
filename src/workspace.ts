@@ -239,6 +239,12 @@ Messages use this canonical shape:
 
 Reuse the exact target when replying. Mention teammates by their @handle, not internal ids.
 
+**@Mention rules — critical:**
+- Only @mention another teammate when you genuinely need their input to continue the work.
+- Do NOT @mention anyone when: acknowledging a request, confirming completion, saying you'll wait, or ending a discussion.
+- If someone asks you to stop, pause, or wait — just confirm and stop. Do not @mention anyone else.
+- A reply that ends with "waiting for @you" or similar does NOT need to @mention anyone.
+
 ## Work rules
 
 - Reply concisely but use the available history.

@@ -26,7 +26,7 @@ import type {
   Task
 } from "./types.js";
 
-const MAX_DELIVERY_DEPTH = 20;
+const MAX_DELIVERY_DEPTH = 5;
 const SUPPORTED_RUNTIMES = ["codex", "claude", "gemini", "trae"];
 
 /** A typed error so the HTTP layer can map domain failures to status codes. */
@@ -328,14 +328,15 @@ export class IteamCore {
     return paginateMessages(filtered, { limit, before: query.before ?? null });
   }
 
-  listMessagesByChannel(query: ChannelMessageQuery): Array<Message & { replyCount: number }> {
+  listMessagesByChannel(query: ChannelMessageQuery): Array<Message & { replyCount: number; depth?: number }> {
     const snapshot = this.store.snapshot();
     const channel = findChannel(snapshot, query.channelId);
     if (!channel) throw new HttpError(404, "channel not found");
     const limit = parseMessageLimit(query.limit);
-    const messages = (snapshot.messages || []).filter(message => message.target === channel.target);
+    const messages = (snapshot.messages || []).filter(message => message.target === channel.target && !message.threadId);
     const paginated = paginateMessages(messages, { limit, before: query.before ?? null });
-    return withReplyCounts(snapshot.messages || [], paginated);
+    const withReplies = withReplyCounts(snapshot.messages || [], paginated);
+    return withDeliveryDepth(snapshot.deliveries || [], withReplies);
   }
 
   // ---------------------------------------------------------------------------
@@ -1281,9 +1282,9 @@ function uniqueIds(ids: string[]): string[] {
 }
 
 function parseMessageLimit(value: number | string | null | undefined): number {
-  if (value === null || value === undefined || value === "") return 50;
+  if (value === null || value === undefined || value === "") return 10;
   const numeric = typeof value === "number" ? value : Number(value);
-  return Math.max(1, Math.min(1000, numeric || 50));
+  return Math.max(1, Math.min(1000, numeric || 10));
 }
 
 function paginateMessages(messages: Message[], options: { limit: number; before?: string | null }): Message[] {
@@ -1311,6 +1312,22 @@ function withReplyCounts(allMessages: Message[], messages: Message[]): Array<Mes
   return messages.map(message => ({
     ...message,
     replyCount: counts.get(message.id) || 0
+  }));
+}
+
+function withDeliveryDepth(deliveries: Delivery[], messages: Array<Message & { replyCount: number }>): Array<Message & { replyCount: number; depth?: number }> {
+  const depthByMessageId = new Map<string, number>();
+  for (const d of deliveries) {
+    if (d.messageId && d.depth !== undefined && d.depth !== null) {
+      const existing = depthByMessageId.get(d.messageId);
+      if (existing === undefined || d.depth < existing) {
+        depthByMessageId.set(d.messageId, d.depth);
+      }
+    }
+  }
+  return messages.map(message => ({
+    ...message,
+    depth: depthByMessageId.get(message.id)
   }));
 }
 
