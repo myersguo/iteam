@@ -944,7 +944,7 @@ function ChatView({
   setTab: (tab: "chat" | "tasks") => void;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const listRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLElement>(null);
   const [mentionMatch, setMentionMatch] = useState<MentionMatch | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [olderMessages, setOlderMessages] = useState<Message[]>([]);
@@ -1095,7 +1095,7 @@ function ChatView({
   }
 
   return (
-    <section className="pane chat-pane">
+    <section className="pane chat-pane" ref={listRef}>
       <Topbar
         eyebrow={channel.startsWith("dm:") ? "Direct message" : "Channel"}
         title={formatChatTitle(state, channel)}
@@ -1111,7 +1111,7 @@ function ChatView({
       </div>
       {tab === "chat" ? (
         <>
-          <div className="message-list" ref={listRef}>
+          <div className="message-list">
             <div ref={topObserverRef} style={{ height: 1, flexShrink: 0 }} />
             {loadingOlder && <div className="message-loading">Loading older messages...</div>}
             {!hasMore && allMessages.length > 0 && (
