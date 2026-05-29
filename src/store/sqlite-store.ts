@@ -469,15 +469,15 @@ export class SqliteStore extends BaseStore {
         stmt.run(
           c.id,
           c.name,
-          c.fingerprint.id,
-          c.fingerprint.hostname,
-          c.fingerprint.os,
-          c.fingerprint.arch,
+          c.fingerprint?.id ?? null,
+          c.fingerprint?.hostname ?? null,
+          c.fingerprint?.os ?? null,
+          c.fingerprint?.arch ?? null,
           c.status,
           c.daemonVersion,
-          JSON.stringify(c.runtimes || []),
-          JSON.stringify(c.agentIds || []),
-          c.connectionId,
+          c.runtimes ? JSON.stringify(c.runtimes) : '[]',
+          c.agentIds ? JSON.stringify(c.agentIds) : '[]',
+          c.connectionId ?? null,
           c.connectToken ?? null,
           c.createdAt,
           c.firstConnectedAt ?? null,
@@ -497,7 +497,7 @@ export class SqliteStore extends BaseStore {
           p.token,
           p.status,
           p.createdAt,
-          p.connectedComputerId,
+          p.connectedComputerId ?? null,
           p.label ?? null,
           p.connectedAt ?? null
         );
@@ -516,17 +516,17 @@ export class SqliteStore extends BaseStore {
           a.handle,
           a.description,
           a.runtime,
-          a.model,
+          a.model ?? null,
           a.reasoning ?? null,
           a.computerId,
           a.status,
           a.desiredStatus,
-          a.launchId,
-          a.pid,
+          a.launchId ?? null,
+          a.pid ?? null,
           a.workspacePath,
           a.createdAt,
           a.updatedAt,
-          JSON.stringify(a.env || {}),
+          a.env ? JSON.stringify(a.env) : '{}',
           a.lastStartedAt ?? null,
           a.lastRuntimeStatus ? JSON.stringify(a.lastRuntimeStatus) : null
         );
@@ -569,9 +569,9 @@ export class SqliteStore extends BaseStore {
           m.authorId,
           m.type,
           m.text,
-          JSON.stringify(m.mentions || []),
+          m.mentions ? JSON.stringify(m.mentions) : '[]',
           m.createdAt,
-          m.threadId,
+          m.threadId ?? null,
           m.taskId ?? null
         );
       }
@@ -588,12 +588,12 @@ export class SqliteStore extends BaseStore {
           t.number,
           t.target,
           t.title,
-          t.description,
+          t.description ?? "",
           t.status,
-          t.assigneeId,
+          t.assigneeId ?? null,
           t.createdBy,
           t.messageId,
-          t.threadTarget,
+          t.threadTarget ?? null,
           t.createdAt,
           t.updatedAt
         );
@@ -608,15 +608,15 @@ export class SqliteStore extends BaseStore {
       for (const d of state.deliveries) {
         stmt.run(
           d.id,
-          d.messageId,
-          d.rootMessageId,
-          d.parentDeliveryId,
-          d.depth,
+          d.messageId ?? null,
+          d.rootMessageId ?? null,
+          d.parentDeliveryId ?? null,
+          d.depth ?? 0,
           d.agentId,
           d.computerId,
           d.target,
           d.status,
-          d.attempts,
+          d.attempts ?? 0,
           d.createdAt,
           d.updatedAt,
           d.error ?? null
@@ -630,7 +630,7 @@ export class SqliteStore extends BaseStore {
         "INSERT INTO iteam_events (id, type, payload, created_at) VALUES (?, ?, ?, ?)"
       );
       for (const e of state.events) {
-        stmt.run(e.id, e.type, JSON.stringify(e.payload ?? null), e.createdAt);
+        stmt.run(e.id, e.type, e.payload !== undefined ? JSON.stringify(e.payload) : null, e.createdAt);
       }
     }
   }
