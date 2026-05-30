@@ -203,7 +203,7 @@ function App() {
   const [createAgentOpen, setCreateAgentOpen] = useState(false);
   const [createChannelOpen, setCreateChannelOpen] = useState(false);
   const [renameChannel, setRenameChannel] = useState<Channel | null>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [channelsCollapsed, setChannelsCollapsed] = useState(false);
   const [threadRootId, setThreadRootIdState] = useState<string | null>(initialRoute.threadId);
   const [threadMessages, setThreadMessages] = useState<Message[]>([]);
