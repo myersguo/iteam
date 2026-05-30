@@ -21,6 +21,12 @@ function getParentOrigin() {
 
 function buildParentCompatibleUrl() {
   const { origin, pathname, search, hash } = window.location;
+  
+  // If we already use hash routing, we don't need to append another hash
+  if (pathname === '/' && hash.startsWith('#/')) {
+    return `${origin}/${hash}${search}`;
+  }
+  
   const normalizedPath = pathname === '/' ? '/' : pathname.replace(/\/+$/, '');
   const hashPath = normalizedPath.startsWith('/') ? normalizedPath : `/${normalizedPath}`;
   return `${origin}/#${hashPath}${search}${hash}`;
@@ -82,7 +88,7 @@ const UrlChangeReporter = () => {
       window.parent.postMessage(
         {
           type: MESSAGE_TYPE,
-          source: 'agent-toolkit',
+          source: 'iteam',
           url: currentUrl,
           actualUrl: window.location.href,
           pathname: window.location.pathname,
