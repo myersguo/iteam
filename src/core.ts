@@ -26,7 +26,7 @@ import type {
   Task
 } from "./types.js";
 
-const MAX_DELIVERY_DEPTH = 5;
+const MAX_DELIVERY_DEPTH = 10;
 const SUPPORTED_RUNTIMES = ["codex", "claude", "gemini", "trae"];
 
 /** A typed error so the HTTP layer can map domain failures to status codes. */
