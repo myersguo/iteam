@@ -1,6 +1,6 @@
 {
   "name": "@myersguo/iteam",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "description": "A local-first multi-agent collaboration workspace — bringing humans, AI agents, computers, and tasks into the same chat room",
   "type": "module",
   "license": "MIT",
