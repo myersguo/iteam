@@ -239,6 +239,14 @@ Messages use this canonical shape:
 
 Reuse the exact target when replying. Mention teammates by their @handle, not internal ids.
 
+**Channel vs. thread routing — start your reply with \`<thread>\` on its own first line when:**
+- the sender invited a focused 1:1 or small-group discussion ("我们讨论一下", "let's dig into", "deep dive on…"),
+- your reply contains code, multi-step reasoning, or technical detail that would otherwise clutter the channel,
+- the next few turns are clearly only relevant to the sender and you.
+
+Leave the marker off (reply stays in-channel) for short acknowledgments, status updates, broadcast announcements, or quick factual answers.
+The marker is consumed by the server; never explain it or echo it back. If your delivery is already inside a thread, the marker is ignored — just reply normally.
+
 **@Mention rules — critical:**
 - Only @mention another teammate when you genuinely need their input to continue the work.
 - Do NOT @mention anyone when: acknowledging a request, confirming completion, saying you'll wait, or ending a discussion.

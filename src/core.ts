@@ -890,15 +890,28 @@ export class IteamCore {
       delivery.error = input.error || null;
       delivery.updatedAt = now;
       if (input.ok && input.text) {
+        // Agents may prefix their reply with `<thread>` on its own first line to
+        // signal that the conversation should move into a thread (see the
+        // routing rule in workspace.ts:buildSystemPrompt). Strip the marker and
+        // re-anchor the reply onto the delivery's root message — but only when
+        // we're not already inside a thread, otherwise the marker is a no-op.
+        const { text: replyText, threaded } = stripThreadMarker(input.text);
+        const alreadyInThread = threadRootFromTarget(delivery.target) !== null;
+        const useThread = threaded && !alreadyInThread;
+        const threadAnchor = delivery.rootMessageId || delivery.messageId;
+        const replyTarget = useThread ? `${delivery.target}:${threadAnchor}` : delivery.target;
+        const replyThreadId = useThread
+          ? threadAnchor
+          : (input.threadId || threadRootFromTarget(delivery.target));
         const created: Message = {
           id: this.newId("msg"),
-          target: delivery.target,
+          target: replyTarget,
           authorId: delivery.agentId,
           type: "agent",
-          text: input.text,
-          mentions: parseMentions(input.text, s),
+          text: replyText,
+          mentions: parseMentions(replyText, s),
           createdAt: now,
-          threadId: input.threadId || threadRootFromTarget(delivery.target)
+          threadId: replyThreadId
         };
         s.messages.push(created);
         // Same DM safeguard as user-sent messages: an agent reply in a DM may
@@ -1250,6 +1263,14 @@ function threadRootFromTarget(target: string): string | null {
   const suffix = text.slice(separator + 1);
   if (!parent || parent === "dm") return null;
   return suffix.startsWith("msg_") ? suffix : null;
+}
+
+const THREAD_MARKER = /^\s*<thread>\s*(\r?\n)?/i;
+
+function stripThreadMarker(text: string): { text: string; threaded: boolean } {
+  const match = THREAD_MARKER.exec(text);
+  if (!match) return { text, threaded: false };
+  return { text: text.slice(match[0].length), threaded: true };
 }
 
 function parentTargetFromThread(target: string): string {

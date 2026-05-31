@@ -175,6 +175,47 @@ try {
   await patch(port, `/api/tasks/${task.id}`, { status: "in_review" });
   const tasks = await get(port, "/api/tasks");
   if (!tasks.some((item: any) => item.id === task.id && item.status === "in_review")) throw new Error("task status was not updated");
+
+  // <thread> marker routes an otherwise-channel-level agent reply into a thread
+  // anchored on the human's original mention. Verifies stripThreadMarker +
+  // applyDeliveryResult routing in core.ts.
+  const threadChannel = await post(port, "/api/channels", { name: "thread-marker", description: "" });
+  const computerAuth = { "x-iteam-connection": `${computerId}:${connectToken}` };
+  const deepMention = await post(port, "/api/messages", {
+    target: threadChannel.target,
+    text: `@${agent.handle} deep dive`,
+    authorId: "human-local"
+  });
+  const deepDelivery = (await get(port, "/api/deliveries"))
+    .find((d: any) => d.messageId === deepMention.id && d.agentId === agent.id);
+  if (!deepDelivery) throw new Error("channel mention did not create delivery");
+  await post(port, `/api/deliveries/${encodeURIComponent(deepDelivery.id)}/result`,
+    { ok: true, text: "<thread>\nlong-form reply" }, computerAuth);
+  const threadTarget = `${threadChannel.target}:${deepMention.id}`;
+  const threadReplies = await get(port, `/api/messages?target=${encodeURIComponent(threadTarget)}&limit=50`);
+  const threadReply = threadReplies.find((m: any) => m.authorId === agent.id);
+  if (!threadReply) throw new Error("agent reply with marker did not land in thread");
+  if (threadReply.threadId !== deepMention.id) throw new Error("thread reply threadId must be original mention id");
+  if (threadReply.text.includes("<thread>")) throw new Error("thread marker was not stripped from agent reply");
+  if (!threadReply.text.includes("long-form reply")) throw new Error("agent reply text was truncated");
+
+  // No marker → reply stays at channel level.
+  const flatMention = await post(port, "/api/messages", {
+    target: threadChannel.target,
+    text: `@${agent.handle} quick ack`,
+    authorId: "human-local"
+  });
+  const flatDelivery = (await get(port, "/api/deliveries"))
+    .find((d: any) => d.messageId === flatMention.id && d.agentId === agent.id);
+  if (!flatDelivery) throw new Error("second mention did not create delivery");
+  await post(port, `/api/deliveries/${encodeURIComponent(flatDelivery.id)}/result`,
+    { ok: true, text: "ack" }, computerAuth);
+  const channelMsgs = await get(port, `/api/messages/channel/${encodeURIComponent(threadChannel.id)}?limit=50`);
+  if (!channelMsgs.some((m: any) =>
+    m.authorId === agent.id && m.target === threadChannel.target && m.text === "ack" && !m.threadId)) {
+    throw new Error("agent reply without marker should stay at channel level");
+  }
+
   console.log("smoke ok");
 } finally {
   daemon.kill("SIGTERM");
