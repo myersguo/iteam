@@ -387,9 +387,15 @@ function buildAcpSpec(agent: Agent, workspace: AgentWorkspaceLayout): AcpRuntime
       ]
     };
   }
+  if (agent.runtime === "gemini") {
+    const args = ["--acp", "--yolo", "--skip-trust", "--include-directories", workspace.dir];
+    if (agent.model) args.unshift("-m", agent.model);
+    return { command: "gemini", args };
+  }
   // Codex's `app-server` speaks a proprietary dialect (Initialize/TurnStart/
   // AgentMessageDelta), not ACP — see `codex app-server generate-json-schema`.
-  // It stays on OneshotDriver until we write a dedicated CodexAppServerDriver.
+  // Claude has its own stream-json wire format and lives in ClaudeDriver.
+  // AcpDriver is currently only used for trae and gemini.
   throw new Error(`acp driver does not support runtime: ${agent.runtime}`);
 }
 
@@ -404,8 +410,9 @@ function buildMcpServers(workspace: AgentWorkspaceLayout): AcpMcpServer[] {
   return [
     {
       name: "chat",
-      command: "npx",
-      args: ["tsx", ...workspace.bridgeArgs]
+      command: workspace.bridgeCommand,
+      args: workspace.bridgeArgs,
+      env: []
     }
   ];
 }

@@ -2,8 +2,8 @@
 //
 // This is the "none" busy-delivery mode in https://blog.openviking.ai/post/agent-runtime/?lang=zh:
 // the process is one-shot, queue messages while it runs, restart with the
-// next prompt afterwards. It covers codex/claude/gemini/trae's `-p` paths
-// today; long-lived ACP/stream-json drivers will replace some of these later.
+// next prompt afterwards. It covers codex/trae's `-p` paths today;
+// long-lived ACP/stream-json drivers will replace some of these later.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { nowIso } from "../lib.js";
@@ -214,19 +214,6 @@ function buildOneShotSpec(agent: Agent, prompt: string): RuntimeSpec {
     codexArgs.push(prompt);
     return { command: "codex", args: codexArgs };
   }
-  if (agent.runtime === "claude") {
-    const claudeArgs = ["-p", "--permission-mode", "bypassPermissions"];
-    if (agent.model) claudeArgs.push("--model", agent.model);
-    claudeArgs.push(prompt);
-    return { command: "claude", args: claudeArgs };
-  }
-  if (agent.runtime === "gemini") {
-    // `--yolo` auto-approves tool actions; `--approval-mode yolo` is the
-    // 0.2+ alias. `--skip-trust` bypasses the trusted-folder gate for headless
-    // use without depending on `GEMINI_CLI_TRUST_WORKSPACE` env propagation.
-    // See https://geminicli.com/docs/cli/trusted-folders/
-    return { command: "gemini", args: ["--yolo", "--skip-trust", "-p", prompt] };
-  }
   if (agent.runtime === "trae") {
     // One-shot via `traecli -p <prompt>` with JSON output and YOLO mode.
     const timeoutMs = oneshotTimeoutMs("trae");
@@ -300,27 +287,7 @@ function extractRuntimeError(runtime: string, stdout: string, stderr: string): s
 
   const err = stderr.trim();
   if (err) return err;
-  if (runtime !== "claude") return stdout.trim();
-  const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
-  const errors: string[] = [];
-  for (const line of lines) {
-    try {
-      const event = JSON.parse(line) as {
-        error?: string;
-        result?: string;
-        message?: { content?: Array<{ text?: string }> };
-      };
-      if (event.error) errors.push(event.error);
-      if (event.result) errors.push(event.result);
-      const content = event.message?.content || [];
-      for (const block of content) {
-        if (block.text) errors.push(block.text);
-      }
-    } catch {
-      errors.push(line);
-    }
-  }
-  return errors.at(-1) || stdout.trim();
+  return stdout.trim();
 }
 
 /**

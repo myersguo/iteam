@@ -8,6 +8,7 @@
 import type { AgentRuntime } from "../types.js";
 import type { AgentDriver, DriverCapabilities } from "./driver.js";
 import { AcpDriver, type AcpDriverOptions } from "./acp-driver.js";
+import { ClaudeDriver, type ClaudeDriverOptions } from "./claude-driver.js";
 import { CodexDriver, type CodexDriverOptions } from "./codex-driver.js";
 import { OneshotDriver, type OneshotDriverOptions } from "./oneshot-driver.js";
 
@@ -40,12 +41,12 @@ const RUNTIME_TABLE: Record<string, RuntimeDescriptor> = {
     factory: (runtime, ctx) => new CodexDriver(runtime, ctx as CodexDriverOptions)
   },
   claude: {
-    capabilities: { lifecycle: "ephemeral", inFlightWake: "spawn_new", supportsResume: false },
-    factory: (runtime, ctx) => new OneshotDriver(runtime, ctx as OneshotDriverOptions)
+    capabilities: { lifecycle: "persistent", inFlightWake: "queue", supportsResume: true },
+    factory: (runtime, ctx) => new ClaudeDriver(runtime, ctx as ClaudeDriverOptions)
   },
   gemini: {
-    capabilities: { lifecycle: "ephemeral", inFlightWake: "spawn_new", supportsResume: false },
-    factory: (runtime, ctx) => new OneshotDriver(runtime, ctx as OneshotDriverOptions)
+    capabilities: { lifecycle: "persistent", inFlightWake: "direct", supportsResume: true },
+    factory: (runtime, ctx) => new AcpDriver(runtime, ctx as AcpDriverOptions)
   }
 };
 
