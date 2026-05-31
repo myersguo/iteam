@@ -98,26 +98,54 @@ server.registerTool("iteam_message_send", {
   return textResult(`sent ${message.id} to ${target}`);
 });
 
-await report("bridge_started", {});
+// Don't block MCP handshake on the start-up phone-home. If the daemon is
+// unreachable, awaiting this would deadlock `server.connect()` and the
+// ACP host would see no MCP tools at all.
+void report("bridge_started", {}).catch(() => {});
 await server.connect(new StdioServerTransport());
 
+// State fan-out (3 endpoints) is expensive on the server side — every
+// `core.snapshot()` does a full `JSON.parse(JSON.stringify(state))` deep
+// clone (store/base.ts). A single agent turn often calls multiple tools
+// in quick succession; cache the fan-out for a short window and dedupe
+// concurrent misses through a shared inflight promise.
+const STATE_TTL_MS = 1500;
+let stateCache: { value: State; expiresAt: number } | null = null;
+let stateInflight: Promise<State> | null = null;
+
 async function stateSnapshot(): Promise<State> {
-  const [agents, humans, channels] = await Promise.all([
-    requestJson<State["agents"]>(`${serverUrl}/api/agents`),
-    requestJson<State["humans"]>(`${serverUrl}/api/humans`),
-    requestJson<State["channels"]>(`${serverUrl}/api/channels`)
-  ]);
-  return { agents, humans, channels, messages: [] } as unknown as State;
+  const now = Date.now();
+  if (stateCache && stateCache.expiresAt > now) return stateCache.value;
+  if (stateInflight) return stateInflight;
+  const job = (async () => {
+    const [agents, humans, channels] = await Promise.all([
+      requestJson<State["agents"]>(`${serverUrl}/api/agents`),
+      requestJson<State["humans"]>(`${serverUrl}/api/humans`),
+      requestJson<State["channels"]>(`${serverUrl}/api/channels`)
+    ]);
+    const value = { agents, humans, channels, messages: [] } as unknown as State;
+    stateCache = { value, expiresAt: Date.now() + STATE_TTL_MS };
+    return value;
+  })();
+  stateInflight = job;
+  try {
+    return await job;
+  } finally {
+    if (stateInflight === job) stateInflight = null;
+  }
+}
+
+function messagesUrl(state: State, target: string, limit: number, around?: string): string {
+  const before = around ? `&before=${encodeURIComponent(around)}` : "";
+  const channel = state.channels.find(channel => channel.id === target || channel.target === target);
+  if (channel) {
+    return `${serverUrl}/api/messages/channel/${encodeURIComponent(channel.id)}?limit=${limit}${before}`;
+  }
+  return `${serverUrl}/api/messages?target=${encodeURIComponent(target)}&limit=${limit}${before}`;
 }
 
 async function fetchMessages(state: State, target: string, limit: number, around?: string): Promise<Message[]> {
-  const channel = state.channels.find(channel => channel.id === target || channel.target === target);
-  if (channel) {
-    const before = around ? `&before=${encodeURIComponent(around)}` : "";
-    return requestJson<Message[]>(`${serverUrl}/api/messages/channel/${encodeURIComponent(channel.id)}?limit=${limit}${before}`);
-  }
-  const before = around ? `&before=${encodeURIComponent(around)}` : "";
-  return requestJson<Message[]>(`${serverUrl}/api/messages?target=${encodeURIComponent(target)}&limit=${limit}${before}`);
+  return requestJson<Message[]>(messagesUrl(state, target, limit, around));
 }
 
 function formatServerInfo(state: State): string {
@@ -158,11 +186,10 @@ function readArg(name: string, fallback: string | undefined = undefined): string
   return index === -1 ? fallback : process.argv[index + 1];
 }
 
-// Watchdog: exit if the parent process closes our stdin (e.g. traecli exited).
-// This prevents orphan chat-bridge processes from lingering in the background.
-process.stdin.on("close", () => {
-  process.exit(0);
-});
-process.stdin.on("end", () => {
+// Watchdog: exit if the parent closes our stdin (e.g. the ACP host process
+// died). Prevents orphan chat-bridge processes from lingering. `close` is
+// emitted after `end`, so a single listener covers both EOF and transport
+// teardown.
+process.stdin.once("close", () => {
   process.exit(0);
 });
