@@ -326,6 +326,11 @@ function App() {
     setThreadMessages(messages);
   }
 
+  // Depend on `state` so the open thread re-fetches whenever the SSE-driven
+  // channel refresh produces a new state. Thread replies live under a
+  // different target than the parent channel and `listMessagesByChannel`
+  // filters them out (`!message.threadId`), so they never arrive via the
+  // channel-level refresh on their own.
   useEffect(() => {
     if (!threadTarget) {
       setThreadMessages([]);
@@ -340,7 +345,7 @@ function App() {
     return () => {
       alive = false;
     };
-  }, [threadTarget]);
+  }, [threadTarget, state]);
 
   async function sendMessage(mentions: any[] = []) {
     if (!message.trim()) return;
@@ -366,12 +371,22 @@ function App() {
 
   async function sendThreadMessage(target: string, text: string, mentions: any[] = []) {
     if (!target || !text.trim()) return;
+    // Threads continue a conversation with a specific agent. Prefer the
+    // thread root's author when it's an agent; otherwise fall back to the
+    // sidebar default. Without this, an un-@mentioned reply in a thread
+    // rooted by agent A would still get delivered to whichever agent the
+    // sidebar happens to have selected.
+    const rootAuthorIsAgent =
+      threadRoot && state?.agents.some(a => a.id === threadRoot.authorId);
+    const threadDefaultAgentId = rootAuthorIsAgent
+      ? threadRoot!.authorId
+      : selectedAgentId || null;
     await api.post("/api/messages", {
       target,
       text,
       authorId: "human-local",
       mentions,
-      defaultAgentId: selectedAgentId || null
+      defaultAgentId: threadDefaultAgentId
     });
     await loadThreadMessages(target);
     refresh(channel);
