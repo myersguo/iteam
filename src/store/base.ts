@@ -7,6 +7,7 @@ import type {
   Computer,
   Delivery,
   Message,
+  ScheduledTask,
   State,
   StoreEvent,
   Task
@@ -45,6 +46,7 @@ export function initialState(): State {
     messages: [],
     deliveries: [],
     tasks: [],
+    scheduledTasks: [],
     events: []
   };
 }
@@ -105,6 +107,17 @@ export function sanitizeState(state: State): State {
     }
     return normalized;
   });
+  state.scheduledTasks = (state.scheduledTasks || []).map((task: ScheduledTask) => ({
+    ...task,
+    intervalMs: Number(task.intervalMs) || 10 * 60 * 1000,
+    status: task.status || "active",
+    runCount: Number(task.runCount) || 0,
+    lastRunAt: task.lastRunAt ?? null,
+    lastMessageId: task.lastMessageId ?? null,
+    createdBy: task.createdBy || "human-local",
+    createdAt: task.createdAt || nowIso(),
+    updatedAt: task.updatedAt || nowIso()
+  }));
   state.deliveries = (state.deliveries || []).map((delivery: Delivery) => ({
     ...delivery,
     rootMessageId: delivery.rootMessageId || delivery.messageId,

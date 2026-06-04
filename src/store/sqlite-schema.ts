@@ -102,6 +102,21 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS iteam_scheduled_tasks (
+    id              TEXT NOT NULL PRIMARY KEY,
+    target          TEXT NOT NULL,
+    agent_id        TEXT NOT NULL,
+    prompt          TEXT NOT NULL,
+    interval_ms     INTEGER NOT NULL,
+    status          TEXT NOT NULL,
+    next_run_at     TEXT NOT NULL,
+    last_run_at     TEXT,
+    last_message_id TEXT,
+    run_count       INTEGER NOT NULL DEFAULT 0,
+    created_by      TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS iteam_deliveries (
     id                 TEXT NOT NULL PRIMARY KEY,
     message_id         TEXT NOT NULL,
@@ -140,6 +155,8 @@ export const SQLITE_INDEXES: ReadonlyArray<string> = [
   "CREATE INDEX IF NOT EXISTS idx_tasks_target_status ON iteam_tasks(target, status)",
   "CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON iteam_tasks(assignee_id)",
   "CREATE INDEX IF NOT EXISTS idx_tasks_message ON iteam_tasks(message_id)",
+  "CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_due ON iteam_scheduled_tasks(status, next_run_at)",
+  "CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_agent ON iteam_scheduled_tasks(agent_id)",
   "CREATE INDEX IF NOT EXISTS idx_deliveries_status_computer ON iteam_deliveries(status, computer_id)",
   "CREATE INDEX IF NOT EXISTS idx_deliveries_agent ON iteam_deliveries(agent_id)",
   "CREATE INDEX IF NOT EXISTS idx_deliveries_message ON iteam_deliveries(message_id)",

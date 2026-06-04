@@ -9,6 +9,7 @@ import type {
   Message,
   PendingComputerConnection,
   RuntimeInfo,
+  ScheduledTask,
   State,
   StoreEvent,
   Task
@@ -262,6 +263,22 @@ export class MysqlStore extends BaseStore {
       error: string | null;
     }>>("SELECT * FROM iteam_deliveries ORDER BY created_at ASC");
 
+    const [scheduledTaskRows] = await this.pool.query<Array<{
+      id: string;
+      target: string;
+      agent_id: string;
+      prompt: string;
+      interval_ms: number;
+      status: string;
+      next_run_at: string;
+      last_run_at: string | null;
+      last_message_id: string | null;
+      run_count: number;
+      created_by: string;
+      created_at: string;
+      updated_at: string;
+    }>>("SELECT * FROM iteam_scheduled_tasks ORDER BY created_at ASC");
+
     const [eventRows] = await this.pool.query<Array<{
       id: string;
       type: string;
@@ -389,6 +406,22 @@ export class MysqlStore extends BaseStore {
       error: row.error
     }));
 
+    const scheduledTasks: ScheduledTask[] = scheduledTaskRows.map(row => ({
+      id: row.id,
+      target: row.target,
+      agentId: row.agent_id,
+      prompt: row.prompt,
+      intervalMs: row.interval_ms,
+      status: row.status,
+      nextRunAt: row.next_run_at,
+      lastRunAt: row.last_run_at,
+      lastMessageId: row.last_message_id,
+      runCount: row.run_count,
+      createdBy: row.created_by,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
+
     const events: StoreEvent[] = eventRows.map(row => ({
       id: row.id,
       type: row.type,
@@ -407,6 +440,7 @@ export class MysqlStore extends BaseStore {
       messages,
       deliveries,
       tasks,
+      scheduledTasks,
       events
     };
   }
@@ -602,6 +636,30 @@ export class MysqlStore extends BaseStore {
               d.createdAt,
               d.updatedAt,
               d.error ?? null
+            ])
+          ]
+        );
+      }
+
+      await conn.query("DELETE FROM iteam_scheduled_tasks");
+      if (state.scheduledTasks.length) {
+        await conn.query(
+          "INSERT INTO iteam_scheduled_tasks (id, target, agent_id, prompt, interval_ms, status, next_run_at, last_run_at, last_message_id, run_count, created_by, created_at, updated_at) VALUES ?",
+          [
+            state.scheduledTasks.map(task => [
+              task.id,
+              task.target,
+              task.agentId,
+              task.prompt,
+              task.intervalMs,
+              task.status,
+              task.nextRunAt,
+              task.lastRunAt ?? null,
+              task.lastMessageId ?? null,
+              task.runCount ?? 0,
+              task.createdBy,
+              task.createdAt,
+              task.updatedAt
             ])
           ]
         );

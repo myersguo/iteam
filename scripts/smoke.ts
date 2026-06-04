@@ -93,6 +93,7 @@ try {
   await post(port, `/api/agents/${encodeURIComponent(agent.id)}/runtime-status`, {
     status: "online"
   }, { "x-iteam-connection": `${computerId}:${connectToken}` });
+  const computerAuth = { "x-iteam-connection": `${computerId}:${connectToken}` };
   // Phase 4: SSE push channel — open the stream and verify a delivery push
   // arrives in real time when a new mention is created.
   const sse = await openSse(port, computerId, connectToken);
@@ -103,6 +104,81 @@ try {
     const noAuthSse = await fetch(`http://127.0.0.1:${port}/api/computers/${encodeURIComponent(computerId)}/stream`);
     if (noAuthSse.status !== 401) throw new Error(`SSE without auth should be 401, got ${noAuthSse.status}`);
     await noAuthSse.body?.cancel();
+    const naturalScheduledMessage = await post(port, "/api/messages", {
+      target: dm.target,
+      text: `@${agent.handle} 每隔 10 分钟汇报交易进度，包括现金和持仓。`,
+      authorId: "human-local"
+    });
+    const naturalMentionDelivery = await sse.waitFor("delivery", 2_000);
+    if (!naturalMentionDelivery || naturalMentionDelivery.messageId !== naturalScheduledMessage.id) {
+      throw new Error("natural scheduled request did not deliver original mention");
+    }
+    const beforeDirectiveSchedules = await get(port, "/api/scheduled-tasks");
+    if (beforeDirectiveSchedules.length !== 0) {
+      throw new Error("schedule should not be created before the agent returns a directive");
+    }
+    await post(port, `/api/deliveries/${encodeURIComponent(naturalMentionDelivery.id)}/result`, {
+      ok: true,
+      text: '收到，我会按计划汇报。<iteam_schedule>{"create":true,"intervalMs":600000,"prompt":"汇报交易进度，包括现金和持仓。"}</iteam_schedule>'
+    }, computerAuth);
+    const naturalSchedules = await get(port, "/api/scheduled-tasks");
+    const naturalSchedule = naturalSchedules.find((item: any) =>
+      item.agentId === agent.id &&
+      item.target === dm.target &&
+      item.intervalMs === 600_000 &&
+      String(item.prompt || "").includes("交易进度")
+    );
+    if (!naturalSchedule) throw new Error("natural language scheduled request did not create a scheduled task");
+    const naturalReplies = await get(port, `/api/messages/channel/${encodeURIComponent(dm.id)}?limit=20`);
+    if (naturalReplies.some((message: any) => String(message.text || "").includes("iteam_schedule"))) {
+      throw new Error("schedule directive should be stripped from visible agent replies");
+    }
+    const directAgentSchedule = await post(port, "/api/messages", {
+      target: dm.target,
+      authorId: agent.id,
+      text: '直接发送也应创建。<iteam_schedule>{"create":true,"intervalMs":120000,"prompt":"direct agent schedule"}</iteam_schedule>'
+    });
+    if (String(directAgentSchedule.text || "").includes("iteam_schedule")) {
+      throw new Error("direct agent message should strip schedule directive");
+    }
+    const directSchedules = await get(port, "/api/scheduled-tasks");
+    if (!directSchedules.some((item: any) => item.agentId === agent.id && item.intervalMs === 120_000 && item.prompt === "direct agent schedule")) {
+      throw new Error("direct agent message with schedule directive did not create a scheduled task");
+    }
+    // Scheduled tasks are server-owned timers: when due, the backend creates
+    // a system message that mentions the agent and reuses the normal delivery
+    // path to wake it.
+    const scheduled = await post(port, "/api/scheduled-tasks", {
+      target: dm.target,
+      agentId: agent.id,
+      prompt: "scheduled smoke report",
+      intervalMs: 600_000,
+      nextRunAt: new Date(Date.now() - 1000).toISOString()
+    });
+    if (scheduled.status !== "active") throw new Error("scheduled task was not created active");
+    const scheduledDelivery = await sse.waitFor("delivery", 4_000);
+    if (!scheduledDelivery) throw new Error("scheduled task did not push a delivery");
+    if (scheduledDelivery.agentId !== agent.id) throw new Error("scheduled delivery targeted wrong agent");
+    const scheduledTasks = await get(port, "/api/scheduled-tasks");
+    const updatedSchedule = scheduledTasks.find((item: any) => item.id === scheduled.id);
+    if (!updatedSchedule || updatedSchedule.runCount !== 1 || !updatedSchedule.lastMessageId) {
+      throw new Error("scheduled task run metadata was not updated");
+    }
+    const editedNextRunAt = new Date(Date.now() + 15 * 60_000).toISOString();
+    const editedSchedule = await patch(port, `/api/scheduled-tasks/${encodeURIComponent(scheduled.id)}`, {
+      status: "paused",
+      prompt: "edited scheduled smoke report",
+      intervalMs: 120_000,
+      nextRunAt: editedNextRunAt
+    });
+    if (
+      editedSchedule.status !== "paused" ||
+      editedSchedule.prompt !== "edited scheduled smoke report" ||
+      editedSchedule.intervalMs !== 120_000 ||
+      editedSchedule.nextRunAt !== editedNextRunAt
+    ) {
+      throw new Error("scheduled task manual edit patch did not persist");
+    }
     // Sending a message that mentions the running agent should push a
     // delivery event to our subscriber.
     const pushed = post(port, "/api/messages", {
@@ -180,7 +256,6 @@ try {
   // anchored on the human's original mention. Verifies stripThreadMarker +
   // applyDeliveryResult routing in core.ts.
   const threadChannel = await post(port, "/api/channels", { name: "thread-marker", description: "" });
-  const computerAuth = { "x-iteam-connection": `${computerId}:${connectToken}` };
   const deepMention = await post(port, "/api/messages", {
     target: threadChannel.target,
     text: `@${agent.handle} deep dive`,

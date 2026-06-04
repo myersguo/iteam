@@ -1045,6 +1045,95 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
   gap: 10px;
 }
 
+.schedule-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(140px, 1fr));
+  gap: 14px;
+  padding: 28px 48px 0;
+}
+.schedule-summary article {
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  background: var(--surface-card);
+  padding: 18px 20px;
+  display: grid;
+  gap: 4px;
+}
+.schedule-summary span {
+  font-family: var(--serif);
+  font-size: 34px;
+  line-height: 1;
+  color: var(--ink);
+}
+.schedule-summary small {
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 11px;
+}
+.schedule-toolbar {
+  border-bottom: 0;
+  padding-top: 22px;
+  padding-bottom: 8px;
+}
+.schedule-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 16px;
+  padding: 20px 48px 48px;
+}
+.schedule-card {
+  background: var(--canvas);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  padding: 22px;
+  display: grid;
+  gap: 16px;
+  box-shadow: var(--shadow-soft);
+}
+.schedule-card header,
+.schedule-card footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+.schedule-card footer {
+  justify-content: flex-end;
+  align-items: center;
+  border-top: 1px solid var(--hairline-soft);
+  padding-top: 14px;
+}
+.schedule-card h2 {
+  font-size: 26px;
+}
+.schedule-prompt {
+  margin: 0;
+  color: var(--body);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+.schedule-details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 18px;
+  margin: 0;
+}
+.schedule-details div {
+  min-width: 0;
+}
+.schedule-details dt {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+}
+.schedule-details dd {
+  margin: 4px 0 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
 .empty {
   color: var(--muted);
   display: grid;
@@ -1407,6 +1496,9 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
   position: relative;
   box-shadow: var(--shadow-strong);
   animation: pop-in 220ms cubic-bezier(0.2, 0.7, 0.2, 1.1);
+}
+.modal-wide {
+  width: min(760px, 100%);
 }
 .modal h1 {
   font-family: var(--serif);

@@ -140,6 +140,24 @@ export interface Task {
   updatedAt: string;
 }
 
+export type ScheduledTaskStatus = "active" | "paused" | string;
+
+export interface ScheduledTask {
+  id: string;
+  target: string;
+  agentId: string;
+  prompt: string;
+  intervalMs: number;
+  status: ScheduledTaskStatus;
+  nextRunAt: string;
+  lastRunAt?: string | null;
+  lastMessageId?: string | null;
+  runCount: number;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Delivery {
   id: string;
   messageId: string;
@@ -179,6 +197,7 @@ export interface State {
   messages: Message[];
   deliveries: Delivery[];
   tasks: Task[];
+  scheduledTasks: ScheduledTask[];
   events: StoreEvent[];
 }
 

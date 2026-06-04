@@ -212,17 +212,6 @@ function watchdogTick(): void {
   scheduleNext(0);
 }
 
-await runHeartbeat();
-const watchdog = setInterval(watchdogTick, WATCHDOG_TICK_MS);
-
-function shutdown(): void {
-  if (pendingTimer) clearTimeout(pendingTimer);
-  clearInterval(watchdog);
-  closePushStream();
-}
-process.once("SIGINT", () => { shutdown(); process.exit(0); });
-process.once("SIGTERM", () => { shutdown(); process.exit(0); });
-
 function readArg(flag: string, fallback?: string): string | undefined {
   const index = process.argv.indexOf(flag);
   return index === -1 ? fallback : process.argv[index + 1];
@@ -524,6 +513,17 @@ function closePushStream(): void {
     pushController = null;
   }
 }
+
+await runHeartbeat();
+const watchdog = setInterval(watchdogTick, WATCHDOG_TICK_MS);
+
+function shutdown(): void {
+  if (pendingTimer) clearTimeout(pendingTimer);
+  clearInterval(watchdog);
+  closePushStream();
+}
+process.once("SIGINT", () => { shutdown(); process.exit(0); });
+process.once("SIGTERM", () => { shutdown(); process.exit(0); });
 
 function printUsage(reason: string): void {
   console.error(`agent-daemon: ${reason}`);

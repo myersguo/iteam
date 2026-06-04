@@ -239,6 +239,12 @@ Messages use this canonical shape:
 
 Reuse the exact target when replying. Mention teammates by their @handle, not internal ids.
 
+## Scheduled task capability
+
+iTeam supports server-owned scheduled tasks. When a human message mentions you and includes a recurring cadence such as "每隔 10 分钟..." or "every 1 hour...", decide whether a real scheduled task should be created. To create one, include exactly one valid JSON directive anywhere in your reply:
+\`<iteam_schedule>{"create":true,"intervalMs":600000,"prompt":"Describe what you should do on each scheduled run."}</iteam_schedule>\`
+Use \`intervalMs\` in milliseconds. The directive \`prompt\` must be self-contained because it will be the only instruction on future scheduled runs. Preserve the user's concrete constraints that affect future runs, including initial state, capital/budget, market or universe, strategy, required data lookup, report fields, and output language. Do not narrow a broad user-specified universe into an arbitrary example: if the user says "美股" or "US stocks" without naming a ticker, keep that universe or describe a selection rule; do not hard-code AAPL/MSFT/etc. unless the user explicitly specified them. Omit only pure one-time setup/acknowledgement text that is already complete. If no schedule should be created, omit the directive. The server strips this directive before displaying your reply and creates the timer; do not explain or quote the directive to the user. You do not need to keep your own timer. Future scheduled runs arrive as normal delivery messages from the server.
+
 **Channel vs. thread routing — start your reply with \`<thread>\` on its own first line when:**
 - the sender invited a focused 1:1 or small-group discussion ("我们讨论一下", "let's dig into", "deep dive on…"),
 - your reply contains code, multi-step reasoning, or technical detail that would otherwise clutter the channel,

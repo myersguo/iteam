@@ -142,6 +142,26 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
   },
   {
+    name: "iteam_scheduled_tasks",
+    ddl: `CREATE TABLE IF NOT EXISTS iteam_scheduled_tasks (
+      id              VARCHAR(64)  NOT NULL PRIMARY KEY,
+      target          VARCHAR(255) NOT NULL,
+      agent_id        VARCHAR(64)  NOT NULL,
+      prompt          TEXT         NOT NULL,
+      interval_ms     INT          NOT NULL,
+      status          VARCHAR(32)  NOT NULL,
+      next_run_at     VARCHAR(40)  NOT NULL,
+      last_run_at     VARCHAR(40)  DEFAULT NULL,
+      last_message_id VARCHAR(64)  DEFAULT NULL,
+      run_count       INT          NOT NULL DEFAULT 0,
+      created_by      VARCHAR(64)  NOT NULL,
+      created_at      VARCHAR(40)  NOT NULL,
+      updated_at      VARCHAR(40)  NOT NULL,
+      KEY idx_due (status, next_run_at),
+      KEY idx_agent (agent_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+  },
+  {
     name: "iteam_deliveries",
     ddl: `CREATE TABLE IF NOT EXISTS iteam_deliveries (
       id                 VARCHAR(64)  NOT NULL PRIMARY KEY,

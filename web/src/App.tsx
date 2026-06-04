@@ -29,7 +29,7 @@ import "./styles.css";
 
 // ---------- types ----------
 
-type SectionId = "chat" | "members" | "computers";
+type SectionId = "chat" | "members" | "computers" | "scheduled";
 
 interface Human {
   id: string;
@@ -84,6 +84,22 @@ interface Task {
   assigneeId?: string | null;
 }
 
+interface ScheduledTask {
+  id: string;
+  target: string;
+  agentId: string;
+  prompt: string;
+  intervalMs: number;
+  status: string;
+  nextRunAt: string;
+  lastRunAt?: string | null;
+  lastMessageId?: string | null;
+  runCount: number;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface RuntimeInfo {
   id: string;
   name: string;
@@ -107,6 +123,7 @@ interface AppState {
   channels: Channel[];
   messages: Message[];
   tasks: Task[];
+  scheduledTasks: ScheduledTask[];
   computers: ComputerEntity[];
   events: unknown[];
 }
@@ -144,18 +161,19 @@ const api = {
     return fetch(`/api/messages/channel/${encodeURIComponent(selectedChannel.id)}?${params}`).then(r => r.json());
   },
   async getState(channelTarget = "#all"): Promise<AppState> {
-    const [humans, agents, channels, tasks, computers] = await Promise.all([
+    const [humans, agents, channels, tasks, scheduledTasks, computers] = await Promise.all([
       fetch("/api/humans").then(r => r.json()),
       fetch("/api/agents").then(r => r.json()),
       fetch("/api/channels").then(r => r.json()),
       fetch("/api/tasks").then(r => r.json()),
+      fetch("/api/scheduled-tasks").then(r => r.json()),
       fetch("/api/computers").then(r => r.json())
     ]);
     const selectedChannel = resolveChannel(channels, channelTarget);
     const messages = selectedChannel
       ? await fetch(`/api/messages/channel/${encodeURIComponent(selectedChannel.id)}?limit=10`).then(r => r.json())
       : [];
-    return { humans, agents, channels, messages, tasks, computers, events: [] };
+    return { humans, agents, channels, messages, tasks, scheduledTasks, computers, events: [] };
   },
   async post<T = any>(path: string, body: Record<string, unknown> = {}): Promise<T> {
     const res = await fetch(path, {
@@ -403,6 +421,17 @@ function App() {
     refresh();
   }
 
+  async function updateScheduledTask(task: ScheduledTask, patch: Record<string, unknown>) {
+    await api.patch(`/api/scheduled-tasks/${task.id}`, patch);
+    refresh();
+  }
+
+  async function deleteScheduledTask(task: ScheduledTask) {
+    if (!window.confirm(`Delete scheduled task for ${task.target}?`)) return;
+    await api.del(`/api/scheduled-tasks/${task.id}`);
+    refresh();
+  }
+
   async function createAgent() {
     const agent = await api.post<Agent>("/api/agents", {
       name: agentName,
@@ -504,6 +533,12 @@ function App() {
             icon={<Computer size={18} />}
             onClick={() => setSection("computers")}
           />
+          <RailButton
+            active={section === "scheduled"}
+            label="Scheduled"
+            icon={<List size={18} />}
+            onClick={() => setSection("scheduled")}
+          />
         </div>
         <div className="rail-foot">
           <button className="ghost-btn" title="Refresh" onClick={() => refresh()}>
@@ -546,7 +581,16 @@ function App() {
             openConnectComputer={openConnectComputer}
           />
         )}
-        {section !== "chat" && section !== "computers" && (
+        {section === "scheduled" && (
+          <ScheduledSidebar
+            state={state}
+            openScheduledTask={task => {
+              setSection("scheduled");
+              setChannel(task.target);
+            }}
+          />
+        )}
+        {section === "members" && (
           <MembersSidebar
             state={state}
             selectedAgentId={selectedAgentId}
@@ -604,6 +648,13 @@ function App() {
             openConnectComputer={openConnectComputer}
             toggleAgent={toggleAgent}
             deleteComputer={deleteComputer}
+          />
+        )}
+        {section === "scheduled" && (
+          <ScheduledTasksView
+            state={state}
+            updateScheduledTask={updateScheduledTask}
+            deleteScheduledTask={deleteScheduledTask}
           />
         )}
       </main>
@@ -698,7 +749,7 @@ function RailButton({
 }
 
 function titleFor(section: SectionId): string {
-  return ({ chat: "Channels", members: "Members", computers: "Computers" } as const)[section];
+  return ({ chat: "Channels", members: "Members", computers: "Computers", scheduled: "Scheduled" } as const)[section];
 }
 
 function ChatSidebar({
@@ -910,6 +961,43 @@ function ComputersSidebar({
           <Plus size={14} /> Connect a computer
         </button>
       )}
+    </>
+  );
+}
+
+function ScheduledSidebar({
+  state,
+  openScheduledTask
+}: {
+  state: AppState;
+  openScheduledTask: (task: ScheduledTask) => void;
+}) {
+  const active = state.scheduledTasks.filter(task => task.status === "active").length;
+  return (
+    <>
+      <SectionLabel>Scheduled · {state.scheduledTasks.length}</SectionLabel>
+      <div className="side-collapsible">
+        {state.scheduledTasks.map(task => {
+          const agent = state.agents.find(a => a.id === task.agentId);
+          return (
+            <button key={task.id} className="side-row computer" onClick={() => openScheduledTask(task)}>
+              <span className="computer-tile">
+                <List size={16} />
+              </span>
+              <span>{agent ? `@${agent.handle || agent.name}` : task.agentId}</span>
+              <small className={`status-dot ${task.status}`}>{task.status}</small>
+            </button>
+          );
+        })}
+      </div>
+      {!state.scheduledTasks.length && (
+        <p className="side-empty">No schedules yet — ask an agent “每隔 10 分钟…”, and it can declare one.</p>
+      )}
+      <SectionLabel>Summary</SectionLabel>
+      <div className="side-row member">
+        <span>{active} active</span>
+        <small>{state.scheduledTasks.length - active} paused</small>
+      </div>
     </>
   );
 }
@@ -1511,6 +1599,268 @@ function CreateTaskModal({
             onClick={() => onCreate({ title, description, assigneeId: assigneeId || null })}
           >
             Create task
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+// ---------- scheduled tasks ----------
+
+function ScheduledTasksView({
+  state,
+  updateScheduledTask,
+  deleteScheduledTask
+}: {
+  state: AppState;
+  updateScheduledTask: (task: ScheduledTask, patch: Record<string, unknown>) => Promise<void>;
+  deleteScheduledTask: (task: ScheduledTask) => Promise<void>;
+}) {
+  const [status, setStatus] = useState("");
+  const [agentId, setAgentId] = useState("");
+  const [editingTask, setEditingTask] = useState<ScheduledTask | null>(null);
+  const tasks = state.scheduledTasks
+    .filter(task => !status || task.status === status)
+    .filter(task => !agentId || task.agentId === agentId)
+    .sort((a, b) => a.nextRunAt.localeCompare(b.nextRunAt));
+  const activeCount = state.scheduledTasks.filter(task => task.status === "active").length;
+
+  return (
+    <section className="pane">
+      <Topbar
+        eyebrow="Automation"
+        title="Scheduled Tasks"
+        subtitle="Server-owned timers that wake agents by creating delivery messages on schedule."
+      />
+      <div className="schedule-summary">
+        <article>
+          <span>{state.scheduledTasks.length}</span>
+          <small>Total schedules</small>
+        </article>
+        <article>
+          <span>{activeCount}</span>
+          <small>Active</small>
+        </article>
+        <article>
+          <span>{state.scheduledTasks.length - activeCount}</span>
+          <small>Paused</small>
+        </article>
+      </div>
+      <div className="task-toolbar schedule-toolbar">
+        <label className="select-shell">
+          <span>Status</span>
+          <select value={status} onChange={e => setStatus(e.target.value)}>
+            <option value="">Any status</option>
+            <option value="active">Active</option>
+            <option value="paused">Paused</option>
+          </select>
+        </label>
+        <label className="select-shell">
+          <span>Agent</span>
+          <select value={agentId} onChange={e => setAgentId(e.target.value)}>
+            <option value="">Any agent</option>
+            {state.agents.map(agent => (
+              <option key={agent.id} value={agent.id}>
+                {agent.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <div className="schedule-list">
+        {tasks.map(task => {
+          const agent = state.agents.find(a => a.id === task.agentId);
+          return (
+            <article className="schedule-card" key={task.id}>
+              <header>
+                <div>
+                  <p className="eyebrow">{task.target}</p>
+                  <h2>{agent ? `@${agent.handle || agent.name}` : task.agentId}</h2>
+                </div>
+                <span className={`status-pill ${task.status === "active" ? "done" : "closed"}`}>
+                  {task.status}
+                </span>
+              </header>
+              <p className="schedule-prompt">{task.prompt}</p>
+              <dl className="schedule-details">
+                <div>
+                  <dt>Interval</dt>
+                  <dd>{formatDuration(task.intervalMs)}</dd>
+                </div>
+                <div>
+                  <dt>Next run</dt>
+                  <dd>{formatDateTime(task.nextRunAt)}</dd>
+                </div>
+                <div>
+                  <dt>Last run</dt>
+                  <dd>{task.lastRunAt ? formatDateTime(task.lastRunAt) : "Never"}</dd>
+                </div>
+                <div>
+                  <dt>Runs</dt>
+                  <dd>{task.runCount}</dd>
+                </div>
+                <div>
+                  <dt>Last message</dt>
+                  <dd className="mono">{task.lastMessageId || "—"}</dd>
+                </div>
+                <div>
+                  <dt>ID</dt>
+                  <dd className="mono">{task.id}</dd>
+                </div>
+              </dl>
+              <footer>
+                <button className="btn btn-ghost" onClick={() => setEditingTask(task)}>
+                  <Pencil size={13} /> Edit
+                </button>
+                <button
+                  className="btn btn-ghost"
+                  onClick={() => updateScheduledTask(task, { status: task.status === "active" ? "paused" : "active" })}
+                >
+                  {task.status === "active" ? <Square size={13} /> : <Play size={13} />}
+                  {task.status === "active" ? " Pause" : " Resume"}
+                </button>
+                <button className="btn btn-ghost btn-danger" onClick={() => deleteScheduledTask(task)}>
+                  <Trash2 size={13} /> Delete
+                </button>
+              </footer>
+            </article>
+          );
+        })}
+        {tasks.length === 0 && (
+          <div className="empty">
+            <h3>No scheduled tasks.</h3>
+            <p>Ask an agent “每隔 10 分钟汇报…”. If the agent declares a schedule, iTeam will run it.</p>
+          </div>
+        )}
+      </div>
+      {editingTask && (
+        <EditScheduledTaskModal
+          state={state}
+          task={editingTask}
+          onClose={() => setEditingTask(null)}
+          onSave={async patch => {
+            await updateScheduledTask(editingTask, patch);
+            setEditingTask(null);
+          }}
+        />
+      )}
+    </section>
+  );
+}
+
+function EditScheduledTaskModal({
+  state,
+  task,
+  onSave,
+  onClose
+}: {
+  state: AppState;
+  task: ScheduledTask;
+  onSave: (patch: Record<string, unknown>) => Promise<void> | void;
+  onClose: () => void;
+}) {
+  const [target, setTarget] = useState(task.target);
+  const [agentId, setAgentId] = useState(task.agentId);
+  const [status, setStatus] = useState(task.status);
+  const [intervalMinutes, setIntervalMinutes] = useState(String(Math.max(1, Math.round(task.intervalMs / 60_000))));
+  const [nextRunAt, setNextRunAt] = useState(toDateTimeLocal(task.nextRunAt));
+  const [prompt, setPrompt] = useState(task.prompt);
+  const [error, setError] = useState("");
+  const intervalMs = Number(intervalMinutes) * 60_000;
+  const valid = !!target.trim() && !!agentId && !!prompt.trim() && Number.isFinite(intervalMs) && intervalMs >= 1000 && !!nextRunAt;
+
+  async function save() {
+    setError("");
+    if (!valid) {
+      setError("Target, agent, interval, next run time, and prompt are required.");
+      return;
+    }
+    const parsedNextRunAt = new Date(nextRunAt);
+    if (Number.isNaN(parsedNextRunAt.getTime())) {
+      setError("Next run time is invalid.");
+      return;
+    }
+    try {
+      await onSave({
+        target: target.trim(),
+        agentId,
+        status,
+        intervalMs: Math.floor(intervalMs),
+        nextRunAt: parsedNextRunAt.toISOString(),
+        prompt: prompt.trim()
+      });
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <section
+        className="modal modal-wide"
+        role="dialog"
+        aria-modal="true"
+        onClick={e => e.stopPropagation()}
+      >
+        <button className="modal-close" title="Close" onClick={onClose}>
+          <X />
+        </button>
+        <p className="eyebrow">Schedule</p>
+        <h1>Edit scheduled task.</h1>
+        <p className="modal-lede">
+          Changes are saved to the server timer. Future runs will use the edited prompt and cadence.
+        </p>
+        <div className="field-row">
+          <label className="field">
+            <span>Target</span>
+            <input value={target} onChange={e => setTarget(e.target.value)} placeholder="#all or dm:agent_id" />
+          </label>
+          <label className="field">
+            <span>Agent</span>
+            <select value={agentId} onChange={e => setAgentId(e.target.value)}>
+              {state.agents.map(agent => (
+                <option key={agent.id} value={agent.id}>
+                  @{agent.handle || agent.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="field-row">
+          <label className="field">
+            <span>Status</span>
+            <select value={status} onChange={e => setStatus(e.target.value)}>
+              <option value="active">Active</option>
+              <option value="paused">Paused</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>Interval minutes</span>
+            <input
+              type="number"
+              min="1"
+              step="1"
+              value={intervalMinutes}
+              onChange={e => setIntervalMinutes(e.target.value)}
+            />
+          </label>
+        </div>
+        <label className="field">
+          <span>Next run</span>
+          <input type="datetime-local" value={nextRunAt} onChange={e => setNextRunAt(e.target.value)} />
+        </label>
+        <label className="field">
+          <span>Prompt</span>
+          <textarea value={prompt} onChange={e => setPrompt(e.target.value)} />
+        </label>
+        {error && <div className="form-error">{error}</div>}
+        <footer className="modal-actions">
+          <button className="btn btn-ghost" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn btn-primary" disabled={!valid} onClick={save}>
+            Save changes
           </button>
         </footer>
       </section>
@@ -2186,6 +2536,27 @@ function countThreadReplies(state: AppState, message: { target?: string; id?: st
   return state.messages.filter(item => item.target === `${message.target}:${message.id}`).length;
 }
 
+function formatDuration(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours}h ${rest}m` : `${hours}h`;
+}
+
+function formatDateTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value || "—";
+  return date.toLocaleString();
+}
+
+function toDateTimeLocal(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
 function resolveChannel(channels: Channel[], channelIdOrTarget: string): Channel | null {
   return channels.find(channel =>
     channel.id === channelIdOrTarget ||
@@ -2280,6 +2651,10 @@ function parseLocation(loc: Location | { pathname: string; search: string }): Ro
       if (rest[0]) route.computerId = rest[0];
       return route;
     }
+    case "scheduled": {
+      route.section = "scheduled";
+      return route;
+    }
     default:
       return route;
   }
@@ -2307,6 +2682,8 @@ function buildPath(
   } else if (route.section === "computers") {
     if (route.computerId) path = `/computer/${encodeURIComponent(route.computerId)}`;
     else path = "/computers";
+  } else if (route.section === "scheduled") {
+    path = "/scheduled";
   }
   const params = new URLSearchParams();
   if (route.threadId) params.set("thread", route.threadId);

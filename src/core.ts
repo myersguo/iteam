@@ -21,6 +21,7 @@ import type {
   Message,
   PendingComputerConnection,
   RuntimeInfo,
+  ScheduledTask,
   State,
   StoreEvent,
   Task
@@ -96,6 +97,24 @@ export interface TaskPatchInput {
   assigneeId?: string | null;
   title?: string;
   description?: string;
+}
+
+export interface ScheduledTaskCreateInput {
+  target: string;
+  agentId: string;
+  prompt: string;
+  intervalMs: number | string;
+  nextRunAt?: string;
+  createdBy?: string;
+}
+
+export interface ScheduledTaskPatchInput {
+  target?: string;
+  agentId?: string;
+  prompt?: string;
+  intervalMs?: number | string;
+  status?: string;
+  nextRunAt?: string;
 }
 
 export interface ConnectInviteInput {
@@ -315,6 +334,14 @@ export class IteamCore {
     let tasks = this.store.snapshot().tasks || [];
     if (filter.target) tasks = tasks.filter(task => task.target === filter.target);
     if (filter.status) tasks = tasks.filter(task => task.status === filter.status);
+    return tasks;
+  }
+
+  listScheduledTasks(filter: { target?: string | null; status?: string | null; agentId?: string | null } = {}) {
+    let tasks = this.store.snapshot().scheduledTasks || [];
+    if (filter.target) tasks = tasks.filter(task => task.target === filter.target);
+    if (filter.status) tasks = tasks.filter(task => task.status === filter.status);
+    if (filter.agentId) tasks = tasks.filter(task => task.agentId === filter.agentId);
     return tasks;
   }
 
@@ -818,17 +845,31 @@ export class IteamCore {
     const createdIds: string[] = [];
     const message = this.store.mutate<Message>(s => {
       const now = this.clock();
+      const authorId = input.authorId || "human-local";
+      const authorAgent = s.agents.find(agent => agent.id === authorId);
+      const scheduleParse = authorAgent
+        ? stripScheduleDirective(input.text)
+        : { text: input.text, directive: null };
       const created: Message = {
         id: this.newId("msg"),
         target: input.target,
-        authorId: input.authorId || "human-local",
+        authorId,
         type: input.type || "human",
-        text: input.text,
-        mentions: input.mentions || parseMentions(input.text, s),
+        text: scheduleParse.text,
+        mentions: input.mentions || parseMentions(scheduleParse.text, s),
         createdAt: input.createdAt || now,
         threadId: input.threadId !== undefined ? input.threadId : threadRootFromTarget(input.target)
       };
       s.messages.push(created);
+      if (authorAgent && scheduleParse.directive) {
+        this.applyScheduleDirective(s, {
+          target: created.target,
+          agentId: authorAgent.id,
+          createdBy: authorAgent.id,
+          directive: scheduleParse.directive,
+          now
+        });
+      }
       // DM channels are 1:1 conversations — `dm:<agentId>`. Strip any agent
       // mention that doesn't belong to the DM peer, otherwise users could
       // smuggle other agents into a private chat. Drop a system note so the
@@ -895,7 +936,8 @@ export class IteamCore {
         // routing rule in workspace.ts:buildSystemPrompt). Strip the marker and
         // re-anchor the reply onto the delivery's root message — but only when
         // we're not already inside a thread, otherwise the marker is a no-op.
-        const { text: replyText, threaded } = stripThreadMarker(input.text);
+        const { text: textWithoutSchedule, directive } = stripScheduleDirective(input.text);
+        const { text: replyText, threaded } = stripThreadMarker(textWithoutSchedule);
         const alreadyInThread = threadRootFromTarget(delivery.target) !== null;
         const useThread = threaded && !alreadyInThread;
         const threadAnchor = delivery.rootMessageId || delivery.messageId;
@@ -918,6 +960,18 @@ export class IteamCore {
         // not fan out to other agents — only the DM peer is reachable from
         // inside `dm:<peer>`.
         this.filterDmMentions(s, created, now);
+        if (directive) {
+          const source = s.messages.find(message => message.id === delivery.messageId);
+          if (source && (source.type || "human") === "human" && source.authorId !== "system") {
+            this.applyScheduleDirective(s, {
+              target: delivery.target,
+              agentId: delivery.agentId,
+              createdBy: source.authorId,
+              directive,
+              now
+            });
+          }
+        }
         this.enqueueMentionDeliveries(s, created, {
           rootMessageId: delivery.rootMessageId || delivery.messageId,
           parentDeliveryId: delivery.id,
@@ -1024,6 +1078,197 @@ export class IteamCore {
       }
       return current;
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // scheduled tasks
+
+  createScheduledTask(input: ScheduledTaskCreateInput): ScheduledTask {
+    if (!input.target || !input.agentId || !input.prompt) {
+      throw new HttpError(400, "target, agentId and prompt are required");
+    }
+    const intervalMs = parseScheduleInterval(input.intervalMs);
+    const created = this.store.mutate<ScheduledTask>(s => {
+      const now = this.clock();
+      const agent = s.agents.find(a => a.id === input.agentId);
+      if (!agent) throw new HttpError(404, "agent not found");
+      const nextRunAt = input.nextRunAt || new Date(Date.parse(now) + intervalMs).toISOString();
+      if (!Number.isFinite(Date.parse(nextRunAt))) throw new HttpError(400, "nextRunAt must be an ISO timestamp");
+      const task: ScheduledTask = {
+        id: this.newId("sched"),
+        target: input.target,
+        agentId: input.agentId,
+        prompt: input.prompt,
+        intervalMs,
+        status: "active",
+        nextRunAt,
+        lastRunAt: null,
+        lastMessageId: null,
+        runCount: 0,
+        createdBy: input.createdBy || "human-local",
+        createdAt: now,
+        updatedAt: now
+      };
+      s.scheduledTasks ||= [];
+      s.scheduledTasks.push(task);
+      return task;
+    });
+    return created;
+  }
+
+  patchScheduledTask(taskId: string, input: ScheduledTaskPatchInput): ScheduledTask {
+    const intervalMs = input.intervalMs === undefined ? undefined : parseScheduleInterval(input.intervalMs);
+    return this.store.mutate<ScheduledTask>(s => {
+      const now = this.clock();
+      const current = (s.scheduledTasks || []).find(task => task.id === taskId);
+      if (!current) throw new HttpError(404, "scheduled task not found");
+      if (input.agentId && !s.agents.some(agent => agent.id === input.agentId)) {
+        throw new HttpError(404, "agent not found");
+      }
+      if (input.status && !["active", "paused"].includes(input.status)) {
+        throw new HttpError(400, "status must be active or paused");
+      }
+      if (input.nextRunAt && !Number.isFinite(Date.parse(input.nextRunAt))) {
+        throw new HttpError(400, "nextRunAt must be an ISO timestamp");
+      }
+      current.target = input.target ?? current.target;
+      current.agentId = input.agentId ?? current.agentId;
+      current.prompt = input.prompt ?? current.prompt;
+      current.intervalMs = intervalMs ?? current.intervalMs;
+      current.status = input.status ?? current.status;
+      current.nextRunAt = input.nextRunAt ?? current.nextRunAt;
+      current.updatedAt = now;
+      return current;
+    });
+  }
+
+  deleteScheduledTask(taskId: string): void {
+    this.store.mutate(s => {
+      const before = (s.scheduledTasks || []).length;
+      s.scheduledTasks = (s.scheduledTasks || []).filter(task => task.id !== taskId);
+      if (s.scheduledTasks.length === before) throw new HttpError(404, "scheduled task not found");
+    });
+  }
+
+  private applyScheduleDirective(
+    state: State,
+    input: { target: string; agentId: string; createdBy: string; directive: ScheduleDirective; now: string }
+  ): void {
+    const { target, agentId, createdBy, directive, now } = input;
+    if (!directive.create) return;
+    const agent = state.agents.find(a => a.id === agentId);
+    if (!agent) return;
+    try {
+      const intervalMs = parseScheduleInterval(directive.intervalMs);
+      const nextRunAt = directive.nextRunAt || new Date(Date.parse(now) + intervalMs).toISOString();
+      if (!Number.isFinite(Date.parse(nextRunAt))) throw new Error("nextRunAt must be an ISO timestamp");
+      const prompt = String(directive.prompt || "").trim();
+      if (!prompt) throw new Error("prompt is required");
+      const scheduled: ScheduledTask = {
+        id: this.newId("sched"),
+        target,
+        agentId: agent.id,
+        prompt,
+        intervalMs,
+        status: "active",
+        nextRunAt,
+        lastRunAt: null,
+        lastMessageId: null,
+        runCount: 0,
+        createdBy,
+        createdAt: now,
+        updatedAt: now
+      };
+      state.scheduledTasks ||= [];
+      state.scheduledTasks.push(scheduled);
+      state.messages.push({
+        id: this.newId("msg"),
+        target,
+        authorId: "system",
+        type: "system",
+        text: `Scheduled task created for @${agent.handle || slugHandle(agent.name)}: every ${formatScheduleInterval(intervalMs)}. Next run at ${scheduled.nextRunAt}.`,
+        mentions: [],
+        createdAt: now,
+        threadId: threadRootFromTarget(target)
+      });
+    } catch (error) {
+      state.messages.push({
+        id: this.newId("msg"),
+        target,
+        authorId: "system",
+        type: "system",
+        text: `Schedule directive ignored: ${(error as Error).message}`,
+        mentions: [],
+        createdAt: now,
+        threadId: threadRootFromTarget(target)
+      });
+    }
+  }
+
+  runDueScheduledTasks(): number {
+    const createdIds: string[] = [];
+    const now = this.clock();
+    const nowMs = Date.parse(now);
+    const dueIds = (this.store.snapshot().scheduledTasks || [])
+      .filter(task => task.status === "active")
+      .filter(task => {
+        const dueAt = Date.parse(task.nextRunAt || "");
+        return Number.isFinite(dueAt) && dueAt <= nowMs;
+      })
+      .map(task => task.id);
+    if (dueIds.length === 0) return 0;
+
+    const dueCount = this.store.mutate<number>(s => {
+      let ran = 0;
+      for (const task of s.scheduledTasks || []) {
+        if (!dueIds.includes(task.id) || task.status !== "active") continue;
+        const agent = s.agents.find(a => a.id === task.agentId);
+        if (!agent) {
+          task.status = "paused";
+          task.updatedAt = now;
+          continue;
+        }
+        const handle = agent.handle || slugHandle(agent.name);
+        const threadId = threadRootFromTarget(task.target);
+        const message: Message = {
+          id: this.newId("msg"),
+          target: task.target,
+          authorId: "system",
+          type: "system",
+          text: `@${handle} ${task.prompt}`,
+          mentions: [{ id: agent.id, kind: "agent", name: agent.name, handle }],
+          createdAt: now,
+          threadId
+        };
+        s.messages.push(message);
+        const queued = this.enqueueSingleAgentDelivery(s, message, agent.id, {
+          rootMessageId: message.id,
+          depth: 0,
+          createdIds
+        });
+        if (queued === 0) {
+          s.messages.push({
+            id: this.newId("msg"),
+            target: task.target,
+            authorId: "system",
+            type: "system",
+            text: `@${handle} is not running, scheduled task was not delivered.`,
+            mentions: [],
+            createdAt: now,
+            threadId
+          });
+        }
+        task.lastRunAt = now;
+        task.lastMessageId = message.id;
+        task.runCount = (task.runCount || 0) + 1;
+        task.nextRunAt = new Date(nowMs + task.intervalMs).toISOString();
+        task.updatedAt = now;
+        ran += 1;
+      }
+      return ran;
+    });
+    this.publishDeliveriesById(createdIds);
+    return dueCount;
   }
 
   // ---------------------------------------------------------------------------
@@ -1266,11 +1511,35 @@ function threadRootFromTarget(target: string): string | null {
 }
 
 const THREAD_MARKER = /^\s*<thread>\s*(\r?\n)?/i;
+const SCHEDULE_DIRECTIVE = /<iteam_schedule>\s*([\s\S]*?)\s*<\/iteam_schedule>/i;
 
 function stripThreadMarker(text: string): { text: string; threaded: boolean } {
   const match = THREAD_MARKER.exec(text);
   if (!match) return { text, threaded: false };
   return { text: text.slice(match[0].length), threaded: true };
+}
+
+interface ScheduleDirective {
+  create?: boolean;
+  intervalMs: number | string;
+  prompt: string;
+  nextRunAt?: string;
+}
+
+function stripScheduleDirective(text: string): { text: string; directive: ScheduleDirective | null } {
+  const match = SCHEDULE_DIRECTIVE.exec(text);
+  if (!match) return { text, directive: null };
+  let directive: ScheduleDirective | null = null;
+  try {
+    const parsed = JSON.parse(match[1]) as ScheduleDirective;
+    if (parsed && typeof parsed === "object") directive = parsed;
+  } catch {
+    directive = { create: true, intervalMs: 0, prompt: "" };
+  }
+  return {
+    text: text.replace(match[0], "").trim(),
+    directive
+  };
 }
 
 function parentTargetFromThread(target: string): string {
@@ -1306,6 +1575,21 @@ function parseMessageLimit(value: number | string | null | undefined): number {
   if (value === null || value === undefined || value === "") return 10;
   const numeric = typeof value === "number" ? value : Number(value);
   return Math.max(1, Math.min(1000, numeric || 10));
+}
+
+function parseScheduleInterval(value: number | string): number {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric) || numeric < 1000) {
+    throw new HttpError(400, "intervalMs must be at least 1000");
+  }
+  return Math.floor(numeric);
+}
+
+function formatScheduleInterval(ms: number): string {
+  if (ms % 86_400_000 === 0) return `${ms / 86_400_000} day(s)`;
+  if (ms % 3_600_000 === 0) return `${ms / 3_600_000} hour(s)`;
+  if (ms % 60_000 === 0) return `${ms / 60_000} minute(s)`;
+  return `${Math.round(ms / 1000)} second(s)`;
 }
 
 function paginateMessages(messages: Message[], options: { limit: number; before?: string | null }): Message[] {

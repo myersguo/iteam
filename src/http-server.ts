@@ -126,6 +126,15 @@ export function startHttpServer(options: HttpServerOptions): RunningHttpServer {
     }
   }, 30_000);
   if (typeof sweepTimer.unref === "function") sweepTimer.unref();
+  const scheduleTimer = setInterval(() => {
+    try {
+      const ran = core.runDueScheduledTasks();
+      if (ran > 0) console.log(`[http] ran ${ran} scheduled task(s)`);
+    } catch (err) {
+      console.error(`[http] runDueScheduledTasks error: ${(err as Error).message}`);
+    }
+  }, Number(process.env.ITEAM_SCHEDULER_INTERVAL_MS || "1000"));
+  if (typeof scheduleTimer.unref === "function") scheduleTimer.unref();
 
   return {
     server,
@@ -133,6 +142,7 @@ export function startHttpServer(options: HttpServerOptions): RunningHttpServer {
     webRoot,
     async close() {
       clearInterval(sweepTimer);
+      clearInterval(scheduleTimer);
       unsubscribe();
       for (const client of sseClients) client.end();
       sseClients.clear();
@@ -226,6 +236,14 @@ async function route(
     return sendJson(res, 200, core.listTasks({
       target: url.searchParams.get("target"),
       status: url.searchParams.get("status")
+    }));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/scheduled-tasks") {
+    return sendJson(res, 200, core.listScheduledTasks({
+      target: url.searchParams.get("target"),
+      status: url.searchParams.get("status"),
+      agentId: url.searchParams.get("agentId")
     }));
   }
 
@@ -338,6 +356,21 @@ async function route(
   if (req.method === "PATCH" && taskPatch) {
     const body = await parseJsonBody<any>(req);
     return sendJson(res, 200, core.patchTask(taskPatch[1], body));
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/scheduled-tasks") {
+    const body = await parseJsonBody<any>(req);
+    return sendJson(res, 201, core.createScheduledTask(body));
+  }
+
+  const scheduledTask = url.pathname.match(/^\/api\/scheduled-tasks\/([^/]+)$/);
+  if (scheduledTask && req.method === "PATCH") {
+    const body = await parseJsonBody<any>(req);
+    return sendJson(res, 200, core.patchScheduledTask(scheduledTask[1], body));
+  }
+  if (scheduledTask && req.method === "DELETE") {
+    core.deleteScheduledTask(scheduledTask[1]);
+    return sendJson(res, 200, { ok: true });
   }
 
   if (req.method === "GET" && !url.pathname.startsWith("/api/")) {
