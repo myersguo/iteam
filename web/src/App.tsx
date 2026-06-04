@@ -58,6 +58,7 @@ interface Channel {
   kind?: string;
   description?: string;
   memberIds?: string[];
+  messageCount?: number;
 }
 
 interface Message {
@@ -67,6 +68,7 @@ interface Message {
   text: string;
   type?: string;
   createdAt: string;
+  threadId?: string | null;
   taskId?: string;
   replyCount?: number;
   depth?: number;
@@ -824,7 +826,7 @@ function ChatSidebar({
                     <Pencil size={13} />
                   </button>
                 )}
-                <small>{c.memberIds?.length || 0}</small>
+                <small>{channelMessageCount(state, c, channel)}</small>
               </div>
             );
           })}
@@ -2534,6 +2536,12 @@ function countThreadReplies(state: AppState, message: { target?: string; id?: st
   const counted = state.messages.find(item => item.id === message.id)?.replyCount;
   if (typeof counted === "number") return counted;
   return state.messages.filter(item => item.target === `${message.target}:${message.id}`).length;
+}
+
+function channelMessageCount(state: AppState, channel: Channel, selectedTarget: string): number {
+  if (typeof channel.messageCount === "number") return channel.messageCount;
+  if (channel.target !== selectedTarget) return 0;
+  return state.messages.filter(message => message.target === channel.target && !message.threadId).length;
 }
 
 function formatDuration(ms: number): string {

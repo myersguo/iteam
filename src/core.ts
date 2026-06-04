@@ -307,7 +307,12 @@ export class IteamCore {
   }
 
   listChannels() {
-    return this.store.snapshot().channels || [];
+    const snapshot = this.store.snapshot();
+    const messages = snapshot.messages || [];
+    return (snapshot.channels || []).map(channel => ({
+      ...channel,
+      messageCount: messages.filter(message => parentTargetFromThread(message.target) === channel.target).length
+    }));
   }
 
   listAgents() {
