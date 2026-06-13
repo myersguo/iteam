@@ -407,7 +407,9 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
 }
 .channel-row:hover .row-icon-btn,
 .channel-row:focus-within .row-icon-btn,
-.channel-row.is-selected .row-icon-btn {
+.channel-row.is-selected .row-icon-btn,
+.side-row.member:hover .human-rename,
+.side-row.member:focus-within .human-rename {
   opacity: 1;
 }
 .row-icon-btn:hover {
@@ -419,7 +421,65 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
 }
 
 .side-row.member { padding: 6px 8px; gap: 12px; }
+.side-row.member .human-rename {
+  margin-left: 0;
+  flex: 0 0 auto;
+}
 .side-row.computer { padding: 8px 8px; gap: 12px; min-height: 52px; }
+.side-agent-group + .side-agent-group { margin-top: 12px; }
+.side-agent-group-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 8px 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+.side-agent-group-head span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.side-agent-group-head small { margin-left: auto; }
+.schedule-agent-row {
+  min-height: 52px;
+}
+.schedule-agent-row > span:nth-child(2) {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.schedule-agent-row > span:nth-child(2) strong,
+.schedule-agent-row > span:nth-child(2) > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.schedule-agent-row > span:nth-child(2) small {
+  margin: 2px 0 0;
+  font-size: 11px;
+}
+.schedule-agent-count {
+  min-width: 26px;
+  height: 26px;
+  margin-left: auto;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-pill);
+  background: var(--canvas);
+  border: 1px solid var(--hairline);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.schedule-agent-row.is-selected .schedule-agent-count {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--on-primary);
+}
 .computer-tile {
   width: 36px; height: 36px;
   display: grid; place-items: center;
@@ -1168,9 +1228,72 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
 }
 .panel-cream h2 { font-family: var(--serif); font-size: 28px; }
 .panel-note { color: var(--body); margin: 0 0 8px; }
+.agent-computer-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 4px;
+}
+.agent-groups-empty {
+  margin: 0;
+  padding: 14px;
+  color: var(--muted);
+  text-align: center;
+  border: 1px dashed var(--hairline);
+  border-radius: var(--r-md);
+}
+.agent-computer-group {
+  padding: 12px;
+  background: color-mix(in srgb, var(--canvas) 72%, transparent);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+}
+.agent-computer-group > header {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 0 2px 10px;
+}
+.agent-computer-group > header > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.agent-computer-group > header strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.agent-computer-group > header small {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: capitalize;
+}
+.agent-computer-group > header > span:last-child {
+  min-width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-pill);
+  background: var(--surface-card);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.agent-computer-icon {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-md);
+  background: var(--surface-dark);
+  color: var(--on-dark);
+}
 .agent-mini-list {
   list-style: none; margin: 0; padding: 0;
-  display: flex; flex-direction: column; gap: 8px;
+  display: flex; flex-direction: column; gap: 6px;
 }
 .agent-mini-list li {
   display: flex; align-items: center; gap: 10px;
@@ -1179,6 +1302,21 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
   border-radius: var(--r-md);
   border: 1px solid var(--hairline);
   font-size: 13px;
+}
+.agent-mini-list li > span:not(.avatar) {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.agent-mini-list li > span:not(.avatar) strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.agent-mini-list li > span:not(.avatar) small {
+  margin-left: 0;
+  font-size: 11px;
 }
 .agent-mini-list li.muted { color: var(--muted); border-style: dashed; }
 .agent-mini-list small { margin-left: auto; color: var(--muted); }

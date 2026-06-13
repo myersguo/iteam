@@ -109,7 +109,9 @@ export function sanitizeState(state: State): State {
   });
   state.scheduledTasks = (state.scheduledTasks || []).map((task: ScheduledTask) => ({
     ...task,
-    intervalMs: Number(task.intervalMs) || 10 * 60 * 1000,
+    intervalMs: task.cronExpression ? null : Number(task.intervalMs) || 10 * 60 * 1000,
+    cronExpression: task.cronExpression || null,
+    timezone: task.timezone || null,
     status: task.status || "active",
     runCount: Number(task.runCount) || 0,
     lastRunAt: task.lastRunAt ?? null,

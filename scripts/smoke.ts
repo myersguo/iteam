@@ -15,6 +15,14 @@ const daemon = spawn(tsxBin, [resolve(root, "src/server.ts"), "--port", String(p
 
 try {
   await waitForHealth(port);
+  const renamedHuman = await patch(port, "/api/humans/human-local", { name: "Smoke Human" });
+  if (renamedHuman.name !== "Smoke Human" || renamedHuman.handle !== "you") {
+    throw new Error("local human rename did not preserve identity and handle");
+  }
+  const humans = await get(port, "/api/humans");
+  if (!humans.some((human: any) => human.id === "human-local" && human.name === "Smoke Human")) {
+    throw new Error("renamed local human was not persisted");
+  }
   let computers = await get(port, "/api/computers");
   if (computers.length !== 0) throw new Error("state should not contain seeded computers");
   const invite = await post(port, "/api/computers/connect-command", { serverUrl: `http://127.0.0.1:${port}` });
@@ -144,6 +152,54 @@ try {
     const directSchedules = await get(port, "/api/scheduled-tasks");
     if (!directSchedules.some((item: any) => item.agentId === agent.id && item.intervalMs === 120_000 && item.prompt === "direct agent schedule")) {
       throw new Error("direct agent message with schedule directive did not create a scheduled task");
+    }
+    await post(port, "/api/messages", {
+      target: dm.target,
+      authorId: agent.id,
+      text: '工作日定时。<iteam_schedule>{"create":true,"cronExpression":"0 9-19 * * 1-5","timezone":"Asia/Shanghai","prompt":"weekday cron report"}</iteam_schedule>'
+    });
+    const cronSchedules = await get(port, "/api/scheduled-tasks");
+    const cronSchedule = cronSchedules.find((item: any) =>
+      item.agentId === agent.id &&
+      item.cronExpression === "0 9-19 * * 1-5" &&
+      item.timezone === "Asia/Shanghai" &&
+      item.intervalMs === null
+    );
+    if (!cronSchedule) throw new Error("cron schedule directive did not create a cron task");
+    const invalidCronStatus = await postStatus(port, "/api/scheduled-tasks", {
+      target: dm.target,
+      agentId: agent.id,
+      prompt: "invalid cron",
+      cronExpression: "0 0 9-19 * * 1-5",
+      timezone: "Asia/Shanghai"
+    });
+    if (invalidCronStatus !== 400) throw new Error(`six-field cron should be rejected, got ${invalidCronStatus}`);
+    const ambiguousScheduleStatus = await postStatus(port, "/api/scheduled-tasks", {
+      target: dm.target,
+      agentId: agent.id,
+      prompt: "ambiguous schedule",
+      intervalMs: 60_000,
+      cronExpression: "0 9-19 * * 1-5",
+      timezone: "Asia/Shanghai"
+    });
+    if (ambiguousScheduleStatus !== 400) {
+      throw new Error(`interval plus cron should be rejected, got ${ambiguousScheduleStatus}`);
+    }
+    await patch(port, `/api/scheduled-tasks/${encodeURIComponent(cronSchedule.id)}`, {
+      nextRunAt: new Date(Date.now() - 1000).toISOString()
+    });
+    const cronDelivery = await sse.waitFor("delivery", 4_000);
+    if (!cronDelivery || cronDelivery.agentId !== agent.id) {
+      throw new Error("due cron task did not push a delivery");
+    }
+    const ranCronSchedules = await get(port, "/api/scheduled-tasks");
+    const ranCronSchedule = ranCronSchedules.find((item: any) => item.id === cronSchedule.id);
+    if (
+      !ranCronSchedule ||
+      ranCronSchedule.runCount !== 1 ||
+      Date.parse(ranCronSchedule.nextRunAt) <= Date.now()
+    ) {
+      throw new Error("cron task did not calculate its next run after delivery");
     }
     // Scheduled tasks are server-owned timers: when due, the backend creates
     // a system message that mentions the agent and reuses the normal delivery

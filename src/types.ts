@@ -147,7 +147,9 @@ export interface ScheduledTask {
   target: string;
   agentId: string;
   prompt: string;
-  intervalMs: number;
+  intervalMs: number | null;
+  cronExpression?: string | null;
+  timezone?: string | null;
   status: ScheduledTaskStatus;
   nextRunAt: string;
   lastRunAt?: string | null;

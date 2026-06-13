@@ -91,7 +91,9 @@ interface ScheduledTask {
   target: string;
   agentId: string;
   prompt: string;
-  intervalMs: number;
+  intervalMs: number | null;
+  cronExpression?: string | null;
+  timezone?: string | null;
   status: string;
   nextRunAt: string;
   lastRunAt?: string | null;
@@ -212,6 +214,7 @@ function App() {
   const [chatTab, setChatTab] = useState<"chat" | "tasks">(initialRoute.chatTab);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(initialRoute.agentId);
   const [selectedComputerId, setSelectedComputerId] = useState<string | null>(initialRoute.computerId);
+  const [scheduledAgentId, setScheduledAgentId] = useState("");
   const [message, setMessage] = useState("");
   const [asTask, setAsTask] = useState(false);
   const [agentName, setAgentName] = useState("codex");
@@ -223,6 +226,7 @@ function App() {
   const [createAgentOpen, setCreateAgentOpen] = useState(false);
   const [createChannelOpen, setCreateChannelOpen] = useState(false);
   const [renameChannel, setRenameChannel] = useState<Channel | null>(null);
+  const [renameHuman, setRenameHuman] = useState<Human | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [channelsCollapsed, setChannelsCollapsed] = useState(false);
   const [threadRootId, setThreadRootIdState] = useState<string | null>(initialRoute.threadId);
@@ -324,6 +328,17 @@ function App() {
     if (state?.computers?.length && !selectedComputerId) setSelectedComputerId(state.computers[0].id);
     if (state?.computers?.length && !agentComputerId) setAgentComputerId(state.computers[0].id);
   }, [state, selectedAgentId, selectedComputerId, agentComputerId]);
+
+  useEffect(() => {
+    if (!scheduledAgentId || !state) return;
+    const selectionExists = scheduledAgentId === "__missing__"
+      ? state.scheduledTasks.some(task => !state.agents.some(agent => agent.id === task.agentId))
+      : state.agents.some(agent => agent.id === scheduledAgentId) &&
+        state.scheduledTasks.some(task => task.agentId === scheduledAgentId);
+    if (!selectionExists) {
+      setScheduledAgentId("");
+    }
+  }, [scheduledAgentId, state]);
 
   // resolve dm:<handle> in URL into dm:<agentId> once state arrives
   useEffect(() => {
@@ -470,6 +485,12 @@ function App() {
     refresh();
   }
 
+  async function updateHuman(humanId: string, name: string) {
+    await api.patch(`/api/humans/${encodeURIComponent(humanId)}`, { name });
+    setRenameHuman(null);
+    refresh();
+  }
+
   async function createChannel(body: { name: string; description?: string }) {
     const created = await api.post<Channel>("/api/channels", body);
     setChannel(created.target);
@@ -586,10 +607,8 @@ function App() {
         {section === "scheduled" && (
           <ScheduledSidebar
             state={state}
-            openScheduledTask={task => {
-              setSection("scheduled");
-              setChannel(task.target);
-            }}
+            selectedAgentId={scheduledAgentId}
+            selectAgent={setScheduledAgentId}
           />
         )}
         {section === "members" && (
@@ -598,6 +617,7 @@ function App() {
             selectedAgentId={selectedAgentId}
             setSelectedAgentId={setSelectedAgentId}
             openCreateAgent={() => setCreateAgentOpen(true)}
+            openRenameHuman={setRenameHuman}
           />
         )}
         {!sidebarCollapsed && (
@@ -655,6 +675,8 @@ function App() {
         {section === "scheduled" && (
           <ScheduledTasksView
             state={state}
+            selectedAgentId={scheduledAgentId}
+            selectAgent={setScheduledAgentId}
             updateScheduledTask={updateScheduledTask}
             deleteScheduledTask={deleteScheduledTask}
           />
@@ -696,6 +718,13 @@ function App() {
           channel={renameChannel}
           onRename={updateChannel}
           onClose={() => setRenameChannel(null)}
+        />
+      )}
+      {renameHuman && (
+        <RenameHumanModal
+          human={renameHuman}
+          onRename={updateHuman}
+          onClose={() => setRenameHuman(null)}
         />
       )}
       {threadRoot && (
@@ -877,13 +906,17 @@ function MembersSidebar({
   state,
   selectedAgentId,
   setSelectedAgentId,
-  openCreateAgent
+  openCreateAgent,
+  openRenameHuman
 }: {
   state: AppState;
   selectedAgentId: string | null;
   setSelectedAgentId: (id: string) => void;
   openCreateAgent: () => void;
+  openRenameHuman: (human: Human) => void;
 }) {
+  const agentGroups = groupAgentsByComputer(state);
+
   return (
     <>
       <SectionLabel
@@ -895,16 +928,25 @@ function MembersSidebar({
       >
         Agents · {state.agents.length}
       </SectionLabel>
-      {state.agents.map(a => (
-        <button
-          key={a.id}
-          className={`side-row member ${selectedAgentId === a.id ? "is-selected" : ""}`}
-          onClick={() => setSelectedAgentId(a.id)}
-        >
-          <Avatar name={a.name} agent />
-          <span>{a.name}</span>
-          <small>{a.status}</small>
-        </button>
+      {agentGroups.map(group => (
+        <div className="side-agent-group" key={group.id}>
+          <div className="side-agent-group-head">
+            <Computer size={12} />
+            <span>{group.name}</span>
+            <small className={`status-dot ${group.status}`}>{group.agents.length}</small>
+          </div>
+          {group.agents.map(a => (
+            <button
+              key={a.id}
+              className={`side-row member ${selectedAgentId === a.id ? "is-selected" : ""}`}
+              onClick={() => setSelectedAgentId(a.id)}
+            >
+              <Avatar name={a.name} agent />
+              <span>{a.name}</span>
+              <small>{a.status}</small>
+            </button>
+          ))}
+        </div>
       ))}
       {!state.agents.length && (
         <button className="empty-cta" onClick={openCreateAgent}>
@@ -917,6 +959,14 @@ function MembersSidebar({
           <Avatar name={h.name} />
           <span>{h.name}</span>
           <small>you</small>
+          <button
+            className="row-icon-btn human-rename"
+            title={`Rename ${h.name}`}
+            aria-label={`Rename ${h.name}`}
+            onClick={() => openRenameHuman(h)}
+          >
+            <Pencil size={13} />
+          </button>
         </div>
       ))}
     </>
@@ -969,29 +1019,71 @@ function ComputersSidebar({
 
 function ScheduledSidebar({
   state,
-  openScheduledTask
+  selectedAgentId,
+  selectAgent
 }: {
   state: AppState;
-  openScheduledTask: (task: ScheduledTask) => void;
+  selectedAgentId: string;
+  selectAgent: (agentId: string) => void;
 }) {
   const active = state.scheduledTasks.filter(task => task.status === "active").length;
+  const assignedAgents = state.agents
+    .map(agent => ({
+      agent,
+      tasks: state.scheduledTasks.filter(task => task.agentId === agent.id)
+    }))
+    .filter(group => group.tasks.length > 0);
+  const missingAgentTasks = state.scheduledTasks.filter(
+    task => !state.agents.some(agent => agent.id === task.agentId)
+  );
+
   return (
     <>
-      <SectionLabel>Scheduled · {state.scheduledTasks.length}</SectionLabel>
-      <div className="side-collapsible">
-        {state.scheduledTasks.map(task => {
-          const agent = state.agents.find(a => a.id === task.agentId);
-          return (
-            <button key={task.id} className="side-row computer" onClick={() => openScheduledTask(task)}>
-              <span className="computer-tile">
-                <List size={16} />
-              </span>
-              <span>{agent ? `@${agent.handle || agent.name}` : task.agentId}</span>
-              <small className={`status-dot ${task.status}`}>{task.status}</small>
-            </button>
-          );
-        })}
-      </div>
+      <SectionLabel>Agents with schedules · {assignedAgents.length}</SectionLabel>
+      {!!state.scheduledTasks.length && (
+        <button
+          className={`side-row schedule-agent-row ${selectedAgentId === "" ? "is-selected" : ""}`}
+          onClick={() => selectAgent("")}
+        >
+          <span className="computer-tile">
+            <List size={16} />
+          </span>
+          <span>All schedules</span>
+          <span className="schedule-agent-count">{state.scheduledTasks.length}</span>
+        </button>
+      )}
+      {assignedAgents.map(({ agent, tasks }) => {
+        const activeTasks = tasks.filter(task => task.status === "active").length;
+        return (
+          <button
+            key={agent.id}
+            className={`side-row schedule-agent-row ${selectedAgentId === agent.id ? "is-selected" : ""}`}
+            onClick={() => selectAgent(agent.id)}
+          >
+            <Avatar name={agent.name} agent />
+            <span>
+              <strong>@{agent.handle || agent.name}</strong>
+              <small>{activeTasks} active</small>
+            </span>
+            <span className="schedule-agent-count">{tasks.length}</span>
+          </button>
+        );
+      })}
+      {!!missingAgentTasks.length && (
+        <button
+          className={`side-row schedule-agent-row ${selectedAgentId === "__missing__" ? "is-selected" : ""}`}
+          onClick={() => selectAgent("__missing__")}
+        >
+          <span className="computer-tile">
+            <Bot size={16} />
+          </span>
+          <span>
+            <strong>Missing agent</strong>
+            <small>Assignment unavailable</small>
+          </span>
+          <span className="schedule-agent-count">{missingAgentTasks.length}</span>
+        </button>
+      )}
       {!state.scheduledTasks.length && (
         <p className="side-empty">No schedules yet — ask an agent “每隔 10 分钟…”, and it can declare one.</p>
       )}
@@ -1612,40 +1704,64 @@ function CreateTaskModal({
 
 function ScheduledTasksView({
   state,
+  selectedAgentId,
+  selectAgent,
   updateScheduledTask,
   deleteScheduledTask
 }: {
   state: AppState;
+  selectedAgentId: string;
+  selectAgent: (agentId: string) => void;
   updateScheduledTask: (task: ScheduledTask, patch: Record<string, unknown>) => Promise<void>;
   deleteScheduledTask: (task: ScheduledTask) => Promise<void>;
 }) {
   const [status, setStatus] = useState("");
-  const [agentId, setAgentId] = useState("");
   const [editingTask, setEditingTask] = useState<ScheduledTask | null>(null);
+  const selectedAgent = state.agents.find(agent => agent.id === selectedAgentId);
+  const selectedTasks = state.scheduledTasks.filter(task =>
+    !selectedAgentId ||
+    (selectedAgentId === "__missing__"
+      ? !state.agents.some(agent => agent.id === task.agentId)
+      : task.agentId === selectedAgentId)
+  );
   const tasks = state.scheduledTasks
     .filter(task => !status || task.status === status)
-    .filter(task => !agentId || task.agentId === agentId)
+    .filter(task =>
+      !selectedAgentId ||
+      (selectedAgentId === "__missing__"
+        ? !state.agents.some(agent => agent.id === task.agentId)
+        : task.agentId === selectedAgentId)
+    )
     .sort((a, b) => a.nextRunAt.localeCompare(b.nextRunAt));
-  const activeCount = state.scheduledTasks.filter(task => task.status === "active").length;
+  const activeCount = selectedTasks.filter(task => task.status === "active").length;
+  const pageTitle = selectedAgent
+    ? `@${selectedAgent.handle || selectedAgent.name} schedules`
+    : selectedAgentId === "__missing__"
+      ? "Missing agent schedules"
+      : "Scheduled Tasks";
 
   return (
     <section className="pane">
       <Topbar
         eyebrow="Automation"
-        title="Scheduled Tasks"
-        subtitle="Server-owned timers that wake agents by creating delivery messages on schedule."
+        title={pageTitle}
+        subtitle={
+          selectedAgent
+            ? `Schedules assigned to ${selectedAgent.name}.`
+            : "Server-owned timers that wake agents by creating delivery messages on schedule."
+        }
       />
       <div className="schedule-summary">
         <article>
-          <span>{state.scheduledTasks.length}</span>
-          <small>Total schedules</small>
+          <span>{selectedTasks.length}</span>
+          <small>{selectedAgentId ? "Assigned schedules" : "Total schedules"}</small>
         </article>
         <article>
           <span>{activeCount}</span>
           <small>Active</small>
         </article>
         <article>
-          <span>{state.scheduledTasks.length - activeCount}</span>
+          <span>{selectedTasks.length - activeCount}</span>
           <small>Paused</small>
         </article>
       </div>
@@ -1660,13 +1776,18 @@ function ScheduledTasksView({
         </label>
         <label className="select-shell">
           <span>Agent</span>
-          <select value={agentId} onChange={e => setAgentId(e.target.value)}>
+          <select value={selectedAgentId} onChange={e => selectAgent(e.target.value)}>
             <option value="">Any agent</option>
-            {state.agents.map(agent => (
+            {state.agents
+              .filter(agent => state.scheduledTasks.some(task => task.agentId === agent.id))
+              .map(agent => (
               <option key={agent.id} value={agent.id}>
                 {agent.name}
               </option>
-            ))}
+              ))}
+            {state.scheduledTasks.some(task => !state.agents.some(agent => agent.id === task.agentId)) && (
+              <option value="__missing__">Missing agent</option>
+            )}
           </select>
         </label>
       </div>
@@ -1687,8 +1808,12 @@ function ScheduledTasksView({
               <p className="schedule-prompt">{task.prompt}</p>
               <dl className="schedule-details">
                 <div>
-                  <dt>Interval</dt>
-                  <dd>{formatDuration(task.intervalMs)}</dd>
+                  <dt>Schedule</dt>
+                  <dd>
+                    {task.cronExpression
+                      ? <span className="mono">{task.cronExpression} ({task.timezone || "UTC"})</span>
+                      : formatDuration(task.intervalMs || 0)}
+                  </dd>
                 </div>
                 <div>
                   <dt>Next run</dt>
@@ -1732,7 +1857,11 @@ function ScheduledTasksView({
         {tasks.length === 0 && (
           <div className="empty">
             <h3>No scheduled tasks.</h3>
-            <p>Ask an agent “每隔 10 分钟汇报…”. If the agent declares a schedule, iTeam will run it.</p>
+            <p>
+              {selectedAgent
+                ? `No schedules are assigned to ${selectedAgent.name}.`
+                : "Ask an agent “每隔 10 分钟汇报…”. If the agent declares a schedule, iTeam will run it."}
+            </p>
           </div>
         )}
       </div>
@@ -1765,31 +1894,34 @@ function EditScheduledTaskModal({
   const [target, setTarget] = useState(task.target);
   const [agentId, setAgentId] = useState(task.agentId);
   const [status, setStatus] = useState(task.status);
-  const [intervalMinutes, setIntervalMinutes] = useState(String(Math.max(1, Math.round(task.intervalMs / 60_000))));
+  const [scheduleType, setScheduleType] = useState(task.cronExpression ? "cron" : "interval");
+  const [intervalMinutes, setIntervalMinutes] = useState(String(Math.max(1, Math.round((task.intervalMs || 60_000) / 60_000))));
+  const [cronExpression, setCronExpression] = useState(task.cronExpression || "0 9-19 * * 1-5");
+  const [timezone, setTimezone] = useState(task.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
   const [nextRunAt, setNextRunAt] = useState(toDateTimeLocal(task.nextRunAt));
   const [prompt, setPrompt] = useState(task.prompt);
   const [error, setError] = useState("");
   const intervalMs = Number(intervalMinutes) * 60_000;
-  const valid = !!target.trim() && !!agentId && !!prompt.trim() && Number.isFinite(intervalMs) && intervalMs >= 1000 && !!nextRunAt;
+  const validSchedule = scheduleType === "cron"
+    ? !!cronExpression.trim() && !!timezone.trim()
+    : Number.isFinite(intervalMs) && intervalMs >= 1000 && !!nextRunAt;
+  const valid = !!target.trim() && !!agentId && !!prompt.trim() && validSchedule;
 
   async function save() {
     setError("");
     if (!valid) {
-      setError("Target, agent, interval, next run time, and prompt are required.");
-      return;
-    }
-    const parsedNextRunAt = new Date(nextRunAt);
-    if (Number.isNaN(parsedNextRunAt.getTime())) {
-      setError("Next run time is invalid.");
+      setError("Target, agent, schedule, and prompt are required.");
       return;
     }
     try {
+      const schedulePatch = scheduleType === "cron"
+        ? { cronExpression: cronExpression.trim(), timezone: timezone.trim() }
+        : { intervalMs: Math.floor(intervalMs), nextRunAt: new Date(nextRunAt).toISOString() };
       await onSave({
         target: target.trim(),
         agentId,
         status,
-        intervalMs: Math.floor(intervalMs),
-        nextRunAt: parsedNextRunAt.toISOString(),
+        ...schedulePatch,
         prompt: prompt.trim()
       });
     } catch (err) {
@@ -1838,20 +1970,52 @@ function EditScheduledTaskModal({
             </select>
           </label>
           <label className="field">
-            <span>Interval minutes</span>
-            <input
-              type="number"
-              min="1"
-              step="1"
-              value={intervalMinutes}
-              onChange={e => setIntervalMinutes(e.target.value)}
-            />
+            <span>Schedule type</span>
+            <select value={scheduleType} onChange={e => setScheduleType(e.target.value)}>
+              <option value="interval">Interval</option>
+              <option value="cron">Cron</option>
+            </select>
           </label>
         </div>
-        <label className="field">
-          <span>Next run</span>
-          <input type="datetime-local" value={nextRunAt} onChange={e => setNextRunAt(e.target.value)} />
-        </label>
+        {scheduleType === "cron" ? (
+          <div className="field-row">
+            <label className="field">
+              <span>Cron expression</span>
+              <input
+                className="mono"
+                value={cronExpression}
+                onChange={e => setCronExpression(e.target.value)}
+                placeholder="0 9-19 * * 1-5"
+              />
+              <small>Standard 5-field cron: minute hour day month weekday.</small>
+            </label>
+            <label className="field">
+              <span>Timezone</span>
+              <input
+                value={timezone}
+                onChange={e => setTimezone(e.target.value)}
+                placeholder="Asia/Shanghai"
+              />
+            </label>
+          </div>
+        ) : (
+          <div className="field-row">
+            <label className="field">
+              <span>Interval minutes</span>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={intervalMinutes}
+                onChange={e => setIntervalMinutes(e.target.value)}
+              />
+            </label>
+            <label className="field">
+              <span>Next run</span>
+              <input type="datetime-local" value={nextRunAt} onChange={e => setNextRunAt(e.target.value)} />
+            </label>
+          </div>
+        )}
         <label className="field">
           <span>Prompt</span>
           <textarea value={prompt} onChange={e => setPrompt(e.target.value)} />
@@ -1971,6 +2135,10 @@ function MembersView({
   const [modelValue, setModelValue] = useState("");
   const [modelError, setModelError] = useState("");
   const [modelBusy, setModelBusy] = useState(false);
+  const agentGroups = useMemo(() => groupAgentsByComputer(state), [state.agents, state.computers]);
+  const selectedComputer = selectedAgent
+    ? state.computers.find(computer => computer.id === selectedAgent.computerId)
+    : null;
 
   useEffect(() => {
     setRenameValue(selectedAgent?.name || "");
@@ -2032,16 +2200,35 @@ function MembersView({
           <button className="btn btn-primary wide" onClick={openCreateAgent}>
             <Plus size={15} /> Create agent
           </button>
-          <ul className="agent-mini-list">
-            {state.agents.map(a => (
-              <li key={a.id}>
-                <Avatar name={a.name} agent />
-                <span>{a.name}</span>
-                <small>{a.status}</small>
-              </li>
+          <div className="agent-computer-groups">
+            {agentGroups.map(group => (
+              <section className="agent-computer-group" key={group.id}>
+                <header>
+                  <span className="agent-computer-icon">
+                    <Computer size={14} />
+                  </span>
+                  <div>
+                    <strong>{group.name}</strong>
+                    <small>{group.status}</small>
+                  </div>
+                  <span>{group.agents.length}</span>
+                </header>
+                <ul className="agent-mini-list">
+                  {group.agents.map(a => (
+                    <li key={a.id}>
+                      <Avatar name={a.name} agent />
+                      <span>
+                        <strong>{a.name}</strong>
+                        <small>{a.runtime}</small>
+                      </span>
+                      <small>{a.status}</small>
+                    </li>
+                  ))}
+                </ul>
+              </section>
             ))}
-            {!state.agents.length && <li className="muted">No agents yet.</li>}
-          </ul>
+            {!state.agents.length && <p className="agent-groups-empty">No agents yet.</p>}
+          </div>
         </aside>
         <article className="panel panel-dark profile">
           {selectedAgent ? (
@@ -2079,6 +2266,10 @@ function MembersView({
                 <div>
                   <dt>Runtime</dt>
                   <dd>{selectedAgent.runtime}</dd>
+                </div>
+                <div>
+                  <dt>Computer</dt>
+                  <dd>{selectedComputer?.name || "Unassigned"}</dd>
                 </div>
               <label className="profile-rename">
                 <span>Model</span>
@@ -2351,6 +2542,76 @@ function RenameChannelModal({
           </button>
           <button className="btn btn-primary" disabled={!valid || busy} onClick={submit}>
             {busy ? "Saving..." : "Save channel"}
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function RenameHumanModal({
+  human,
+  onRename,
+  onClose
+}: {
+  human: Human;
+  onRename: (humanId: string, name: string) => Promise<void> | void;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState(human.name);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const valid = !!name.trim() && name.trim() !== human.name;
+
+  async function submit() {
+    if (!valid || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      await onRename(human.id, name.trim());
+    } catch (err) {
+      setError((err as Error).message || "Failed to rename human");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <section
+        className="modal modal-narrow"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="rename-human-title"
+        onClick={event => event.stopPropagation()}
+      >
+        <button className="modal-close" title="Close" onClick={onClose}>
+          <X />
+        </button>
+        <p className="eyebrow">Human profile</p>
+        <h1 id="rename-human-title">Change your name.</h1>
+        <p className="modal-lede">
+          This updates how your name appears in members, messages, and future conversations.
+        </p>
+        {error && <p className="form-error">{error}</p>}
+        <label className="field">
+          <span>
+            Display name <em>required</em>
+          </span>
+          <input
+            value={name}
+            onChange={event => setName(event.target.value)}
+            autoFocus
+            onKeyDown={event => {
+              if (event.key === "Enter") submit();
+            }}
+          />
+        </label>
+        <footer className="modal-actions">
+          <button className="btn btn-ghost" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn btn-primary" disabled={!valid || busy} onClick={submit}>
+            {busy ? "Saving..." : "Save name"}
           </button>
         </footer>
       </section>
@@ -2821,6 +3082,26 @@ function slugHandle(value: string) {
       .replace(/[^a-z0-9_-]+/g, "-")
       .replace(/^-+|-+$/g, "") || "member"
   );
+}
+
+function groupAgentsByComputer(state: AppState) {
+  const groups = state.computers.map(computer => ({
+    id: computer.id,
+    name: computer.name,
+    status: computer.status,
+    agents: state.agents.filter(agent => agent.computerId === computer.id)
+  }));
+  const knownComputerIds = new Set(state.computers.map(computer => computer.id));
+  const unassigned = state.agents.filter(agent => !agent.computerId || !knownComputerIds.has(agent.computerId));
+  if (unassigned.length) {
+    groups.push({
+      id: "unassigned",
+      name: "Unassigned",
+      status: "offline",
+      agents: unassigned
+    });
+  }
+  return groups.filter(group => group.agents.length > 0);
 }
 
 // ---------- computers ----------

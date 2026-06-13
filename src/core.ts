@@ -6,6 +6,7 @@
 // clock, id generator) are injectable so the class is library-friendly and
 // testable without booting an HTTP server.
 
+import { CronExpressionParser } from "cron-parser";
 import { createId as defaultCreateId, nowIso as defaultNowIso, DAEMON_VERSION } from "./lib.js";
 import { createStore } from "./store/index.js";
 import { RuntimeManager } from "./runtime.js";
@@ -24,7 +25,8 @@ import type {
   ScheduledTask,
   State,
   StoreEvent,
-  Task
+  Task,
+  Human
 } from "./types.js";
 
 const MAX_DELIVERY_DEPTH = 10;
@@ -72,6 +74,10 @@ export interface AgentPatchInput {
   model?: string | null;
 }
 
+export interface HumanPatchInput {
+  name?: string;
+}
+
 export interface ChannelCreateInput {
   name: string;
   description?: string;
@@ -103,7 +109,9 @@ export interface ScheduledTaskCreateInput {
   target: string;
   agentId: string;
   prompt: string;
-  intervalMs: number | string;
+  intervalMs?: number | string;
+  cronExpression?: string;
+  timezone?: string;
   nextRunAt?: string;
   createdBy?: string;
 }
@@ -113,6 +121,8 @@ export interface ScheduledTaskPatchInput {
   agentId?: string;
   prompt?: string;
   intervalMs?: number | string;
+  cronExpression?: string | null;
+  timezone?: string | null;
   status?: string;
   nextRunAt?: string;
 }
@@ -325,6 +335,19 @@ export class IteamCore {
 
   listHumans() {
     return this.store.snapshot().humans || [];
+  }
+
+  patchHuman(humanId: string, input: HumanPatchInput): Human {
+    return this.store.mutate<Human>(s => {
+      const current = (s.humans || []).find(human => human.id === humanId);
+      if (!current) throw new HttpError(404, "human not found");
+      if (input.name !== undefined) {
+        const name = input.name.trim();
+        if (!name) throw new HttpError(400, "name is required");
+        current.name = name;
+      }
+      return current;
+    });
   }
 
   listDeliveries() {
@@ -1092,21 +1115,27 @@ export class IteamCore {
     if (!input.target || !input.agentId || !input.prompt) {
       throw new HttpError(400, "target, agentId and prompt are required");
     }
-    const intervalMs = parseScheduleInterval(input.intervalMs);
     const created = this.store.mutate<ScheduledTask>(s => {
       const now = this.clock();
       const agent = s.agents.find(a => a.id === input.agentId);
       if (!agent) throw new HttpError(404, "agent not found");
-      const nextRunAt = input.nextRunAt || new Date(Date.parse(now) + intervalMs).toISOString();
-      if (!Number.isFinite(Date.parse(nextRunAt))) throw new HttpError(400, "nextRunAt must be an ISO timestamp");
+      const schedule = parseSchedule({
+        intervalMs: input.intervalMs,
+        cronExpression: input.cronExpression,
+        timezone: input.timezone,
+        nextRunAt: input.nextRunAt,
+        now
+      });
       const task: ScheduledTask = {
         id: this.newId("sched"),
         target: input.target,
         agentId: input.agentId,
         prompt: input.prompt,
-        intervalMs,
+        intervalMs: schedule.intervalMs,
+        cronExpression: schedule.cronExpression,
+        timezone: schedule.timezone,
         status: "active",
-        nextRunAt,
+        nextRunAt: schedule.nextRunAt,
         lastRunAt: null,
         lastMessageId: null,
         runCount: 0,
@@ -1122,7 +1151,6 @@ export class IteamCore {
   }
 
   patchScheduledTask(taskId: string, input: ScheduledTaskPatchInput): ScheduledTask {
-    const intervalMs = input.intervalMs === undefined ? undefined : parseScheduleInterval(input.intervalMs);
     return this.store.mutate<ScheduledTask>(s => {
       const now = this.clock();
       const current = (s.scheduledTasks || []).find(task => task.id === taskId);
@@ -1136,12 +1164,35 @@ export class IteamCore {
       if (input.nextRunAt && !Number.isFinite(Date.parse(input.nextRunAt))) {
         throw new HttpError(400, "nextRunAt must be an ISO timestamp");
       }
+      const scheduleChanged =
+        input.intervalMs !== undefined ||
+        input.cronExpression !== undefined ||
+        input.timezone !== undefined;
+      const resumingCron =
+        input.status === "active" &&
+        current.status !== "active" &&
+        !!(input.cronExpression ?? current.cronExpression);
+      if (scheduleChanged || resumingCron) {
+        const switchingToInterval = input.intervalMs !== undefined;
+        const switchingToCron = input.cronExpression !== undefined && !!input.cronExpression;
+        const schedule = parseSchedule({
+          intervalMs: switchingToCron ? undefined : input.intervalMs ?? current.intervalMs ?? undefined,
+          cronExpression: switchingToInterval ? undefined : input.cronExpression ?? current.cronExpression ?? undefined,
+          timezone: input.timezone ?? current.timezone ?? undefined,
+          nextRunAt: input.nextRunAt,
+          now
+        });
+        current.intervalMs = schedule.intervalMs;
+        current.cronExpression = schedule.cronExpression;
+        current.timezone = schedule.timezone;
+        current.nextRunAt = schedule.nextRunAt;
+      } else if (input.nextRunAt) {
+        current.nextRunAt = input.nextRunAt;
+      }
       current.target = input.target ?? current.target;
       current.agentId = input.agentId ?? current.agentId;
       current.prompt = input.prompt ?? current.prompt;
-      current.intervalMs = intervalMs ?? current.intervalMs;
       current.status = input.status ?? current.status;
-      current.nextRunAt = input.nextRunAt ?? current.nextRunAt;
       current.updatedAt = now;
       return current;
     });
@@ -1164,9 +1215,13 @@ export class IteamCore {
     const agent = state.agents.find(a => a.id === agentId);
     if (!agent) return;
     try {
-      const intervalMs = parseScheduleInterval(directive.intervalMs);
-      const nextRunAt = directive.nextRunAt || new Date(Date.parse(now) + intervalMs).toISOString();
-      if (!Number.isFinite(Date.parse(nextRunAt))) throw new Error("nextRunAt must be an ISO timestamp");
+      const schedule = parseSchedule({
+        intervalMs: directive.intervalMs,
+        cronExpression: directive.cronExpression,
+        timezone: directive.timezone,
+        nextRunAt: directive.nextRunAt,
+        now
+      });
       const prompt = String(directive.prompt || "").trim();
       if (!prompt) throw new Error("prompt is required");
       const scheduled: ScheduledTask = {
@@ -1174,9 +1229,11 @@ export class IteamCore {
         target,
         agentId: agent.id,
         prompt,
-        intervalMs,
+        intervalMs: schedule.intervalMs,
+        cronExpression: schedule.cronExpression,
+        timezone: schedule.timezone,
         status: "active",
-        nextRunAt,
+        nextRunAt: schedule.nextRunAt,
         lastRunAt: null,
         lastMessageId: null,
         runCount: 0,
@@ -1191,7 +1248,7 @@ export class IteamCore {
         target,
         authorId: "system",
         type: "system",
-        text: `Scheduled task created for @${agent.handle || slugHandle(agent.name)}: every ${formatScheduleInterval(intervalMs)}. Next run at ${scheduled.nextRunAt}.`,
+        text: `Scheduled task created for @${agent.handle || slugHandle(agent.name)}: ${formatSchedule(scheduled)}. Next run at ${scheduled.nextRunAt}.`,
         mentions: [],
         createdAt: now,
         threadId: threadRootFromTarget(target)
@@ -1266,7 +1323,9 @@ export class IteamCore {
         task.lastRunAt = now;
         task.lastMessageId = message.id;
         task.runCount = (task.runCount || 0) + 1;
-        task.nextRunAt = new Date(nowMs + task.intervalMs).toISOString();
+        task.nextRunAt = task.cronExpression
+          ? nextCronRun(task.cronExpression, task.timezone || defaultTimezone(), now)
+          : new Date(nowMs + parseScheduleInterval(task.intervalMs)).toISOString();
         task.updatedAt = now;
         ran += 1;
       }
@@ -1526,7 +1585,9 @@ function stripThreadMarker(text: string): { text: string; threaded: boolean } {
 
 interface ScheduleDirective {
   create?: boolean;
-  intervalMs: number | string;
+  intervalMs?: number | string;
+  cronExpression?: string;
+  timezone?: string;
   prompt: string;
   nextRunAt?: string;
 }
@@ -1539,7 +1600,7 @@ function stripScheduleDirective(text: string): { text: string; directive: Schedu
     const parsed = JSON.parse(match[1]) as ScheduleDirective;
     if (parsed && typeof parsed === "object") directive = parsed;
   } catch {
-    directive = { create: true, intervalMs: 0, prompt: "" };
+    directive = { create: true, prompt: "" };
   }
   return {
     text: text.replace(match[0], "").trim(),
@@ -1582,7 +1643,7 @@ function parseMessageLimit(value: number | string | null | undefined): number {
   return Math.max(1, Math.min(1000, numeric || 10));
 }
 
-function parseScheduleInterval(value: number | string): number {
+function parseScheduleInterval(value: number | string | null | undefined): number {
   const numeric = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(numeric) || numeric < 1000) {
     throw new HttpError(400, "intervalMs must be at least 1000");
@@ -1590,11 +1651,66 @@ function parseScheduleInterval(value: number | string): number {
   return Math.floor(numeric);
 }
 
+interface ParsedSchedule {
+  intervalMs: number | null;
+  cronExpression: string | null;
+  timezone: string | null;
+  nextRunAt: string;
+}
+
+function parseSchedule(input: {
+  intervalMs?: number | string;
+  cronExpression?: string;
+  timezone?: string;
+  nextRunAt?: string;
+  now: string;
+}): ParsedSchedule {
+  const cronExpression = String(input.cronExpression || "").trim();
+  if (cronExpression && input.intervalMs !== undefined) {
+    throw new HttpError(400, "use either intervalMs or cronExpression, not both");
+  }
+  if (cronExpression) {
+    const timezone = String(input.timezone || defaultTimezone()).trim();
+    return {
+      intervalMs: null,
+      cronExpression,
+      timezone,
+      nextRunAt: nextCronRun(cronExpression, timezone, input.now)
+    };
+  }
+  const intervalMs = parseScheduleInterval(input.intervalMs);
+  const nextRunAt = input.nextRunAt || new Date(Date.parse(input.now) + intervalMs).toISOString();
+  if (!Number.isFinite(Date.parse(nextRunAt))) throw new HttpError(400, "nextRunAt must be an ISO timestamp");
+  return { intervalMs, cronExpression: null, timezone: null, nextRunAt };
+}
+
+function nextCronRun(expression: string, timezone: string, currentDate: string): string {
+  if (expression.trim().split(/\s+/).length !== 5) {
+    throw new HttpError(400, "cronExpression must use the standard 5-field format");
+  }
+  try {
+    return CronExpressionParser.parse(expression, { currentDate, tz: timezone }).next().toDate().toISOString();
+  } catch (error) {
+    throw new HttpError(400, `invalid cronExpression or timezone: ${(error as Error).message}`);
+  }
+}
+
+function defaultTimezone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+}
+
 function formatScheduleInterval(ms: number): string {
   if (ms % 86_400_000 === 0) return `${ms / 86_400_000} day(s)`;
   if (ms % 3_600_000 === 0) return `${ms / 3_600_000} hour(s)`;
   if (ms % 60_000 === 0) return `${ms / 60_000} minute(s)`;
   return `${Math.round(ms / 1000)} second(s)`;
+}
+
+function formatSchedule(task: ScheduledTask): string {
+  if (task.cronExpression) {
+    return `cron ${task.cronExpression} (${task.timezone || "UTC"})`;
+  }
+  return `every ${formatScheduleInterval(parseScheduleInterval(task.intervalMs))}`;
 }
 
 function paginateMessages(messages: Message[], options: { limit: number; before?: string | null }): Message[] {

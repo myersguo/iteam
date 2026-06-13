@@ -314,6 +314,12 @@ async function route(
     return sendJson(res, 200, core.patchAgent(agentPatch[1], body));
   }
 
+  const humanPatch = url.pathname.match(/^\/api\/humans\/([^/]+)$/);
+  if (req.method === "PATCH" && humanPatch) {
+    const body = await parseJsonBody<any>(req);
+    return sendJson(res, 200, core.patchHuman(decodeURIComponent(humanPatch[1]), body));
+  }
+
   const runtimeStatus = url.pathname.match(/^\/api\/agents\/([^/]+)\/runtime-status$/);
   if (req.method === "POST" && runtimeStatus) {
     requireComputerAuth(core, req, runtimeStatus[1], "agent");

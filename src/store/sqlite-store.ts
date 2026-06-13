@@ -90,6 +90,8 @@ export class SqliteStore extends BaseStore {
   // ---------------------------------------------------------------------------
   private runColumnMigrations(): void {
     this.addColumnIfMissing("iteam_computers", "connect_token", "TEXT");
+    this.addColumnIfMissing("iteam_scheduled_tasks", "cron_expression", "TEXT");
+    this.addColumnIfMissing("iteam_scheduled_tasks", "timezone", "TEXT");
     this.migrateAgentsModelNullable();
   }
 
@@ -307,7 +309,9 @@ export class SqliteStore extends BaseStore {
         target: string;
         agent_id: string;
         prompt: string;
-        interval_ms: number;
+        interval_ms: number | null;
+        cron_expression: string | null;
+        timezone: string | null;
         status: string;
         next_run_at: string;
         last_run_at: string | null;
@@ -448,6 +452,8 @@ export class SqliteStore extends BaseStore {
       agentId: row.agent_id,
       prompt: row.prompt,
       intervalMs: row.interval_ms,
+      cronExpression: row.cron_expression,
+      timezone: row.timezone,
       status: row.status,
       nextRunAt: row.next_run_at,
       lastRunAt: row.last_run_at,
@@ -663,7 +669,7 @@ export class SqliteStore extends BaseStore {
     this.db.exec("DELETE FROM iteam_scheduled_tasks");
     if (state.scheduledTasks.length) {
       const stmt = this.db.prepare(
-        "INSERT INTO iteam_scheduled_tasks (id, target, agent_id, prompt, interval_ms, status, next_run_at, last_run_at, last_message_id, run_count, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO iteam_scheduled_tasks (id, target, agent_id, prompt, interval_ms, cron_expression, timezone, status, next_run_at, last_run_at, last_message_id, run_count, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       );
       for (const task of state.scheduledTasks) {
         stmt.run(
@@ -671,7 +677,9 @@ export class SqliteStore extends BaseStore {
           task.target,
           task.agentId,
           task.prompt,
-          task.intervalMs,
+          task.intervalMs ?? 0,
+          task.cronExpression ?? null,
+          task.timezone ?? null,
           task.status,
           task.nextRunAt,
           task.lastRunAt ?? null,
