@@ -19,10 +19,10 @@ import { join } from "node:path";
 import { nowIso, defaultHome } from "../lib.js";
 import { agentEnv, prepareAgentWorkspace, type AgentWorkspaceLayout } from "../workspace.js";
 import type { Agent, DeliveryWithContext } from "../types.js";
-import type { AgentDriver, AgentEventListener, DeliverResult, DeliveryMode, DriverCapabilities } from "./driver.js";
+import { deliveryAffinityIndex, type AgentDriver, type AgentEventListener, type DeliverResult, type DeliveryMode, type DriverCapabilities } from "./driver.js";
 import type { AgentEvent } from "./events.js";
 
-const TURN_TIMEOUT_MS = 300000;
+const TURN_IDLE_TIMEOUT_MS = readPositiveMs("ITEAM_AGENT_IDLE_TIMEOUT_MS", 6 * 60 * 60 * 1000);
 const PROCESS_POOL_SIZE = 3;
 
 export interface ClaudeDriverOptions {
@@ -37,6 +37,7 @@ interface PendingTurn {
   reject: (err: Error) => void;
   accumulator: string[];
   timer: ReturnType<typeof setTimeout>;
+  touch: () => void;
 }
 
 interface ProcessState {
@@ -98,9 +99,8 @@ export class ClaudeDriver implements AgentDriver {
   async start(agent: Agent): Promise<void> {
     while (this.processes.length + this.startPromises.length < PROCESS_POOL_SIZE) {
       const processIndex = this.processes.length + this.startPromises.length;
-      const p = this.doStart(agent, processIndex).catch(error => {
+      const p = this.doStart(agent, processIndex).finally(() => {
         this.startPromises = this.startPromises.filter(x => x !== p);
-        throw error;
       });
       this.startPromises.push(p);
     }
@@ -216,12 +216,11 @@ export class ClaudeDriver implements AgentDriver {
     this.processes.push(state);
   }
 
-  async deliver(agent: Agent, _delivery: DeliveryWithContext, prompt: string): Promise<DeliverResult> {
+  async deliver(agent: Agent, delivery: DeliveryWithContext, prompt: string): Promise<DeliverResult> {
     await this.start(agent);
     if (this.processes.length === 0) throw new Error("claude processes not initialized");
 
-    const state = this.processes[this.nextProcessIndex % this.processes.length];
-    this.nextProcessIndex++;
+    const state = this.processes[deliveryAffinityIndex(delivery, this.processes.length)];
 
     const turn = state.inflight.then(() => this.runTurn(agent, state, prompt));
     state.inflight = turn.catch(() => {});
@@ -244,16 +243,22 @@ export class ClaudeDriver implements AgentDriver {
         finalPrompt = truncated + "\n\n[Note: prompt was truncated due to length limits]";
       }
 
-      const timer = setTimeout(() => {
-        if (state.pending) {
-          state.pending = null;
-          try { state.child.kill("SIGTERM"); } catch {}
-          this.processes = this.processes.filter(p => p !== state);
-          reject(new Error("claude response timed out"));
-        }
-      }, TURN_TIMEOUT_MS);
+      let timer: ReturnType<typeof setTimeout> = setTimeout(() => {}, 0);
+      const touch = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          if (state.pending) {
+            state.pending = null;
+            try { state.child.kill("SIGTERM"); } catch {}
+            this.processes = this.processes.filter(p => p !== state);
+            reject(new Error("claude response idle timeout"));
+          }
+        }, TURN_IDLE_TIMEOUT_MS);
+        if (state.pending) state.pending.timer = timer;
+      };
+      touch();
 
-      state.pending = { resolve, reject, accumulator: [], timer };
+      state.pending = { resolve, reject, accumulator: [], timer, touch };
 
       const userMessage = {
         type: "user",
@@ -273,6 +278,7 @@ export class ClaudeDriver implements AgentDriver {
   }
 
   private handleStdout(agent: Agent, state: ProcessState, chunk: Buffer): void {
+    state.pending?.touch();
     state.stdoutBuf += chunk.toString("utf8");
     let nl: number;
     while ((nl = state.stdoutBuf.indexOf("\n")) !== -1) {
@@ -439,4 +445,9 @@ export class ClaudeDriver implements AgentDriver {
     this.processes = [];
     this.startPromises = [];
   }
+}
+
+function readPositiveMs(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
 }

@@ -35,6 +35,7 @@ export type StatusReporter = (
 export interface AgentLauncherOptions {
   serverUrl: string;
   report: StatusReporter;
+  reportDeliveryProgress?: (deliveryId: string, text: string) => Promise<unknown>;
   /**
    * Lazy-resolved connect credentials. The daemon may not have a computer id
    * until the first heartbeat completes, so we read these on each launch.
@@ -45,16 +46,20 @@ export interface AgentLauncherOptions {
 export class AgentLauncher {
   serverUrl: string;
   report: StatusReporter;
+  reportDeliveryProgress: (deliveryId: string, text: string) => Promise<unknown>;
   getCredentials: () => { computerId?: string; connectToken?: string };
   children: Map<string, ChildEntry>;
   drivers: Map<string, DriverEntry>;
+  progressEventKeys: Map<string, number>;
 
-  constructor({ serverUrl, report, getCredentials }: AgentLauncherOptions) {
+  constructor({ serverUrl, report, reportDeliveryProgress, getCredentials }: AgentLauncherOptions) {
     this.serverUrl = serverUrl.replace(/\/$/, "");
     this.report = report;
+    this.reportDeliveryProgress = reportDeliveryProgress || (async () => {});
     this.getCredentials = getCredentials || (() => ({}));
     this.children = new Map();
     this.drivers = new Map();
+    this.progressEventKeys = new Map();
   }
 
   has(agentId: string): boolean {
@@ -170,6 +175,22 @@ export class AgentLauncher {
 
   private subscribeDriver(agent: Agent, driver: AgentDriver, launchId: string): void {
     driver.on(event => {
+      const progress = formatTaskRuntimeProgress(event);
+      const progressKey = event.deliveryId && progress
+        ? `${event.deliveryId}:${event.type}:${progress}`
+        : "";
+      const previousProgressAt = this.progressEventKeys.get(progressKey) || 0;
+      const now = Date.now();
+      if (
+        event.deliveryId &&
+        event.target?.includes(":msg_") &&
+        progress &&
+        now - previousProgressAt >= 10_000
+      ) {
+        this.progressEventKeys.set(progressKey, now);
+        if (this.progressEventKeys.size > 1000) this.progressEventKeys.clear();
+        this.reportDeliveryProgress(event.deliveryId, progress).catch(() => {});
+      }
       switch (event.type) {
         case "session_started":
           this.report(agent.id, "output", {
@@ -373,6 +394,62 @@ export class AgentLauncher {
   }
 }
 
+export function formatTaskRuntimeProgress(event: import("./runtime/events.js").AgentEvent): string | null {
+  if (event.type === "tool_call") {
+    const args = asRecord(event.arguments);
+    if (event.toolName === "file_change") {
+      const path = compactText(args.path, 240);
+      const kind = compactText(args.kind, 40);
+      return path ? `执行过程：${kind ? `${kind} ` : ""}文件 \`${path}\`。` : "执行过程：正在修改文件。";
+    }
+    if (event.toolName === "shell") {
+      const command = compactText(args.command, 300);
+      return command ? `执行过程：运行命令 \`${command}\`。` : "执行过程：正在运行命令。";
+    }
+    if (event.toolName === "web_search") {
+      const query = compactText(args.query, 240);
+      return query ? `执行过程：搜索 ${query}。` : "执行过程：正在搜索资料。";
+    }
+    if (event.toolName === "subagent_spawnAgent") {
+      const prompt = compactText(args.prompt, 400);
+      return prompt
+        ? `执行过程：已启动 sub agent review：${prompt}`
+        : "执行过程：已启动 sub agent review。";
+    }
+    if (event.toolName === "subagent_sendInput") return "执行过程：已向 sub agent 发送补充信息。";
+    if (event.toolName === "subagent_wait") return "执行过程：正在等待 sub agent review。";
+    if (event.toolName === "subagent_closeAgent") return "执行过程：review 完成，正在关闭 sub agent。";
+    if (event.toolName.startsWith("mcp_chat_")) return null;
+  }
+  if (event.type === "tool_result") {
+    const output = asRecord(event.output);
+    const tool = compactText(output.tool, 80);
+    if (tool && ["spawnAgent", "sendInput", "resumeAgent", "wait", "closeAgent"].includes(tool)) {
+      const messages = Object.values(asRecord(output.agentsStates))
+        .map(value => compactText(asRecord(value).message, 700))
+        .filter(Boolean);
+      if (tool === "wait" && messages.length > 0) {
+        return `执行过程：sub agent review 完成：${messages.join(" ").slice(0, 900)}`;
+      }
+      if (tool === "closeAgent") return event.ok ? "执行过程：sub agent 已关闭。" : "执行过程：关闭 sub agent 失败。";
+      return event.ok
+        ? `执行过程：sub agent ${tool} 完成。`
+        : `执行过程：sub agent ${tool} 失败。`;
+    }
+  }
+  return null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? value as Record<string, unknown> : {};
+}
+
+function compactText(value: unknown, maxLength: number): string {
+  return typeof value === "string"
+    ? value.replace(/\s+/g, " ").trim().slice(0, maxLength)
+    : "";
+}
+
 interface BuildRuntimeSpecArgs {
   agent: Agent;
   workspace: AgentWorkspaceLayout;
@@ -440,11 +517,17 @@ function formatDeliveryPrompt({ agent, message, delivery }: DeliveryPromptArgs):
     .map(member => `- ${member.name} (@${member.handle})`)
     .join("\n");
   const history = formatConversationHistory(delivery.contextMessages || [], message.id);
+  const taskMode = delivery.target.includes(":msg_") &&
+    (message.type === "task" || (delivery.contextMessages || []).some(item => item.type === "task"));
+  const taskInstructions = taskMode
+    ? `\n**Long-running task mode:**\n- Continue working until the task is genuinely complete; do not stop merely because the work takes a long time.\n- Important semantic milestones, blockers, review findings, and material partial results should be posted to ${replyTarget} with the iteam_message_send tool while work continues.\n- For multi-round work, report the transition between rounds: initial implementation complete, sub agent/reviewer started, review result received, corrections applied, and verification complete.\n- Keep milestone updates concise. The daemon also posts structured tool/sub-agent events and periodic keepalive progress, so do not send repetitive status-only messages.\n`
+    : "";
   return `You are ${agent.name}, an iTeam agent.
 
 Reply to the current chat message in the indicated reply target. Use the conversation history for context, including what other agents have already said. Keep the reply concise and directly useful.
 When another agent is mentioned, address them with their @handle, not their internal id. Ask at most one clear follow-up question.
 Your persistent workspace contains MEMORY.md. If this message depends on older context not shown below, use the local CLI: iteam-agent message read/search/check.
+${taskInstructions}
 
 **Scheduled tasks:**
 - If the current human message asks for a recurring cadence such as "每隔 10 分钟", "every 1 hour", or "工作日 09:00 到 19:00 每小时", decide whether a real scheduled task should be created.

@@ -3,6 +3,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { formatTaskRuntimeProgress } from "../src/agent-launcher.js";
+import { notificationBelongsToThread } from "../src/runtime/codex-driver.js";
+import { deliveryAffinityIndex } from "../src/runtime/driver.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const tsxBin = resolve(root, "node_modules/.bin/tsx");
@@ -14,6 +17,76 @@ const daemon = spawn(tsxBin, [resolve(root, "src/server.ts"), "--port", String(p
 });
 
 try {
+  const affinityA = deliveryAffinityIndex({
+    id: "delivery_a",
+    target: "#all:msg_task",
+    messageId: "msg_task",
+    rootMessageId: "msg_task",
+    parentDeliveryId: null,
+    depth: 0,
+    agentId: "agent_test",
+    computerId: "computer_test",
+    status: "delivering",
+    attempts: 0,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  }, 3);
+  const affinityB = deliveryAffinityIndex({
+    id: "delivery_b",
+    target: "#all:msg_task",
+    messageId: "msg_followup",
+    rootMessageId: "msg_task",
+    parentDeliveryId: null,
+    depth: 0,
+    agentId: "agent_test",
+    computerId: "computer_test",
+    status: "delivering",
+    attempts: 0,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  }, 3);
+  if (affinityA !== affinityB) throw new Error("same task thread must keep runtime session affinity");
+  const subagentStarted = formatTaskRuntimeProgress({
+    type: "tool_call",
+    agentId: "agent_test",
+    launchId: "launch_test",
+    deliveryId: "delivery_test",
+    target: "#all:msg_task",
+    at: new Date().toISOString(),
+    toolName: "subagent_spawnAgent",
+    toolCallId: "call_test",
+    arguments: { prompt: "Review quick_sort.py for correctness and edge cases." }
+  });
+  if (!subagentStarted?.includes("已启动 sub agent review")) {
+    throw new Error("sub agent start should produce readable task progress");
+  }
+  const subagentCompleted = formatTaskRuntimeProgress({
+    type: "tool_result",
+    agentId: "agent_test",
+    launchId: "launch_test",
+    deliveryId: "delivery_test",
+    target: "#all:msg_task",
+    at: new Date().toISOString(),
+    toolCallId: "call_test",
+    ok: true,
+    output: {
+      tool: "wait",
+      status: "completed",
+      agentsStates: {
+        reviewThread: { status: "completed", message: "Handle duplicate values without losing elements." }
+      }
+    }
+  });
+  if (!subagentCompleted?.includes("Handle duplicate values")) {
+    throw new Error("sub agent result should include the review summary");
+  }
+  if (notificationBelongsToThread({ threadId: "subagent_thread" }, "parent_thread")) {
+    throw new Error("sub agent notifications must not complete or pollute the parent task turn");
+  }
+  if (!notificationBelongsToThread({ threadId: "parent_thread" }, "parent_thread")) {
+    throw new Error("parent task notifications should remain visible to the parent turn");
+  }
+
   await waitForHealth(port);
   const renamedHuman = await patch(port, "/api/humans/human-local", { name: "Smoke Human" });
   if (renamedHuman.name !== "Smoke Human" || renamedHuman.handle !== "you") {
@@ -148,6 +221,9 @@ try {
     });
     if (String(directAgentSchedule.text || "").includes("iteam_schedule")) {
       throw new Error("direct agent message should strip schedule directive");
+    }
+    if (directAgentSchedule.type !== "agent") {
+      throw new Error("messages authored by agents should default to agent type");
     }
     const directSchedules = await get(port, "/api/scheduled-tasks");
     if (!directSchedules.some((item: any) => item.agentId === agent.id && item.intervalMs === 120_000 && item.prompt === "direct agent schedule")) {
@@ -292,8 +368,38 @@ try {
     daemonVersion: "0.1.0",
     runtimes: [{ id: "codex", name: "Codex CLI", installed: true }]
   });
-  if (!taskHeartbeat.deliveries.some((delivery: any) => delivery.target === task.threadTarget && delivery.messageId === task.messageId)) {
+  const taskDelivery = taskHeartbeat.deliveries.find(
+    (delivery: any) => delivery.target === task.threadTarget && delivery.messageId === task.messageId
+  );
+  if (!taskDelivery) {
     throw new Error("assigned task was not delivered to its thread");
+  }
+  const noAuthProgress = await postStatus(
+    port,
+    `/api/deliveries/${encodeURIComponent(taskDelivery.id)}/progress`,
+    { text: "Progress: still working (1s elapsed).", elapsedMs: 1000 }
+  );
+  if (noAuthProgress !== 401) throw new Error(`delivery progress without auth should be 401, got ${noAuthProgress}`);
+  await post(port, `/api/deliveries/${encodeURIComponent(taskDelivery.id)}/progress`, {
+    text: "Progress: still working (1s elapsed).",
+    elapsedMs: 1000
+  }, computerAuth);
+  await post(port, `/api/deliveries/${encodeURIComponent(taskDelivery.id)}/progress`, {
+    text: "Progress: still working (2s elapsed).",
+    elapsedMs: 2000
+  }, computerAuth);
+  const taskProgressMessages = await get(
+    port,
+    `/api/messages?target=${encodeURIComponent(task.threadTarget)}&limit=50`
+  );
+  if (taskProgressMessages.filter((message: any) =>
+    message.authorId === agent.id && message.text.startsWith("Progress: still working")
+  ).length !== 2) {
+    throw new Error("task progress updates were not written to the task thread as the agent");
+  }
+  const tasksAfterProgress = await get(port, "/api/tasks");
+  if (!tasksAfterProgress.some((item: any) => item.id === task.id && item.status === "in_progress")) {
+    throw new Error("first task progress update should move the task to in_progress");
   }
   const reply = await post(port, "/api/messages", {
     target: task.threadTarget,
@@ -303,7 +409,9 @@ try {
   if (reply.threadId !== task.messageId) throw new Error("thread reply did not keep root thread id");
   const messagesAfterReply = await get(port, `/api/messages/channel/${encodeURIComponent(allChannel.id)}?limit=50`);
   const taskRootAfterReply = messagesAfterReply.find((message: any) => message.id === task.messageId);
-  if (taskRootAfterReply?.replyCount !== 1) throw new Error("channel messages should include thread reply counts");
+  if (taskRootAfterReply?.replyCount !== 3) throw new Error("channel messages should include task progress and thread reply counts");
+  await post(port, `/api/deliveries/${encodeURIComponent(taskDelivery.id)}/result`,
+    { ok: true, text: "task smoke complete" }, computerAuth);
   await patch(port, `/api/tasks/${task.id}`, { status: "in_review" });
   const tasks = await get(port, "/api/tasks");
   if (!tasks.some((item: any) => item.id === task.id && item.status === "in_review")) throw new Error("task status was not updated");

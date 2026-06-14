@@ -353,6 +353,13 @@ async function route(
     return sendJson(res, 200, core.applyDeliveryResult(deliveryResult[1], body));
   }
 
+  const deliveryProgress = url.pathname.match(/^\/api\/deliveries\/([^/]+)\/progress$/);
+  if (req.method === "POST" && deliveryProgress) {
+    requireComputerAuth(core, req, deliveryProgress[1], "delivery");
+    const body = await parseJsonBody<any>(req);
+    return sendJson(res, 201, core.applyDeliveryProgress(deliveryProgress[1], body));
+  }
+
   if (req.method === "POST" && url.pathname === "/api/tasks") {
     const body = await parseJsonBody<any>(req);
     return sendJson(res, 201, core.createTask(body));

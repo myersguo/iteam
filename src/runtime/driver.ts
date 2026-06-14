@@ -101,3 +101,18 @@ export interface AgentDriver {
    */
   isAlive?(): boolean;
 }
+
+/**
+ * Keep every delivery in the same iTeam thread on the same persistent
+ * runtime session. Non-thread deliveries stay distributed by delivery id.
+ */
+export function deliveryAffinityIndex(delivery: DeliveryWithContext, poolSize: number): number {
+  if (poolSize <= 1) return 0;
+  const key = delivery.target.includes(":msg_") ? delivery.target : delivery.id;
+  let hash = 2166136261;
+  for (let i = 0; i < key.length; i += 1) {
+    hash ^= key.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) % poolSize;
+}

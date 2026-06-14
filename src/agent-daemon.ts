@@ -10,6 +10,10 @@ const serverUrl = readArg("--server-url", process.env.ITEAM_SERVER_URL);
 const cliConnectToken = readArg("--connect-token", process.env.ITEAM_CONNECT_TOKEN);
 const name = readArg("--name", localComputerFingerprint().hostname) || localComputerFingerprint().hostname;
 const intervalMs = Number(readArg("--interval-ms", "5000"));
+const taskProgressIntervalMs = readPositiveMs(
+  readArg("--task-progress-interval-ms", process.env.ITEAM_TASK_PROGRESS_INTERVAL_MS),
+  60_000
+);
 
 if (!serverUrl) {
   printUsage("--server-url is required");
@@ -41,6 +45,7 @@ let computerId: string | undefined;
 const launcher = new AgentLauncher({
   serverUrl: baseUrl,
   report: reportAgentStatus,
+  reportDeliveryProgress: (deliveryId, text) => reportDeliveryProgress(deliveryId, text, 0),
   getCredentials: () => ({ computerId, connectToken })
 });
 
@@ -104,22 +109,7 @@ async function heartbeat(): Promise<void> {
     });
   }
   for (const delivery of computer.deliveries || []) {
-    const author = (delivery.author?.handle && `@${delivery.author.handle}`) || delivery.author?.name || "unknown";
-    const target = delivery.target || delivery.message?.target || "?";
-    const agent = delivery.agent;
-    const agentLabel = agent ? `@${agent.handle || agent.name} (${agent.id}, runtime=${agent.runtime})` : delivery.agentId;
-    console.log(`[${nowIso()}] deliver ${delivery.id} -> ${agentLabel} (from=${author}, target=${target})`);
-    launcher.deliver(delivery).then(result => {
-      console.log(`[${nowIso()}] deliver ${delivery.id} ok (text length=${(result.text || "").length})`);
-      reportDeliveryResult(delivery.id, result).catch(err => {
-        console.error(`[${nowIso()}] report ${delivery.id} (ok) failed: ${err.message}`);
-      });
-    }).catch((error: Error) => {
-      console.error(`[${nowIso()}] deliver ${delivery.id} failed`);
-      reportDeliveryResult(delivery.id, { ok: false, error: error.message }).catch(err => {
-        console.error(`[${nowIso()}] report ${delivery.id} (failed) failed: ${err.message}`);
-      });
-    });
+    runDelivery(delivery, "deliver");
   }
   // Open the SSE push channel once we have credentials. ensurePushStream is
   // idempotent so repeat calls during heartbeat are harmless.
@@ -264,6 +254,67 @@ async function reportDeliveryResult(deliveryId: string, result: DeliveryReport):
     }
   }
   throw lastErr || new Error("reportDeliveryResult exhausted retries");
+}
+
+async function reportDeliveryProgress(deliveryId: string, text: string, elapsedMs: number): Promise<unknown> {
+  return requestJson(`${baseUrl}/api/deliveries/${deliveryId}/progress`, {
+    method: "POST",
+    headers: buildAuthHeader(),
+    body: { text, elapsedMs }
+  });
+}
+
+function isTaskDelivery(delivery: DeliveryWithContext): boolean {
+  if (!delivery.target.includes(":msg_")) return false;
+  if (delivery.message?.type === "task") return true;
+  return (delivery.contextMessages || []).some(message => message.type === "task");
+}
+
+function runDelivery(delivery: DeliveryWithContext, source: "deliver" | "push"): void {
+  const author = (delivery.author?.handle && `@${delivery.author.handle}`) || delivery.author?.name || "unknown";
+  const target = delivery.target || delivery.message?.target || "?";
+  const agent = delivery.agent;
+  const agentLabel = agent ? `@${agent.handle || agent.name} (${agent.id}, runtime=${agent.runtime})` : delivery.agentId;
+  console.log(`[${nowIso()}] ${source}: deliver ${delivery.id} -> ${agentLabel} (from=${author}, target=${target})`);
+
+  const startedAt = Date.now();
+  let progressTimer: NodeJS.Timeout | null = null;
+  if (isTaskDelivery(delivery)) {
+    progressTimer = setInterval(() => {
+      const elapsedMs = Date.now() - startedAt;
+      const text = `Progress: still working (${formatElapsed(elapsedMs)} elapsed).`;
+      reportDeliveryProgress(delivery.id, text, elapsedMs).catch(error => {
+        console.error(`[${nowIso()}] progress ${delivery.id} failed: ${(error as Error).message}`);
+      });
+    }, taskProgressIntervalMs);
+  }
+
+  launcher.deliver(delivery).then(result => {
+    if (progressTimer) clearInterval(progressTimer);
+    console.log(`[${nowIso()}] deliver ${delivery.id} ok (text length=${(result.text || "").length})`);
+    reportDeliveryResult(delivery.id, result).catch(err => {
+      console.error(`[${nowIso()}] report ${delivery.id} (ok) failed: ${err.message}`);
+    });
+  }).catch((error: Error) => {
+    if (progressTimer) clearInterval(progressTimer);
+    console.error(`[${nowIso()}] deliver ${delivery.id} failed: ${error.message}`);
+    reportDeliveryResult(delivery.id, { ok: false, error: error.message }).catch(err => {
+      console.error(`[${nowIso()}] report ${delivery.id} (failed) failed: ${err.message}`);
+    });
+  });
+}
+
+function formatElapsed(elapsedMs: number): string {
+  const seconds = Math.max(1, Math.floor(elapsedMs / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
+}
+
+function readPositiveMs(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function buildAuthHeader(): Record<string, string> {
@@ -466,22 +517,7 @@ function handlePushEvent(rawEvent: string): void {
     });
   } else if (type === "delivery") {
     const delivery = payload as DeliveryWithContext;
-    const author = (delivery.author?.handle && `@${delivery.author.handle}`) || delivery.author?.name || "unknown";
-    const target = delivery.target || delivery.message?.target || "?";
-    const agent = delivery.agent;
-    const agentLabel = agent ? `@${agent.handle || agent.name} (${agent.id}, runtime=${agent.runtime})` : delivery.agentId;
-    console.log(`[${nowIso()}] push: deliver ${delivery.id} -> ${agentLabel} (from=${author}, target=${target})`);
-    launcher.deliver(delivery).then(result => {
-      console.log(`[${nowIso()}] deliver ${delivery.id} ok (text length=${(result.text || "").length})`);
-      reportDeliveryResult(delivery.id, result).catch(err => {
-        console.error(`[${nowIso()}] report ${delivery.id} (ok) failed: ${err.message}`);
-      });
-    }).catch((error: Error) => {
-      console.error(`[${nowIso()}] deliver ${delivery.id} failed: ${error.message}`);
-      reportDeliveryResult(delivery.id, { ok: false, error: error.message }).catch(err => {
-        console.error(`[${nowIso()}] report ${delivery.id} (failed) failed: ${err.message}`);
-      });
-    });
+    runDelivery(delivery, "push");
   }
   // ping / ready are keepalives, nothing to do
 }
@@ -529,9 +565,9 @@ function printUsage(reason: string): void {
   console.error(`agent-daemon: ${reason}`);
   console.error("");
   console.error("Usage:");
-  console.error("  iteam agent-daemon --server-url <url> --connect-token <token> [--name <hostname>] [--interval-ms <ms>]");
+  console.error("  iteam agent-daemon --server-url <url> --connect-token <token> [--name <hostname>] [--interval-ms <ms>] [--task-progress-interval-ms <ms>]");
   console.error("");
-  console.error("Environment fallbacks: ITEAM_SERVER_URL, ITEAM_CONNECT_TOKEN");
+  console.error("Environment fallbacks: ITEAM_SERVER_URL, ITEAM_CONNECT_TOKEN, ITEAM_TASK_PROGRESS_INTERVAL_MS");
   console.error("");
   console.error("--connect-token is the computer's permanent identity. The server issues");
   console.error("it once when you generate an invite, binds it to a brand-new computer on");

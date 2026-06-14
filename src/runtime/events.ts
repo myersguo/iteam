@@ -24,6 +24,10 @@ export interface AgentEventBase {
   launchId: string;
   /** Provider-side session identifier (ACP session id, codex session id, ...). */
   sessionId?: string;
+  /** iTeam delivery currently producing this event, when inside a turn. */
+  deliveryId?: string;
+  /** Reply target for the active delivery, typically a task thread. */
+  target?: string;
   /** Wall-clock timestamp the event was observed. */
   at: string;
 }

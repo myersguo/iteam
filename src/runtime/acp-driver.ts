@@ -13,13 +13,13 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { nowIso } from "../lib.js";
 import { agentEnv, prepareAgentWorkspace, type AgentWorkspaceLayout } from "../workspace.js";
 import type { Agent, DeliveryWithContext } from "../types.js";
-import type { AgentDriver, AgentEventListener, DeliverResult, DeliveryMode, DriverCapabilities } from "./driver.js";
+import { deliveryAffinityIndex, type AgentDriver, type AgentEventListener, type DeliverResult, type DeliveryMode, type DriverCapabilities } from "./driver.js";
 import type { AgentEvent } from "./events.js";
 import { JsonRpcStdioClient } from "./jsonrpc.js";
 
 /** ACP protocol version this client speaks. Negotiated down on initialize. */
 const PROTOCOL_VERSION = 1;
-const TURN_TIMEOUT_MS = 300000;
+const TURN_IDLE_TIMEOUT_MS = readPositiveMs("ITEAM_AGENT_IDLE_TIMEOUT_MS", 6 * 60 * 60 * 1000);
 const PROCESS_POOL_SIZE = 3;
 
 interface AcpRuntimeSpec {
@@ -40,6 +40,7 @@ interface ProcessState {
   sessionId: string;
   workspace: AgentWorkspaceLayout;
   inflight: Promise<unknown>;
+  touchTurn?: () => void;
 }
 
 export class AcpDriver implements AgentDriver {
@@ -88,9 +89,8 @@ export class AcpDriver implements AgentDriver {
     // Start up to PROCESS_POOL_SIZE processes
     while (this.processes.length + this.startPromises.length < PROCESS_POOL_SIZE) {
       const processIndex = this.processes.length + this.startPromises.length;
-      const p = this.doStart(agent, processIndex).catch(error => {
+      const p = this.doStart(agent, processIndex).finally(() => {
         this.startPromises = this.startPromises.filter(x => x !== p);
-        throw error;
       });
       this.startPromises.push(p);
     }
@@ -186,13 +186,11 @@ export class AcpDriver implements AgentDriver {
     });
   }
 
-  async deliver(agent: Agent, _delivery: DeliveryWithContext, prompt: string): Promise<DeliverResult> {
+  async deliver(agent: Agent, delivery: DeliveryWithContext, prompt: string): Promise<DeliverResult> {
     await this.start(agent);
     if (this.processes.length === 0) throw new Error("acp processes not initialized");
 
-    // Round-robin across the process pool
-    const processState = this.processes[this.nextProcessIndex % this.processes.length];
-    this.nextProcessIndex++;
+    const processState = this.processes[deliveryAffinityIndex(delivery, this.processes.length)];
 
     const turn = processState.inflight.then(() => this.runTurn(agent, processState, prompt));
     processState.inflight = turn.catch(() => {});
@@ -224,13 +222,16 @@ export class AcpDriver implements AgentDriver {
 
     try {
       console.log(`[${nowIso()}] [AcpDriver] session/prompt (session=${sessionId}, prompt-bytes=${Buffer.byteLength(finalPrompt, "utf8")})`);
-      const result = await withTimeout(
+      const result = await withIdleTimeout(
         rpc.request<{ stopReason: string }>("session/prompt", {
           sessionId: sessionId,
           prompt: [{ type: "text", text: finalPrompt }]
         }),
-        TURN_TIMEOUT_MS,
-        `${agent.runtime} response timed out`
+        TURN_IDLE_TIMEOUT_MS,
+        `${agent.runtime} response idle timeout`,
+        touch => {
+          processState.touchTurn = touch;
+        }
       );
       const text = accumulator.join("").trim() || "(No response)";
       this.emit({
@@ -253,7 +254,7 @@ export class AcpDriver implements AgentDriver {
         at: nowIso(),
         message: err.message
       });
-      if (err.message.includes("timed out")) {
+      if (err.message.includes("idle timeout")) {
         try {
           rpc.notify("session/cancel", { sessionId: sessionId });
         } catch {}
@@ -265,6 +266,7 @@ export class AcpDriver implements AgentDriver {
       }
       throw err;
     } finally {
+      processState.touchTurn = undefined;
       offEvent();
     }
   }
@@ -284,6 +286,8 @@ export class AcpDriver implements AgentDriver {
 
   private handleAgentNotification(agent: Agent, method: string, params: unknown, boundSessionId?: string): void {
     if (method !== "session/update") return;
+    const processState = this.processes.find(item => item.sessionId === boundSessionId);
+    processState?.touchTurn?.();
     const payload = (params || {}) as {
       sessionId?: string;
       update?: Record<string, unknown>;
@@ -430,10 +434,27 @@ function extractContentText(content: unknown): string {
   return "";
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+function withIdleTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+  bindTouch: (touch: () => void) => void
+): Promise<T> {
   let timer: NodeJS.Timeout;
+  let rejectTimeout: (error: Error) => void = () => {};
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    rejectTimeout = reject;
   });
+  const touch = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => rejectTimeout(new Error(message)), timeoutMs);
+  };
+  bindTouch(touch);
+  touch();
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+function readPositiveMs(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
 }

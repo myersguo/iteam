@@ -157,6 +157,11 @@ export interface DeliveryResultInput {
   threadId?: string;
 }
 
+export interface DeliveryProgressInput {
+  text?: string;
+  elapsedMs?: number;
+}
+
 export interface RuntimeStatusInput {
   status?: string;
   details?: Record<string, unknown> & { launchId?: string; pid?: number | null };
@@ -882,7 +887,7 @@ export class IteamCore {
         id: this.newId("msg"),
         target: input.target,
         authorId,
-        type: input.type || "human",
+        type: input.type || (authorAgent ? "agent" : "human"),
         text: scheduleParse.text,
         mentions: input.mentions || parseMentions(scheduleParse.text, s),
         createdAt: input.createdAt || now,
@@ -1026,6 +1031,42 @@ export class IteamCore {
     });
     this.publishDeliveriesById(createdIds);
     return result;
+  }
+
+  applyDeliveryProgress(deliveryId: string, input: DeliveryProgressInput): Message {
+    return this.store.mutate<Message>(s => {
+      const now = this.clock();
+      const delivery = (s.deliveries || []).find(item => item.id === deliveryId);
+      if (!delivery) throw new HttpError(404, "delivery not found");
+      if (delivery.status !== "delivering") {
+        throw new HttpError(409, "delivery is not running");
+      }
+      const task = (s.tasks || []).find(item =>
+        item.threadTarget === delivery.target ||
+        item.messageId === delivery.rootMessageId
+      );
+      if (!task) throw new HttpError(409, "delivery is not attached to a task thread");
+
+      const text = String(input.text || "").trim();
+      if (!text) throw new HttpError(400, "progress text is required");
+      const message: Message = {
+        id: this.newId("msg"),
+        target: task.threadTarget,
+        authorId: delivery.agentId,
+        type: "agent",
+        text: text.slice(0, 1000),
+        mentions: [],
+        createdAt: now,
+        threadId: task.messageId
+      };
+      s.messages.push(message);
+      delivery.updatedAt = now;
+      if (task.status === "todo") {
+        task.status = "in_progress";
+        task.updatedAt = now;
+      }
+      return message;
+    });
   }
 
   // ---------------------------------------------------------------------------

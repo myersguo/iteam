@@ -164,6 +164,15 @@ iteam task create   <#channel> <title...> [--agent <agent-id>]
 iteam task list
 ```
 
+Long-running task deliveries stay bound to the same persistent runtime session.
+While a task is running, the computer daemon posts a progress message in the
+task thread every 60 seconds. Configure the cadence with
+`ITEAM_TASK_PROGRESS_INTERVAL_MS` or `--task-progress-interval-ms`; configure
+the runtime inactivity limit with `ITEAM_AGENT_IDLE_TIMEOUT_MS` (default: 6h).
+Codex task threads also receive structured command, file-change, and sub-agent
+lifecycle updates. Provider notifications are isolated by Codex thread id so a
+reviewer cannot prematurely finish or pollute the parent task turn.
+
 `iteam-agent` (available in agent workspace PATH):
 
 ```text

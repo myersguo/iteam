@@ -11,11 +11,11 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { nowIso } from "../lib.js";
 import { agentEnv, prepareAgentWorkspace, type AgentWorkspaceLayout } from "../workspace.js";
 import type { Agent, DeliveryWithContext } from "../types.js";
-import type { AgentDriver, AgentEventListener, DeliverResult, DeliveryMode, DriverCapabilities } from "./driver.js";
+import { deliveryAffinityIndex, type AgentDriver, type AgentEventListener, type DeliverResult, type DeliveryMode, type DriverCapabilities } from "./driver.js";
 import type { AgentEvent } from "./events.js";
 import { JsonRpcStdioClient } from "./jsonrpc.js";
 
-const TURN_TIMEOUT_MS = 300000;
+const TURN_IDLE_TIMEOUT_MS = readPositiveMs("ITEAM_AGENT_IDLE_TIMEOUT_MS", 6 * 60 * 60 * 1000);
 const PROCESS_POOL_SIZE = 3;
 
 export interface CodexDriverOptions {
@@ -34,6 +34,8 @@ interface ProcessState {
   inflight: Promise<unknown>;
   streamedMessageIds: Set<string>;
   streamedReasoningIds: Set<string>;
+  touchTurn?: () => void;
+  activeDelivery?: Pick<DeliveryWithContext, "id" | "target">;
 }
 
 export class CodexDriver implements AgentDriver {
@@ -80,9 +82,8 @@ export class CodexDriver implements AgentDriver {
   async start(agent: Agent): Promise<void> {
     while (this.processes.length + this.startPromises.length < PROCESS_POOL_SIZE) {
       const processIndex = this.processes.length + this.startPromises.length;
-      const p = this.doStart(agent, processIndex).catch(error => {
+      const p = this.doStart(agent, processIndex).finally(() => {
         this.startPromises = this.startPromises.filter(x => x !== p);
-        throw error;
       });
       this.startPromises.push(p);
     }
@@ -189,14 +190,13 @@ export class CodexDriver implements AgentDriver {
     });
   }
 
-  async deliver(agent: Agent, _delivery: DeliveryWithContext, prompt: string): Promise<DeliverResult> {
+  async deliver(agent: Agent, delivery: DeliveryWithContext, prompt: string): Promise<DeliverResult> {
     await this.start(agent);
     if (this.processes.length === 0) throw new Error("codex processes not initialized");
 
-    const processState = this.processes[this.nextProcessIndex % this.processes.length];
-    this.nextProcessIndex++;
+    const processState = this.processes[deliveryAffinityIndex(delivery, this.processes.length)];
 
-    const turn = processState.inflight.then(() => this.runTurn(agent, processState, prompt));
+    const turn = processState.inflight.then(() => this.runTurn(agent, processState, prompt, delivery));
     processState.inflight = turn.catch(() => {});
     return turn;
   }
@@ -204,7 +204,8 @@ export class CodexDriver implements AgentDriver {
   private async runTurn(
     agent: Agent,
     ps: ProcessState,
-    prompt: string
+    prompt: string,
+    delivery?: DeliveryWithContext
   ): Promise<DeliverResult> {
     const { rpc, threadId } = ps;
     const accumulator: string[] = [];
@@ -224,6 +225,7 @@ export class CodexDriver implements AgentDriver {
     }
 
     try {
+      ps.activeDelivery = delivery ? { id: delivery.id, target: delivery.target } : undefined;
       // If there's an active turn, use turn/steer; otherwise turn/start
       if (ps.activeTurnId) {
         const steerResult = await rpc.request<{ turn?: { id: string }; turnId?: string }>("turn/steer", {
@@ -244,26 +246,31 @@ export class CodexDriver implements AgentDriver {
 
       // Wait for turn/completed
       await new Promise<void>((resolve, reject) => {
+        let timer: NodeJS.Timeout;
+        const touch = () => {
+          clearTimeout(timer);
+          timer = setTimeout(() => {
+            cleanup();
+            reject(new Error("codex response idle timeout"));
+          }, TURN_IDLE_TIMEOUT_MS);
+        };
+        const cleanup = () => {
+          clearTimeout(timer);
+          off();
+          if (ps.touchTurn === touch) ps.touchTurn = undefined;
+        };
         const off = this.on(event => {
           if (event.type === "turn_end" && event.sessionId === threadId) {
-            off();
+            cleanup();
             resolve();
           }
           if (event.type === "error" && event.sessionId === threadId) {
-            off();
+            cleanup();
             reject(new Error((event as { message: string }).message));
           }
         });
-        // Timeout safety
-        const timer = setTimeout(() => {
-          off();
-          reject(new Error("codex response timed out"));
-        }, TURN_TIMEOUT_MS);
-        // Clear timer on resolve/reject
-        const origResolve = resolve;
-        const origReject = reject;
-        resolve = () => { clearTimeout(timer); origResolve(); };
-        reject = (err) => { clearTimeout(timer); origReject(err); };
+        ps.touchTurn = touch;
+        touch();
       });
 
       const text = accumulator.join("").trim() || "(No response)";
@@ -278,12 +285,13 @@ export class CodexDriver implements AgentDriver {
         at: nowIso(),
         message: err.message
       });
-      if (err.message.includes("timed out")) {
+      if (err.message.includes("idle timeout")) {
         try { ps.child.kill("SIGTERM"); } catch {}
         this.processes = this.processes.filter(p => p !== ps);
       }
       throw err;
     } finally {
+      ps.activeDelivery = undefined;
       offEvent();
     }
   }
@@ -295,6 +303,13 @@ export class CodexDriver implements AgentDriver {
     ps: ProcessState | null
   ): void {
     const p = (params || {}) as Record<string, unknown>;
+    if (ps && !notificationBelongsToThread(p, ps.threadId)) {
+      return;
+    }
+    ps?.touchTurn?.();
+    const deliveryContext = ps?.activeDelivery
+      ? { deliveryId: ps.activeDelivery.id, target: ps.activeDelivery.target }
+      : {};
 
     switch (method) {
       case "turn/started": {
@@ -409,6 +424,7 @@ export class CodexDriver implements AgentDriver {
                 launchId: this.launchId,
                 sessionId: ps?.threadId,
                 at: nowIso(),
+                ...deliveryContext,
                 toolName: "shell",
                 toolCallId: item.id as string || "",
                 arguments: { command: item.command }
@@ -425,6 +441,7 @@ export class CodexDriver implements AgentDriver {
                   launchId: this.launchId,
                   sessionId: ps?.threadId,
                   at: nowIso(),
+                  ...deliveryContext,
                   toolName: "file_change",
                   toolCallId: item.id as string || "",
                   arguments: { path: change.path, kind: change.kind }
@@ -444,6 +461,7 @@ export class CodexDriver implements AgentDriver {
                 launchId: this.launchId,
                 sessionId: ps?.threadId,
                 at: nowIso(),
+                ...deliveryContext,
                 toolName,
                 toolCallId: item.id as string || "",
                 arguments: item.arguments
@@ -459,9 +477,50 @@ export class CodexDriver implements AgentDriver {
                 launchId: this.launchId,
                 sessionId: ps?.threadId,
                 at: nowIso(),
+                ...deliveryContext,
                 toolName: "web_search",
                 toolCallId: item.id as string || "",
                 arguments: { query: item.query }
+              });
+            }
+            return;
+          }
+          case "collabAgentToolCall": {
+            const toolName = `subagent_${String(item.tool || "unknown")}`;
+            if (isStarted) {
+              this.emit({
+                type: "tool_call",
+                agentId: agent.id,
+                launchId: this.launchId,
+                sessionId: ps?.threadId,
+                at: nowIso(),
+                ...deliveryContext,
+                toolName,
+                toolCallId: item.id as string || "",
+                arguments: {
+                  prompt: item.prompt,
+                  model: item.model,
+                  receiverThreadIds: item.receiverThreadIds,
+                  status: item.status
+                }
+              });
+            }
+            if (isCompleted) {
+              const status = String(item.status || "");
+              this.emit({
+                type: "tool_result",
+                agentId: agent.id,
+                launchId: this.launchId,
+                sessionId: ps?.threadId,
+                at: nowIso(),
+                ...deliveryContext,
+                toolCallId: item.id as string || "",
+                ok: status !== "failed",
+                output: {
+                  tool: item.tool,
+                  status,
+                  agentsStates: item.agentsStates
+                }
               });
             }
             return;
@@ -526,4 +585,13 @@ export class CodexDriver implements AgentDriver {
     this.processes = [];
     this.startPromises = [];
   }
+}
+
+function readPositiveMs(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+export function notificationBelongsToThread(params: Record<string, unknown>, threadId: string): boolean {
+  return typeof params.threadId !== "string" || params.threadId === threadId;
 }
