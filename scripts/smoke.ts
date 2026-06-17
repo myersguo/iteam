@@ -1,15 +1,57 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Agent } from "../src/types.js";
 import { formatTaskRuntimeProgress } from "../src/agent-launcher.js";
+import { AcpDriver } from "../src/runtime/acp-driver.js";
 import { notificationBelongsToThread } from "../src/runtime/codex-driver.js";
+import { detectRuntimes } from "../src/runtimes.js";
 import { deliveryAffinityIndex } from "../src/runtime/driver.js";
+import { renderAcpProfileArgs, resolveAcpRuntimeProfile } from "../src/runtime/acp-profiles.js";
+import { renderProfileArgs, resolveRuntimeProfile } from "../src/runtime/profiles.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const tsxBin = resolve(root, "node_modules/.bin/tsx");
 const home = mkdtempSync(join(tmpdir(), "iteam-smoke-"));
+const runtimeProfilesFile = join(home, "runtime-profiles.json");
+const acpProfilesFile = join(home, "acp-runtimes.json");
+const fakeAcpScript = resolve(root, "scripts/fake-acp-runtime.mjs");
+const binDir = join(home, "bin");
+const genericAcpBin = join(binDir, "generic_acp");
+mkdirSync(binDir, { recursive: true });
+writeFileSync(genericAcpBin, `#!/usr/bin/env sh
+exec "${process.execPath}" "${fakeAcpScript}" "$@"
+`);
+chmodSync(genericAcpBin, 0o755);
+process.env.PATH = `${binDir}:${process.env.PATH || ""}`;
+writeFileSync(runtimeProfilesFile, JSON.stringify({
+  custom: {
+    command: "echo",
+    args: ["{{sessionKey}}", "{{safeSessionKey}}", "{{agentName}}", "{{prompt}}"]
+  }
+}, null, 2));
+writeFileSync(acpProfilesFile, JSON.stringify({
+  hermes_test: {
+    command: "hermes",
+    args: ["acp", "--workspace", "{{workspaceDir}}", "{{modelArgs}}"],
+    poolSize: 1
+  },
+  fake_acp: {
+    command: process.execPath,
+    args: [fakeAcpScript],
+    poolSize: 1
+  }
+}, null, 2));
+process.env.ITEAM_RUNTIME_PROFILES = runtimeProfilesFile;
+process.env.ITEAM_ACP_RUNTIMES = acpProfilesFile;
+const smokeRuntimes = [
+  { id: "codex", name: "Codex CLI", installed: true },
+  { id: "custom", name: "Custom profile", installed: true },
+  { id: "fake_acp", name: "Fake ACP", installed: true },
+  { id: "daemon_only", name: "Daemon-only runtime", installed: true }
+];
 const port = 18000 + Math.floor(Math.random() * 10000);
 const daemon = spawn(tsxBin, [resolve(root, "src/server.ts"), "--port", String(port)], {
   env: { ...process.env, ITEAM_HOME: home, ITEAM_PORT: String(port) },
@@ -46,6 +88,97 @@ try {
     updatedAt: new Date().toISOString()
   }, 3);
   if (affinityA !== affinityB) throw new Error("same task thread must keep runtime session affinity");
+  const affinitySessionA = deliveryAffinityIndex({
+    id: "delivery_session_a",
+    target: "#all",
+    messageId: "msg_a",
+    rootMessageId: "msg_a",
+    parentDeliveryId: null,
+    depth: 0,
+    agentId: "agent_test",
+    computerId: "computer_test",
+    sessionKey: "sticky-session",
+    status: "delivering",
+    attempts: 0,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  }, 3);
+  const affinitySessionB = deliveryAffinityIndex({
+    id: "delivery_session_b",
+    target: "#random",
+    messageId: "msg_b",
+    rootMessageId: "msg_b",
+    parentDeliveryId: null,
+    depth: 0,
+    agentId: "agent_test",
+    computerId: "computer_test",
+    sessionKey: "sticky-session",
+    status: "delivering",
+    attempts: 0,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  }, 3);
+  if (affinitySessionA !== affinitySessionB) throw new Error("explicit sessionKey must control runtime affinity");
+  const customProfile = resolveRuntimeProfile("custom");
+  if (!customProfile) throw new Error("runtime profile file was not loaded");
+  const renderedArgs = renderProfileArgs(customProfile, {
+    agent: { id: "agent_test", name: "Profile Agent", handle: "profile", description: "", runtime: "opencode", model: null, computerId: "computer_test", status: "online", desiredStatus: "running", launchId: null, pid: null, workspacePath: "", createdAt: "", updatedAt: "" },
+    delivery: {
+      id: "delivery_profile",
+      target: "#all",
+      messageId: "msg_profile",
+      rootMessageId: "msg_profile",
+      parentDeliveryId: null,
+      depth: 0,
+      agentId: "agent_test",
+      computerId: "computer_test",
+      sessionKey: "Hello Session!",
+      status: "delivering",
+      attempts: 0,
+      createdAt: "",
+      updatedAt: ""
+    },
+    prompt: "profile prompt",
+    timeoutMs: 1000
+  });
+  if (renderedArgs[0] !== "Hello Session!" || renderedArgs[1] !== "hello-session" || renderedArgs[3] !== "profile prompt") {
+    throw new Error("runtime profile templates did not render session/prompt values");
+  }
+  const acpProfile = resolveAcpRuntimeProfile("hermes_test");
+  if (!acpProfile) throw new Error("ACP runtime profile file was not loaded");
+  const renderedAcpArgs = renderAcpProfileArgs(acpProfile, {
+    agent: { id: "agent_test", name: "ACP Agent", handle: "acp", description: "", runtime: "hermes_test", model: "test-model", computerId: "computer_test", status: "online", desiredStatus: "running", launchId: null, pid: null, workspacePath: "", createdAt: "", updatedAt: "" },
+    workspace: {
+      dir: "/workspace/acp",
+      internal: "/workspace/acp/.iteam",
+      memoryPath: "",
+      systemPromptPath: "",
+      claudeMcpConfigPath: "",
+      traeMcpConfigPath: "",
+      bridgePath: "",
+      bridgeArgs: [],
+      bridgeCommand: "node",
+      wrapperPath: "",
+      promptPath: ""
+    },
+    timeoutMs: 1000
+  });
+  if (renderedAcpArgs.join(" ") !== "acp --workspace /workspace/acp -m test-model") {
+    throw new Error("ACP runtime profile templates did not render workspace/model values");
+  }
+  const detectedRuntimeMap = new Map(detectRuntimes().map(runtime => [runtime.id, runtime]));
+  if (!detectedRuntimeMap.get("custom")?.installed) {
+    throw new Error("configured runtime profile was not reported as installed");
+  }
+  if (!detectedRuntimeMap.get("fake_acp")?.installed) {
+    throw new Error("configured ACP runtime with absolute command was not reported as installed");
+  }
+  const genericAcpProfile = resolveAcpRuntimeProfile("generic_acp");
+  if (!genericAcpProfile || genericAcpProfile.command !== "generic_acp" || genericAcpProfile.args?.join(" ") !== "acp serve") {
+    throw new Error("executable ACP runtime did not get a default ACP profile");
+  }
+  await verifyAcpDriverWithFakeRuntime(home, "fake_acp");
+  await verifyAcpDriverWithFakeRuntime(home, "generic_acp");
   const subagentStarted = formatTaskRuntimeProgress({
     type: "tool_call",
     agentId: "agent_test",
@@ -105,7 +238,7 @@ try {
     name: "smoke-computer",
     fingerprint: { id: "SMOKE12345", hostname: "smoke-computer", os: "darwin", arch: "arm64" },
     daemonVersion: "0.1.0",
-    runtimes: [{ id: "codex", name: "Codex CLI", installed: true }]
+    runtimes: smokeRuntimes
   });
   if (firstConnect.connectToken !== invite.token) {
     throw new Error("first connect should bind the invite token to the computer permanently");
@@ -119,7 +252,7 @@ try {
     name: "smoke-computer",
     fingerprint: { id: "SMOKE12345", hostname: "smoke-computer", os: "darwin", arch: "arm64" },
     daemonVersion: "0.1.0",
-    runtimes: [{ id: "codex", name: "Codex CLI", installed: true }]
+    runtimes: smokeRuntimes
   });
   if (reAuth.connectToken !== connectToken) throw new Error("re-auth must return the same persistent token");
   if (reAuth.id !== computerId) throw new Error("re-auth must return the same computer id");
@@ -139,6 +272,29 @@ try {
     computerId: computerId
   });
   if (agent.status !== "registered" || agent.desiredStatus !== "running") throw new Error("agent was not registered for launch");
+  const profileAgent = await post(port, "/api/agents", {
+    name: "profile-agent",
+    runtime: "custom",
+    computerId: computerId
+  });
+  if (profileAgent.runtime !== "custom") throw new Error("configured runtime profile was not accepted by agent creation");
+  const daemonOnlyAgent = await post(port, "/api/agents", {
+    name: "daemon-only-agent",
+    runtime: "daemon_only",
+    computerId: computerId
+  });
+  if (daemonOnlyAgent.runtime !== "daemon_only") throw new Error("daemon-reported runtime was rejected by server allowlist");
+  const typedRuntimeAgent = await post(port, "/api/agents", {
+    name: "typed-runtime-agent",
+    runtime: "typed_runtime",
+    computerId: computerId
+  });
+  if (typedRuntimeAgent.runtime !== "typed_runtime") throw new Error("typed custom runtime was rejected during agent creation");
+  const defaultRuntimeAgent = await post(port, "/api/agents", {
+    name: "default-runtime-agent",
+    computerId: computerId
+  });
+  if (defaultRuntimeAgent.runtime !== "fake_acp") throw new Error(`default runtime should prefer ACP, got ${defaultRuntimeAgent.runtime}`);
   const dm = await post(port, `/api/direct-messages/agents/${encodeURIComponent(agent.id)}`, {});
   if (dm.kind !== "dm" || dm.target !== `dm:${agent.id}` || !dm.memberIds.includes(agent.id)) {
     throw new Error("agent DM channel was not created");
@@ -159,7 +315,7 @@ try {
     name: "smoke-computer",
     fingerprint: { id: "SMOKE12345", hostname: "smoke-computer", os: "darwin", arch: "arm64" },
     daemonVersion: "0.1.0",
-    runtimes: [{ id: "codex", name: "Codex CLI", installed: true }]
+    runtimes: smokeRuntimes
   });
   if (!heartbeat.launchAgents.some((item: any) => item.id === agent.id)) throw new Error("registered agent was not assigned to computer daemon");
   // runtime-status is a computer-scoped callback: requires X-Iteam-Connection
@@ -185,6 +341,54 @@ try {
     const noAuthSse = await fetch(`http://127.0.0.1:${port}/api/computers/${encodeURIComponent(computerId)}/stream`);
     if (noAuthSse.status !== 401) throw new Error(`SSE without auth should be 401, got ${noAuthSse.status}`);
     await noAuthSse.body?.cancel();
+    const ingressPairing = await post(port, "/api/ingress/pairing-codes", {
+      target: dm.target,
+      agentId: agent.id,
+      label: "smoke ingress",
+      contextRules: { project: ["alpha"] }
+    });
+    if (!ingressPairing.pairCode || !String(ingressPairing.connectUrl || "").startsWith("iteam://ingress/pair")) {
+      throw new Error("ingress pairing code did not return a connect URL");
+    }
+    const ingressPolicy = await post(port, "/api/ingress/pair", {
+      pairCode: ingressPairing.pairCode,
+      source: "smoke-webhook"
+    });
+    if (!ingressPolicy.id || !ingressPolicy.token) throw new Error("ingress pairing did not create a policy token");
+    const badIngressStatus = await postStatus(port, "/api/ingress/messages", {
+      policyId: ingressPolicy.id,
+      token: ingressPolicy.token,
+      text: "wrong project",
+      context: { project: "beta" }
+    });
+    if (badIngressStatus !== 403) throw new Error(`ingress context rules should reject beta, got ${badIngressStatus}`);
+    const ingressSend = post(port, "/api/ingress/messages", {
+      text: "external hello",
+      context: { project: "alpha" },
+      sessionKey: "smoke-external-session"
+    }, { "x-iteam-ingress": `${ingressPolicy.id}:${ingressPolicy.token}` });
+    const ingressDelivery = await sse.waitFor("delivery", 2_000);
+    const ingressMessage = await ingressSend;
+    if (!ingressDelivery || ingressDelivery.messageId !== ingressMessage.id) {
+      throw new Error("ingress message did not push a delivery");
+    }
+    if (ingressDelivery.sessionKey !== "smoke-external-session" || ingressDelivery.source !== "external") {
+      throw new Error("ingress delivery did not carry explicit session/source");
+    }
+    if (!ingressDelivery.lifecycle?.some((item: any) => item.intent === "delivery.dispatch")) {
+      throw new Error("ingress delivery did not include dispatch lifecycle");
+    }
+    await post(port, `/api/deliveries/${encodeURIComponent(ingressDelivery.id)}/help-needed`, {
+      text: "Need webhook approval",
+      reason: "approval_required"
+    }, computerAuth);
+    const helpedDelivery = (await get(port, "/api/deliveries")).find((item: any) => item.id === ingressDelivery.id);
+    if (
+      helpedDelivery?.status !== "help_needed" ||
+      !helpedDelivery.lifecycle?.some((item: any) => item.intent === "delivery.help_needed")
+    ) {
+      throw new Error("delivery help-needed lifecycle was not persisted");
+    }
     const naturalScheduledMessage = await post(port, "/api/messages", {
       target: dm.target,
       text: `@${agent.handle} 每隔 10 分钟汇报交易进度，包括现金和持仓。`,
@@ -366,7 +570,7 @@ try {
     name: "smoke-computer",
     fingerprint: { id: "SMOKE12345", hostname: "smoke-computer", os: "darwin", arch: "arm64" },
     daemonVersion: "0.1.0",
-    runtimes: [{ id: "codex", name: "Codex CLI", installed: true }]
+    runtimes: smokeRuntimes
   });
   const taskDelivery = taskHeartbeat.deliveries.find(
     (delivery: any) => delivery.target === task.threadTarget && delivery.messageId === task.messageId
@@ -454,6 +658,28 @@ try {
     m.authorId === agent.id && m.target === threadChannel.target && m.text === "ack" && !m.threadId)) {
     throw new Error("agent reply without marker should stay at channel level");
   }
+  const cancelMention = await post(port, "/api/messages", {
+    target: threadChannel.target,
+    text: `@${agent.handle} cancellable`,
+    authorId: "human-local"
+  });
+  const cancelDelivery = (await get(port, "/api/deliveries"))
+    .find((d: any) => d.messageId === cancelMention.id && d.agentId === agent.id);
+  if (!cancelDelivery) throw new Error("cancellable mention did not create delivery");
+  const cancelled = await post(port, `/api/deliveries/${encodeURIComponent(cancelDelivery.id)}/cancel`, {
+    reason: "smoke cancel"
+  });
+  if (
+    cancelled.status !== "cancelled" ||
+    !cancelled.lifecycle?.some((item: any) => item.intent === "delivery.cancel")
+  ) {
+    throw new Error("delivery cancel lifecycle was not persisted");
+  }
+  const afterCancelResult = await post(port, `/api/deliveries/${encodeURIComponent(cancelDelivery.id)}/result`,
+    { ok: true, text: "late cancelled result" }, computerAuth);
+  if (afterCancelResult.status !== "cancelled") {
+    throw new Error("late delivery result should not overwrite cancelled status");
+  }
 
   console.log("smoke ok");
 } finally {
@@ -470,6 +696,121 @@ async function waitForHealth(port: number): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   throw new Error("server did not start");
+}
+
+async function verifyAcpDriverWithFakeRuntime(home: string, runtime = "fake_acp"): Promise<void> {
+  const agent: Agent = {
+    id: `agent_${runtime}`,
+    name: "Fake ACP",
+    handle: "fake-acp",
+    description: "",
+    runtime,
+    model: null,
+    computerId: "computer_test",
+    status: "online",
+    desiredStatus: "running",
+    launchId: null,
+    pid: null,
+    workspacePath: join(home, "fake-acp-agent"),
+    createdAt: "",
+    updatedAt: ""
+  };
+  const driver = new AcpDriver(runtime, {
+    serverUrl: "http://127.0.0.1:0",
+    launchId: `launch_${runtime}`
+  });
+  const events: any[] = [];
+  driver.on(event => events.push(event));
+
+  const deliveryA = fakeDelivery("delivery_fake_a", "session-alpha", "#all:msg_fake", agent);
+  const first = await driver.deliver(agent, deliveryA, "first");
+  const second = await driver.deliver(agent, fakeDelivery("delivery_fake_b", "session-alpha", "#elsewhere", agent), "second");
+  const third = await driver.deliver(agent, fakeDelivery("delivery_fake_c", "session-beta", "#all:msg_fake", agent), "third");
+
+  const firstSession = extractReplySession(first.text);
+  const secondSession = extractReplySession(second.text);
+  const thirdSession = extractReplySession(third.text);
+  if (!firstSession || firstSession !== secondSession) {
+    throw new Error("AcpDriver did not reuse the same ACP session for the same sessionKey");
+  }
+  if (!thirdSession || thirdSession === firstSession) {
+    throw new Error("AcpDriver did not create a distinct ACP session for a distinct sessionKey");
+  }
+
+  const correlated = events.filter(event => event.deliveryId === deliveryA.id);
+  if (!correlated.some(event => event.type === "message_chunk" && event.text.includes("reply:"))) {
+    throw new Error("fake ACP message chunks were not normalized with delivery correlation");
+  }
+  if (!correlated.some(event => event.type === "thinking" && event.text.includes("thinking:"))) {
+    throw new Error("fake ACP thought chunks were not normalized");
+  }
+  if (!correlated.some(event => event.type === "tool_call" && event.toolName === "shell")) {
+    throw new Error("fake ACP tool calls were not normalized");
+  }
+  if (!correlated.some(event => event.type === "tool_result" && event.ok === true)) {
+    throw new Error("fake ACP tool results were not normalized");
+  }
+  if (!correlated.some(event => event.type === "plan" && event.items?.[0]?.content?.includes("first"))) {
+    throw new Error("fake ACP plan updates were not normalized");
+  }
+
+  const cancelDelivery = fakeDelivery("delivery_fake_cancel", "session-cancel", "#all:msg_cancel", agent);
+  const pending = driver.deliver(agent, cancelDelivery, "wait-for-cancel");
+  await waitForEvent(events, event =>
+    event.type === "message_chunk" && event.deliveryId === cancelDelivery.id,
+    2_000
+  );
+  await driver.cancelDelivery(cancelDelivery.id);
+  const cancelResult = await pending.then(
+    () => "resolved",
+    error => String((error as Error).message)
+  );
+  if (!cancelResult.includes("cancelled")) {
+    throw new Error(`AcpDriver active cancellation should reject cancelled delivery, got ${cancelResult}`);
+  }
+  await driver.stop(agent);
+}
+
+function fakeDelivery(id: string, sessionKey: string, target: string, agent: any): any {
+  return {
+    id,
+    target,
+    messageId: `${id}_msg`,
+    rootMessageId: `${id}_msg`,
+    parentDeliveryId: null,
+    depth: 0,
+    agentId: agent.id,
+    computerId: agent.computerId,
+    sessionKey,
+    status: "delivering",
+    attempts: 0,
+    createdAt: "",
+    updatedAt: "",
+    agent,
+    message: {
+      id: `${id}_msg`,
+      target,
+      authorId: "human-local",
+      type: "human",
+      text: id,
+      mentions: [],
+      createdAt: "",
+      threadId: null
+    }
+  };
+}
+
+function extractReplySession(text: string): string | null {
+  return text.match(/reply:(session-\d+):/)?.[1] || null;
+}
+
+async function waitForEvent(events: any[], predicate: (event: any) => boolean, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (events.some(predicate)) return;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  throw new Error("timed out waiting for fake ACP event");
 }
 
 async function get(port: number, path: string): Promise<any> {

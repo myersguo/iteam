@@ -228,6 +228,8 @@ async function route(
   if (req.method === "GET" && url.pathname === "/api/computers") return sendJson(res, 200, core.listComputers());
   if (req.method === "GET" && url.pathname === "/api/humans") return sendJson(res, 200, core.listHumans());
   if (req.method === "GET" && url.pathname === "/api/deliveries") return sendJson(res, 200, core.listDeliveries());
+  if (req.method === "GET" && url.pathname === "/api/ingress/pairing-codes") return sendJson(res, 200, core.listIngressPairings());
+  if (req.method === "GET" && url.pathname === "/api/ingress/policies") return sendJson(res, 200, core.listIngressPolicies());
   if (req.method === "GET" && url.pathname === "/api/pending-connections") {
     return sendJson(res, 200, core.listPendingConnections());
   }
@@ -358,6 +360,40 @@ async function route(
     requireComputerAuth(core, req, deliveryProgress[1], "delivery");
     const body = await parseJsonBody<any>(req);
     return sendJson(res, 201, core.applyDeliveryProgress(deliveryProgress[1], body));
+  }
+
+  const deliveryHelpNeeded = url.pathname.match(/^\/api\/deliveries\/([^/]+)\/help-needed$/);
+  if (req.method === "POST" && deliveryHelpNeeded) {
+    requireComputerAuth(core, req, deliveryHelpNeeded[1], "delivery");
+    const body = await parseJsonBody<any>(req);
+    return sendJson(res, 200, core.applyDeliveryHelpNeeded(deliveryHelpNeeded[1], body));
+  }
+
+  const deliveryCancel = url.pathname.match(/^\/api\/deliveries\/([^/]+)\/cancel$/);
+  if (req.method === "POST" && deliveryCancel) {
+    const body = await parseJsonBody<any>(req);
+    return sendJson(res, 200, core.cancelDelivery(deliveryCancel[1], body?.reason));
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ingress/pairing-codes") {
+    const body = await parseJsonBody<any>(req);
+    return sendJson(res, 201, core.createIngressPairing(body));
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ingress/pair") {
+    const body = await parseJsonBody<any>(req);
+    return sendJson(res, 201, core.pairIngress(body));
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ingress/messages") {
+    const body = await parseJsonBody<any>(req);
+    const header = String(req.headers["x-iteam-ingress"] || "");
+    const [policyId, token] = header.includes(":") ? header.split(/:(.*)/s).filter(Boolean) : [];
+    return sendJson(res, 201, core.createIngressMessage({
+      ...body,
+      policyId: body.policyId || policyId,
+      token: body.token || token
+    }));
   }
 
   if (req.method === "POST" && url.pathname === "/api/tasks") {

@@ -6,6 +6,8 @@ import type {
   Channel,
   Computer,
   Delivery,
+  ExternalIngressPairing,
+  ExternalIngressPolicy,
   Message,
   ScheduledTask,
   State,
@@ -47,6 +49,8 @@ export function initialState(): State {
     deliveries: [],
     tasks: [],
     scheduledTasks: [],
+    externalIngressPairings: [],
+    externalIngressPolicies: [],
     events: []
   };
 }
@@ -109,6 +113,7 @@ export function sanitizeState(state: State): State {
   });
   state.scheduledTasks = (state.scheduledTasks || []).map((task: ScheduledTask) => ({
     ...task,
+    sessionKey: task.sessionKey ?? null,
     intervalMs: task.cronExpression ? null : Number(task.intervalMs) || 10 * 60 * 1000,
     cronExpression: task.cronExpression || null,
     timezone: task.timezone || null,
@@ -125,11 +130,38 @@ export function sanitizeState(state: State): State {
     rootMessageId: delivery.rootMessageId || delivery.messageId,
     parentDeliveryId: delivery.parentDeliveryId ?? null,
     depth: delivery.depth ?? 0,
+    sessionKey: delivery.sessionKey ?? null,
+    source: delivery.source ?? null,
     attempts: delivery.attempts ?? 0,
-    error: delivery.error ?? null
+    error: delivery.error ?? null,
+    lifecycle: delivery.lifecycle ?? []
+  }));
+  state.externalIngressPairings = (state.externalIngressPairings || []).map((pairing: ExternalIngressPairing) => ({
+    ...pairing,
+    status: pairing.status || "waiting",
+    contextRules: normalizeContextRules(pairing.contextRules),
+    consumedAt: pairing.consumedAt ?? null,
+    policyId: pairing.policyId ?? null
+  }));
+  state.externalIngressPolicies = (state.externalIngressPolicies || []).map((policy: ExternalIngressPolicy) => ({
+    ...policy,
+    status: policy.status || "active",
+    contextRules: normalizeContextRules(policy.contextRules),
+    updatedAt: policy.updatedAt || policy.createdAt || nowIso()
   }));
   state.events = (state.events || []).filter(event => !String(event.type || "").startsWith("agent:"));
   return state;
+}
+
+function normalizeContextRules(value: Record<string, string[]> | undefined): Record<string, string[]> | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const entries = Object.entries(value)
+    .map(([key, values]) => [
+      String(key).trim(),
+      Array.isArray(values) ? values.map(item => String(item).trim()).filter(Boolean) : []
+    ] as const)
+    .filter(([key, values]) => key && values.length > 0);
+  return entries.length ? Object.fromEntries(entries) : undefined;
 }
 
 /**

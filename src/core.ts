@@ -16,7 +16,11 @@ import type {
   ConnectComputerResult,
   ContextMessage,
   Delivery,
+  DeliveryLifecycleIntent,
+  DeliveryLifecycleRecord,
   DeliveryWithContext,
+  ExternalIngressPairing,
+  ExternalIngressPolicy,
   Fingerprint,
   MentionRef,
   Message,
@@ -30,7 +34,7 @@ import type {
 } from "./types.js";
 
 const MAX_DELIVERY_DEPTH = 10;
-const SUPPORTED_RUNTIMES = ["codex", "claude", "gemini", "trae"];
+const DEFAULT_INGRESS_PAIRING_TTL_MS = 5 * 60 * 1000;
 
 /** A typed error so the HTTP layer can map domain failures to status codes. */
 export class HttpError extends Error {
@@ -56,12 +60,14 @@ export interface MessageCreateInput {
   createdAt?: string;
   threadId?: string | null;
   defaultAgentId?: string;
+  sessionKey?: string | null;
+  source?: string;
 }
 
 export interface AgentCreateInput {
   name: string;
   description?: string;
-  runtime: string;
+  runtime?: string;
   computerId: string;
   model?: string;
   reasoning?: string;
@@ -109,6 +115,7 @@ export interface ScheduledTaskCreateInput {
   target: string;
   agentId: string;
   prompt: string;
+  sessionKey?: string | null;
   intervalMs?: number | string;
   cronExpression?: string;
   timezone?: string;
@@ -120,6 +127,7 @@ export interface ScheduledTaskPatchInput {
   target?: string;
   agentId?: string;
   prompt?: string;
+  sessionKey?: string | null;
   intervalMs?: number | string;
   cronExpression?: string | null;
   timezone?: string | null;
@@ -160,6 +168,36 @@ export interface DeliveryResultInput {
 export interface DeliveryProgressInput {
   text?: string;
   elapsedMs?: number;
+}
+
+export interface DeliveryHelpNeededInput {
+  text?: string;
+  reason?: string;
+}
+
+export interface IngressPairingCreateInput {
+  target: string;
+  agentId: string;
+  label?: string;
+  expiresInMs?: number;
+  contextRules?: Record<string, string[]>;
+}
+
+export interface IngressPairInput {
+  pairCode: string;
+  source?: string;
+  contextRules?: Record<string, string[]>;
+}
+
+export interface IngressMessageInput {
+  policyId?: string;
+  token?: string;
+  target?: string;
+  agentId?: string;
+  text: string;
+  source?: string;
+  context?: Record<string, string>;
+  sessionKey?: string;
 }
 
 export interface RuntimeStatusInput {
@@ -205,6 +243,7 @@ export type ComputerPushEvent =
   | { type: "launch"; payload: Agent }
   | { type: "stop"; payload: Agent }
   | { type: "delivery"; payload: DeliveryWithContext }
+  | { type: "cancel_delivery"; payload: { deliveryId: string; agentId: string; reason: string } }
   | { type: "ping"; payload: { now: string } };
 
 export type ComputerPushListener = (event: ComputerPushEvent) => void;
@@ -261,6 +300,7 @@ export class IteamCore {
         if (delivery.status === "delivering") {
           delivery.status = "pending";
           delivery.updatedAt = now;
+          pushDeliveryLifecycle(delivery, "delivery.dispatch", now, "Delivery requeued after daemon restart");
         }
       }
     });
@@ -289,6 +329,7 @@ export class IteamCore {
         delivery.status = "failed";
         delivery.error = delivery.error || "delivery timed out without a result";
         delivery.updatedAt = now;
+        pushDeliveryLifecycle(delivery, "delivery.result", now, "Delivery timed out", { ok: false, reason: delivery.error });
         const agent = s.agents.find(a => a.id === delivery.agentId);
         const label = agent ? `@${agent.handle || slugHandle(agent.name)}` : delivery.agentId;
         s.messages.push({
@@ -357,6 +398,17 @@ export class IteamCore {
 
   listDeliveries() {
     return this.store.snapshot().deliveries || [];
+  }
+
+  listIngressPairings() {
+    return this.store.snapshot().externalIngressPairings || [];
+  }
+
+  listIngressPolicies() {
+    return (this.store.snapshot().externalIngressPolicies || []).map(policy => ({
+      ...policy,
+      token: maskToken(policy.token)
+    }));
   }
 
   listPendingConnections() {
@@ -600,6 +652,7 @@ export class IteamCore {
         .map<DeliveryWithContext>(delivery => {
           delivery.status = "delivering";
           delivery.updatedAt = now;
+          pushDeliveryLifecycle(delivery, "delivery.ack", now, "Delivery claimed by computer heartbeat");
           const message = s.messages.find(message => message.id === delivery.messageId);
           const author = findMember(s, message?.authorId);
           return {
@@ -755,19 +808,13 @@ export class IteamCore {
 
   createAgent(input: AgentCreateInput): Agent {
     if (!input.name) throw new HttpError(400, "name is required");
-    if (!input.runtime || !SUPPORTED_RUNTIMES.includes(input.runtime)) {
-      throw new HttpError(400, "runtime must be codex, claude, gemini, or trae");
-    }
     if (!input.computerId) throw new HttpError(400, "computerId is required");
 
     const state = this.store.snapshot();
     const computer = state.computers.find(c => c.id === input.computerId);
     if (!computer) throw new HttpError(404, "computer not found");
-    const runtimeInfo = computer.runtimes?.find(runtime => runtime.id === input.runtime);
-    if (!runtimeInfo?.installed) {
-      throw new HttpError(400, `${input.runtime} is not installed on ${computer.name}`);
-    }
-
+    const runtime = normalizeOptionalString(input.runtime) || defaultRuntimeForComputer(computer.runtimes || []);
+    if (!runtime) throw new HttpError(400, "runtime is required");
     const agent = this.store.mutate<Agent>(s => {
       const now = this.clock();
       const agentId = this.newId("agent");
@@ -776,7 +823,7 @@ export class IteamCore {
         name: input.name,
         handle: input.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-"),
         description: input.description || "Local AI teammate",
-        runtime: input.runtime as Agent["runtime"],
+        runtime: runtime as Agent["runtime"],
         model: input.model || null,
         reasoning: input.reasoning || "medium",
         computerId: computer.id,
@@ -923,7 +970,9 @@ export class IteamCore {
           parentDeliveryId: null,
           depth: 0,
           excludeAgentId: null,
-          createdIds
+          createdIds,
+          sessionKey: normalizeOptionalString(input.sessionKey),
+          source: input.source || "message"
         });
         if (queued === 0) {
           const offline = agentMentions
@@ -944,7 +993,10 @@ export class IteamCore {
         // No explicit mention — only fall back when the caller passed an
         // explicit defaultAgentId (e.g. channel default agent picker).
         if (input.defaultAgentId) {
-          this.enqueueDefaultAgentDelivery(s, created, input.defaultAgentId, createdIds);
+          this.enqueueDefaultAgentDelivery(s, created, input.defaultAgentId, createdIds, {
+            sessionKey: normalizeOptionalString(input.sessionKey),
+            source: input.source || "message"
+          });
         }
       }
       return created;
@@ -960,9 +1012,16 @@ export class IteamCore {
       const now = this.clock();
       const delivery = (s.deliveries || []).find(item => item.id === deliveryId);
       if (!delivery) throw new HttpError(404, "delivery not found");
+      if (delivery.status === "cancelled") {
+        return delivery;
+      }
       delivery.status = input.ok ? "done" : "failed";
       delivery.error = input.error || null;
       delivery.updatedAt = now;
+      pushDeliveryLifecycle(delivery, "delivery.result", now, input.ok ? "Delivery completed" : "Delivery failed", {
+        ok: !!input.ok,
+        ...(input.error ? { error: input.error } : {})
+      });
       if (input.ok && input.text) {
         // Agents may prefix their reply with `<thread>` on its own first line to
         // signal that the conversation should move into a thread (see the
@@ -1061,11 +1120,71 @@ export class IteamCore {
       };
       s.messages.push(message);
       delivery.updatedAt = now;
+      pushDeliveryLifecycle(delivery, "delivery.progress", now, text.slice(0, 240), {
+        ...(input.elapsedMs !== undefined ? { elapsedMs: input.elapsedMs } : {})
+      });
       if (task.status === "todo") {
         task.status = "in_progress";
         task.updatedAt = now;
       }
       return message;
+    });
+  }
+
+  applyDeliveryHelpNeeded(deliveryId: string, input: DeliveryHelpNeededInput): Delivery {
+    return this.store.mutate<Delivery>(s => {
+      const now = this.clock();
+      const delivery = (s.deliveries || []).find(item => item.id === deliveryId);
+      if (!delivery) throw new HttpError(404, "delivery not found");
+      const text = String(input.text || input.reason || "").trim();
+      if (!text) throw new HttpError(400, "help-needed text is required");
+      delivery.status = "help_needed";
+      delivery.error = input.reason || null;
+      delivery.updatedAt = now;
+      pushDeliveryLifecycle(delivery, "delivery.help_needed", now, text.slice(0, 240), {
+        ...(input.reason ? { reason: input.reason } : {})
+      });
+      s.messages.push({
+        id: this.newId("msg"),
+        target: delivery.target,
+        authorId: delivery.agentId,
+        type: "agent",
+        text: `Help needed: ${text.slice(0, 1000)}`,
+        mentions: [],
+        createdAt: now,
+        threadId: threadRootFromTarget(delivery.target)
+      });
+      return delivery;
+    });
+  }
+
+  cancelDelivery(deliveryId: string, reason = "cancelled"): Delivery {
+    return this.store.mutate<Delivery>(s => {
+      const now = this.clock();
+      const delivery = (s.deliveries || []).find(item => item.id === deliveryId);
+      if (!delivery) throw new HttpError(404, "delivery not found");
+      if (["done", "failed", "cancelled"].includes(delivery.status)) {
+        throw new HttpError(409, "delivery already reached a terminal state");
+      }
+      delivery.status = "cancelled";
+      delivery.error = reason;
+      delivery.updatedAt = now;
+      pushDeliveryLifecycle(delivery, "delivery.cancel", now, reason);
+      this.publishComputerPush(delivery.computerId, {
+        type: "cancel_delivery",
+        payload: { deliveryId: delivery.id, agentId: delivery.agentId, reason }
+      });
+      s.messages.push({
+        id: this.newId("msg"),
+        target: delivery.target,
+        authorId: "system",
+        type: "system",
+        text: `Delivery ${delivery.id} cancelled: ${reason}`,
+        mentions: [],
+        createdAt: now,
+        threadId: threadRootFromTarget(delivery.target)
+      });
+      return delivery;
     });
   }
 
@@ -1109,7 +1228,9 @@ export class IteamCore {
         this.enqueueSingleAgentDelivery(s, message, created.assigneeId, {
           target: created.threadTarget,
           rootMessageId: message.id,
-          depth: 0
+          depth: 0,
+          sessionKey: created.threadTarget,
+          source: "task"
         });
       }
       return created;
@@ -1160,6 +1281,7 @@ export class IteamCore {
       const now = this.clock();
       const agent = s.agents.find(a => a.id === input.agentId);
       if (!agent) throw new HttpError(404, "agent not found");
+      const id = this.newId("sched");
       const schedule = parseSchedule({
         intervalMs: input.intervalMs,
         cronExpression: input.cronExpression,
@@ -1168,10 +1290,11 @@ export class IteamCore {
         now
       });
       const task: ScheduledTask = {
-        id: this.newId("sched"),
+        id,
         target: input.target,
         agentId: input.agentId,
         prompt: input.prompt,
+        sessionKey: normalizeOptionalString(input.sessionKey) || id,
         intervalMs: schedule.intervalMs,
         cronExpression: schedule.cronExpression,
         timezone: schedule.timezone,
@@ -1233,6 +1356,7 @@ export class IteamCore {
       current.target = input.target ?? current.target;
       current.agentId = input.agentId ?? current.agentId;
       current.prompt = input.prompt ?? current.prompt;
+      if (input.sessionKey !== undefined) current.sessionKey = normalizeOptionalString(input.sessionKey);
       current.status = input.status ?? current.status;
       current.updatedAt = now;
       return current;
@@ -1270,6 +1394,7 @@ export class IteamCore {
         target,
         agentId: agent.id,
         prompt,
+        sessionKey: null,
         intervalMs: schedule.intervalMs,
         cronExpression: schedule.cronExpression,
         timezone: schedule.timezone,
@@ -1282,6 +1407,7 @@ export class IteamCore {
         createdAt: now,
         updatedAt: now
       };
+      scheduled.sessionKey = scheduled.id;
       state.scheduledTasks ||= [];
       state.scheduledTasks.push(scheduled);
       state.messages.push({
@@ -1347,7 +1473,9 @@ export class IteamCore {
         const queued = this.enqueueSingleAgentDelivery(s, message, agent.id, {
           rootMessageId: message.id,
           depth: 0,
-          createdIds
+          createdIds,
+          sessionKey: task.sessionKey || task.id,
+          source: "scheduled"
         });
         if (queued === 0) {
           s.messages.push({
@@ -1374,6 +1502,118 @@ export class IteamCore {
     });
     this.publishDeliveriesById(createdIds);
     return dueCount;
+  }
+
+  // ---------------------------------------------------------------------------
+  // external ingress pairing / policy
+
+  createIngressPairing(input: IngressPairingCreateInput): ExternalIngressPairing & { connectUrl: string } {
+    if (!input.target || !input.agentId) throw new HttpError(400, "target and agentId are required");
+    return this.store.mutate(s => {
+      const now = this.clock();
+      const agent = s.agents.find(a => a.id === input.agentId);
+      if (!agent) throw new HttpError(404, "agent not found");
+      if (!s.channels.some(channel => channel.target === input.target)) {
+        throw new HttpError(404, "target channel not found");
+      }
+      const ttl = Number.isFinite(input.expiresInMs) && Number(input.expiresInMs) > 0
+        ? Math.min(Number(input.expiresInMs), 24 * 60 * 60 * 1000)
+        : DEFAULT_INGRESS_PAIRING_TTL_MS;
+      const pairCode = this.newId("pair");
+      const created: ExternalIngressPairing = {
+        id: this.newId("ingress_pair"),
+        pairCode,
+        target: input.target,
+        agentId: agent.id,
+        ...(input.label ? { label: input.label } : {}),
+        contextRules: normalizeContextRules(input.contextRules),
+        status: "waiting",
+        expiresAt: new Date(Date.parse(now) + ttl).toISOString(),
+        createdAt: now,
+        consumedAt: null,
+        policyId: null
+      };
+      s.externalIngressPairings ||= [];
+      s.externalIngressPairings.push(created);
+      return {
+        ...created,
+        connectUrl: `iteam://ingress/pair?pair_code=${encodeURIComponent(pairCode)}`
+      };
+    });
+  }
+
+  pairIngress(input: IngressPairInput): ExternalIngressPolicy {
+    const pairCode = String(input.pairCode || "").trim();
+    if (!pairCode) throw new HttpError(400, "pairCode is required");
+    return this.store.mutate<ExternalIngressPolicy>(s => {
+      const now = this.clock();
+      const pairing = (s.externalIngressPairings || []).find(item => item.pairCode === pairCode);
+      if (!pairing) throw new HttpError(404, "pairing code not found");
+      if (pairing.status !== "waiting") throw new HttpError(409, "pairing code already consumed");
+      if (Date.parse(pairing.expiresAt) <= Date.parse(now)) {
+        pairing.status = "expired";
+        throw new HttpError(410, "pairing code expired");
+      }
+      const policy: ExternalIngressPolicy = {
+        id: this.newId("ingress_policy"),
+        token: this.newId("ingress_token"),
+        source: String(input.source || pairing.label || "external").trim() || "external",
+        target: pairing.target,
+        agentId: pairing.agentId,
+        contextRules: normalizeContextRules(input.contextRules) || pairing.contextRules,
+        status: "active",
+        createdAt: now,
+        updatedAt: now
+      };
+      s.externalIngressPolicies ||= [];
+      s.externalIngressPolicies.push(policy);
+      pairing.status = "consumed";
+      pairing.consumedAt = now;
+      pairing.policyId = policy.id;
+      return policy;
+    });
+  }
+
+  createIngressMessage(input: IngressMessageInput): Message {
+    const text = String(input.text || "").trim();
+    if (!text) throw new HttpError(400, "text is required");
+    const createdIds: string[] = [];
+    const message = this.store.mutate<Message>(s => {
+      const now = this.clock();
+      const policy = authenticateIngressPolicy(s, input);
+      const target = input.target || policy.target;
+      const agentId = input.agentId || policy.agentId;
+      if (target !== policy.target) throw new HttpError(403, "target is not allowed by ingress policy");
+      if (agentId !== policy.agentId) throw new HttpError(403, "agent is not allowed by ingress policy");
+      if (!contextRulesMatch(policy.contextRules, input.context || {})) {
+        throw new HttpError(403, "context does not match ingress policy");
+      }
+      const agent = s.agents.find(a => a.id === agentId);
+      if (!agent) throw new HttpError(404, "agent not found");
+      const source = String(input.source || policy.source || "external").trim() || "external";
+      const created: Message = {
+        id: this.newId("msg"),
+        target,
+        authorId: `ingress:${source}`,
+        type: "human",
+        text,
+        mentions: [{ id: agent.id, kind: "agent", name: agent.name, handle: agent.handle || slugHandle(agent.name) }],
+        createdAt: now,
+        threadId: threadRootFromTarget(target)
+      };
+      s.messages.push(created);
+      this.enqueueSingleAgentDelivery(s, created, agent.id, {
+        rootMessageId: created.id,
+        parentDeliveryId: null,
+        depth: 0,
+        createdIds,
+        sessionKey: normalizeOptionalString(input.sessionKey) || policy.id,
+        source: "external"
+      });
+      return created;
+    });
+    this.publishDeliveriesById(createdIds);
+    return message;
   }
 
   // ---------------------------------------------------------------------------
@@ -1411,7 +1651,15 @@ export class IteamCore {
   private enqueueMentionDeliveries(
     state: State,
     message: Message,
-    options: { rootMessageId?: string; parentDeliveryId?: string | null; depth?: number; excludeAgentId?: string | null; createdIds?: string[] } = {}
+    options: {
+      rootMessageId?: string;
+      parentDeliveryId?: string | null;
+      depth?: number;
+      excludeAgentId?: string | null;
+      createdIds?: string[];
+      sessionKey?: string | null;
+      source?: string | null;
+    } = {}
   ): number {
     const depth = options.depth || 0;
     if (depth > MAX_DELIVERY_DEPTH) return 0;
@@ -1445,14 +1693,22 @@ export class IteamCore {
         rootMessageId: options.rootMessageId || message.id,
         parentDeliveryId: options.parentDeliveryId || null,
         depth,
-        createdIds: options.createdIds
+        createdIds: options.createdIds,
+        sessionKey: options.sessionKey,
+        source: options.source || "message"
       });
       queued += 1;
     }
     return queued;
   }
 
-  private enqueueDefaultAgentDelivery(state: State, message: Message, defaultAgentId?: string, createdIds?: string[]): number {
+  private enqueueDefaultAgentDelivery(
+    state: State,
+    message: Message,
+    defaultAgentId?: string,
+    createdIds?: string[],
+    options: { sessionKey?: string | null; source?: string | null } = {}
+  ): number {
     const channel = (state.channels || []).find(channel => channel.target === message.target);
     const channelMemberIds = new Set<string>(channel?.memberIds || []);
     const selectedAgent = defaultAgentId ? state.agents.find(a => a.id === defaultAgentId) : null;
@@ -1467,7 +1723,9 @@ export class IteamCore {
       rootMessageId: message.id,
       parentDeliveryId: null,
       depth: 0,
-      createdIds
+      createdIds,
+      sessionKey: options.sessionKey,
+      source: options.source || "message"
     });
   }
 
@@ -1475,13 +1733,23 @@ export class IteamCore {
     state: State,
     message: Message,
     agentId: string,
-    options: { target?: string; rootMessageId?: string; parentDeliveryId?: string | null; depth?: number; createdIds?: string[] } = {}
+    options: {
+      target?: string;
+      rootMessageId?: string;
+      parentDeliveryId?: string | null;
+      depth?: number;
+      createdIds?: string[];
+      sessionKey?: string | null;
+      source?: string | null;
+    } = {}
   ): number {
     const agent = state.agents.find(a => a.id === agentId);
     if (!agent || agent.desiredStatus !== "running") return 0;
     state.deliveries ||= [];
     const now = this.clock();
     const id = this.newId("delivery");
+    const target = options.target || message.target;
+    const sessionKey = options.sessionKey ?? sessionKeyFromTarget(target);
     state.deliveries.push({
       id,
       messageId: message.id,
@@ -1490,11 +1758,14 @@ export class IteamCore {
       depth: options.depth || 0,
       agentId: agent.id,
       computerId: agent.computerId,
-      target: options.target || message.target,
+      target,
+      sessionKey,
+      source: options.source || "message",
       status: "pending",
       attempts: 0,
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
+      lifecycle: [deliveryLifecycleRecord("delivery.dispatch", now, "Delivery queued")]
     });
     if (options.createdIds) options.createdIds.push(id);
     return 1;
@@ -1522,6 +1793,7 @@ export class IteamCore {
         if (hasListener && delivery.status === "pending") {
           delivery.status = "delivering";
           delivery.updatedAt = now;
+          pushDeliveryLifecycle(delivery, "delivery.ack", now, "Delivery pushed to connected computer");
         }
         const message = s.messages.find(m => m.id === delivery.messageId);
         const author = findMember(s, message?.authorId);
@@ -1653,6 +1925,86 @@ function parentTargetFromThread(target: string): string {
   return threadRootFromTarget(target)
     ? String(target || "").slice(0, String(target || "").lastIndexOf(":"))
     : target;
+}
+
+function defaultRuntimeForComputer(runtimes: RuntimeInfo[]): string | null {
+  const installed = runtimes.filter(runtime => runtime.installed && runtime.id !== "mock");
+  const preferredAcpIds = ["trae", "gemini", "hermes"];
+  for (const id of preferredAcpIds) {
+    if (installed.some(runtime => runtime.id === id)) return id;
+  }
+  return (
+    installed.find(runtime => runtime.id.includes("acp") || /\bACP\b/i.test(runtime.name)) ||
+    installed[0]
+  )?.id || null;
+}
+
+function sessionKeyFromTarget(target: string): string | null {
+  return threadRootFromTarget(target) ? target : null;
+}
+
+function normalizeOptionalString(value: string | null | undefined): string | null {
+  const text = String(value || "").trim();
+  return text || null;
+}
+
+function normalizeContextRules(value: Record<string, string[]> | undefined): Record<string, string[]> | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const entries = Object.entries(value)
+    .map(([key, values]) => [
+      String(key).trim(),
+      Array.isArray(values) ? values.map(item => String(item).trim()).filter(Boolean) : []
+    ] as const)
+    .filter(([key, values]) => key && values.length > 0);
+  return entries.length ? Object.fromEntries(entries) : undefined;
+}
+
+function contextRulesMatch(rules: Record<string, string[]> | undefined, context: Record<string, string>): boolean {
+  if (!rules || Object.keys(rules).length === 0) return true;
+  for (const [key, allowedValues] of Object.entries(rules)) {
+    const value = context[key];
+    if (!value || !allowedValues.includes(value)) return false;
+  }
+  return true;
+}
+
+function authenticateIngressPolicy(state: State, input: IngressMessageInput): ExternalIngressPolicy {
+  const policyId = String(input.policyId || "").trim();
+  const token = String(input.token || "").trim();
+  if (!policyId || !token) throw new HttpError(401, "policyId and token are required");
+  const policy = (state.externalIngressPolicies || []).find(item => item.id === policyId);
+  if (!policy || policy.status !== "active" || policy.token !== token) {
+    throw new HttpError(401, "invalid ingress credentials");
+  }
+  return policy;
+}
+
+function deliveryLifecycleRecord(
+  intent: DeliveryLifecycleIntent,
+  at: string,
+  message?: string,
+  details?: Record<string, unknown>
+): DeliveryLifecycleRecord {
+  return {
+    intent,
+    at,
+    ...(message ? { message } : {}),
+    ...(details && Object.keys(details).length ? { details } : {})
+  };
+}
+
+function pushDeliveryLifecycle(
+  delivery: Delivery,
+  intent: DeliveryLifecycleIntent,
+  at: string,
+  message?: string,
+  details?: Record<string, unknown>
+): void {
+  delivery.lifecycle ||= [];
+  delivery.lifecycle.push(deliveryLifecycleRecord(intent, at, message, details));
+  if (delivery.lifecycle.length > 50) {
+    delivery.lifecycle.splice(0, delivery.lifecycle.length - 50);
+  }
 }
 
 function parseMentions(text: string, state: State): MentionRef[] {

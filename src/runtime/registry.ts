@@ -11,6 +11,8 @@ import { AcpDriver, type AcpDriverOptions } from "./acp-driver.js";
 import { ClaudeDriver, type ClaudeDriverOptions } from "./claude-driver.js";
 import { CodexDriver, type CodexDriverOptions } from "./codex-driver.js";
 import { OneshotDriver, type OneshotDriverOptions } from "./oneshot-driver.js";
+import { listAcpRuntimeProfileNames, resolveAcpRuntimeProfile } from "./acp-profiles.js";
+import { listRuntimeProfileNames, resolveRuntimeProfile } from "./profiles.js";
 
 export interface DriverFactoryContext {
   serverUrl: string;
@@ -56,6 +58,13 @@ const FALLBACK: RuntimeDescriptor = {
 };
 
 export function getRuntimeDescriptor(runtime: string): RuntimeDescriptor {
+  if (!RUNTIME_TABLE[runtime] && resolveRuntimeProfile(runtime)) return FALLBACK;
+  if (!RUNTIME_TABLE[runtime] && resolveAcpRuntimeProfile(runtime)) {
+    return {
+      capabilities: { lifecycle: "persistent", inFlightWake: "direct", supportsResume: true },
+      factory: (name, ctx) => new AcpDriver(name, ctx as AcpDriverOptions)
+    };
+  }
   return RUNTIME_TABLE[runtime] ?? FALLBACK;
 }
 
@@ -68,5 +77,9 @@ export function isPersistentRuntime(runtime: string): boolean {
 }
 
 export function listKnownRuntimes(): AgentRuntime[] {
-  return Object.keys(RUNTIME_TABLE) as AgentRuntime[];
+  return [...new Set([
+    ...Object.keys(RUNTIME_TABLE),
+    ...listAcpRuntimeProfileNames(),
+    ...listRuntimeProfileNames()
+  ])] as AgentRuntime[];
 }

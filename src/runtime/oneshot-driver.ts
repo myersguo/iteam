@@ -11,10 +11,22 @@ import { agentEnv, prepareAgentWorkspace, type AgentWorkspaceLayout } from "../w
 import type { Agent, DeliveryWithContext } from "../types.js";
 import type { AgentDriver, AgentEventListener, DeliverResult, DeliveryMode, DriverCapabilities } from "./driver.js";
 import type { AgentEvent } from "./events.js";
+import {
+  expandProfileCwd,
+  renderProfileArgs,
+  renderProfileEnv,
+  renderProfileValue,
+  resolveRuntimeProfile,
+  type ResolvedRuntimeProfile
+} from "./profiles.js";
 
 interface RuntimeSpec {
   command: string;
   args: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  timeoutMs?: number;
+  profile?: ResolvedRuntimeProfile;
 }
 
 export interface OneshotDriverOptions {
@@ -66,7 +78,7 @@ export class OneshotDriver implements AgentDriver {
     // Use workspace.dir (which already includes the cross-host fallback) so
     // we don't spawn into a path that doesn't exist on this machine.
     const cwd = workspace.dir;
-    const spec = buildOneShotSpec(agent, prompt);
+    const spec = buildOneShotSpec(agent, delivery, prompt);
     const tag = `[Agent ${agent.id} ${agent.runtime}]`;
     console.log(`[${nowIso()}] ${tag} Delivery received (delivery=${delivery.id}, prompt-bytes=${prompt.length})`);
     const startedAt = Date.now();
@@ -74,7 +86,7 @@ export class OneshotDriver implements AgentDriver {
       const text = await runOneShot({
         agent,
         spec,
-        cwd,
+        cwd: spec.cwd || cwd,
         workspace,
         serverUrl: this.serverUrl,
         onEvent: ev => this.emit(ev),
@@ -114,13 +126,16 @@ function runOneShot({ agent, spec, cwd, workspace, serverUrl, onEvent, launchId,
   return new Promise<string>((resolvePromise, reject) => {
     const child: ChildProcess = spawn(spec.command, spec.args, {
       cwd,
-      env: agentEnv({ agent, serverUrl, workspace }),
+      env: {
+        ...agentEnv({ agent, serverUrl, workspace }),
+        ...(spec.env || {})
+      },
       stdio: ["ignore", "pipe", "pipe"]
     });
     console.log(`[${nowIso()}] ${tag} Process started (pid=${child.pid})`);
     let stdout = "";
     let stderr = "";
-    const timeoutMs = oneshotTimeoutMs(agent.runtime);
+    const timeoutMs = spec.timeoutMs || oneshotTimeoutMs(agent.runtime);
     let lastActivity = Date.now();
     const timer = setInterval(() => {
       if (Date.now() - lastActivity < timeoutMs) return;
@@ -207,7 +222,20 @@ function oneshotTimeoutMs(runtime: string): number {
   return 300000;
 }
 
-function buildOneShotSpec(agent: Agent, prompt: string): RuntimeSpec {
+function buildOneShotSpec(agent: Agent, delivery: DeliveryWithContext, prompt: string): RuntimeSpec {
+  const profile = resolveRuntimeProfile(agent.runtime);
+  if (profile) {
+    const timeoutMs = profile.timeoutMs || oneshotTimeoutMs(agent.runtime);
+    const params = { agent, delivery, prompt, timeoutMs };
+    return {
+      command: renderProfileValue(profile.command, params),
+      args: renderProfileArgs(profile, params),
+      cwd: expandProfileCwd(profile.cwd ? renderProfileValue(profile.cwd, params) : undefined),
+      env: renderProfileEnv(profile, params),
+      timeoutMs,
+      profile
+    };
+  }
   if (agent.runtime === "codex") {
     const codexArgs = ["exec", "--skip-git-repo-check", "--sandbox", "read-only"];
     if (agent.model) codexArgs.push("-m", agent.model);

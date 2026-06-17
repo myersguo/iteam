@@ -49,6 +49,10 @@ interface Agent {
   reasoning?: string;
   workspacePath?: string;
   computerId?: string;
+  lastRuntimeStatus?: {
+    error?: string;
+    [key: string]: unknown;
+  };
 }
 
 interface Channel {
@@ -219,7 +223,7 @@ function App() {
   const [asTask, setAsTask] = useState(false);
   const [agentName, setAgentName] = useState("codex");
   const [agentDescription, setAgentDescription] = useState("");
-  const [runtime, setRuntime] = useState("codex");
+  const [runtime, setRuntime] = useState("");
   const [agentComputerId, setAgentComputerId] = useState("");
   const [agentModel, setAgentModel] = useState("");
   const [connectInvite, setConnectInvite] = useState<ConnectInvite | null>(null);
@@ -451,13 +455,14 @@ function App() {
 
   async function createAgent() {
     const agent = await api.post<Agent>("/api/agents", {
-      name: agentName,
+      name: agentName.trim(),
       description: agentDescription,
-      runtime,
+      runtime: runtime.trim(),
       model: agentModel,
       computerId: agentComputerId
     });
     setSelectedAgentId(agent.id);
+    setRuntime("");
     setCreateAgentOpen(false);
     refresh();
   }
@@ -1339,7 +1344,10 @@ function ChatView({
                 refreshMention(e.target);
               }}
               onClick={e => refreshMention(e.target as HTMLTextAreaElement)}
-              onKeyUp={e => refreshMention(e.target as HTMLTextAreaElement)}
+              onKeyUp={e => {
+                if (mentionMatch && isMentionNavigationKey(e.key)) return;
+                refreshMention(e.target as HTMLTextAreaElement);
+              }}
               placeholder={`Message ${channel}`}
               onKeyDown={handleComposerKeyDown}
             />
@@ -2262,6 +2270,9 @@ function MembersView({
                 </div>
                 {renameError && <small>{renameError}</small>}
               </label>
+              {agentRuntimeError(selectedAgent) && (
+                <p className="profile-warning">Launch error: {agentRuntimeError(selectedAgent)}</p>
+              )}
               <dl className="profile-dl">
                 <div>
                   <dt>Runtime</dt>
@@ -2349,25 +2360,47 @@ function CreateAgentModal({
   setAgentComputerId: (s: string) => void;
   agentModel: string;
   setAgentModel: (s: string) => void;
-  createAgent: () => void;
+  createAgent: () => Promise<void> | void;
   onClose: () => void;
 }) {
   const computer = state.computers.find(c => c.id === agentComputerId);
   const runtimes = (computer?.runtimes || []).filter(
-    r => ["codex", "claude", "gemini", "trae"].includes(r.id) && r.installed
+    r => r.installed && r.id !== "mock"
   );
-  const valid = agentComputerId && agentName.trim() && runtime && runtimes.some(r => r.id === runtime);
+  const runtimeValue = runtime.trim();
+  const valid = Boolean(agentComputerId && agentName.trim() && runtimeValue);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [runtimePickerOpen, setRuntimePickerOpen] = useState(false);
+  const previousRuntimeComputerId = useRef<string | null>(null);
 
   useEffect(() => {
     if (!agentComputerId && state.computers[0]) setAgentComputerId(state.computers[0].id);
   }, [agentComputerId, state.computers, setAgentComputerId]);
 
   useEffect(() => {
+    if (!agentComputerId || previousRuntimeComputerId.current === agentComputerId) return;
+    previousRuntimeComputerId.current = agentComputerId;
     const available = (computer?.runtimes || []).filter(
-      r => ["codex", "claude", "gemini", "trae"].includes(r.id) && r.installed
+      r => r.installed && r.id !== "mock"
     );
-    if (available.length && !available.some(r => r.id === runtime)) setRuntime(available[0].id);
-  }, [computer, runtime, setRuntime]);
+    if (available.length && (!runtime.trim() || !available.some(r => r.id === runtime))) {
+      setRuntime(preferredCreateRuntime(available));
+    }
+  }, [agentComputerId, computer, runtime, setRuntime]);
+
+  async function submit() {
+    if (!valid || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      await createAgent();
+    } catch (err) {
+      setError((err as Error).message || "Failed to create agent");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   useEffect(() => {
     setAgentModel(defaultModel(runtime));
@@ -2426,17 +2459,54 @@ function CreateAgentModal({
         </label>
 
         <div className="field-row">
-          <label className="field">
-            <span>Runtime</span>
-            <select value={runtime} onChange={e => setRuntime(e.target.value)}>
-              <option value="">Select…</option>
-              {runtimes.map(r => (
-                <option value={r.id} key={r.id}>
-                  {runtimeLabel(r.id)}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="field runtime-combobox-field">
+            <span>
+              Runtime <small>type or pick</small>
+            </span>
+            <div className="runtime-combobox">
+              <input
+                value={runtime}
+                onChange={e => {
+                  setRuntime(e.target.value);
+                  setRuntimePickerOpen(false);
+                }}
+                onFocus={() => setRuntimePickerOpen(true)}
+                placeholder="codex, trae, or configured profile id"
+                role="combobox"
+                aria-expanded={runtimePickerOpen}
+                aria-controls="runtime-options"
+                autoComplete="off"
+              />
+              <button
+                className="runtime-combobox-toggle"
+                type="button"
+                aria-label="Show runtime options"
+                onClick={() => setRuntimePickerOpen(open => !open)}
+              >
+                <ChevronDown size={16} />
+              </button>
+              {runtimePickerOpen && runtimes.length > 0 && (
+                <div className="runtime-options" id="runtime-options" role="listbox">
+                  {runtimes.map(r => (
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={r.id === runtimeValue}
+                      className={r.id === runtimeValue ? "is-selected" : ""}
+                      key={r.id}
+                      onClick={() => {
+                        setRuntime(r.id);
+                        setRuntimePickerOpen(false);
+                      }}
+                    >
+                      <span>{runtimeLabel(r.id, r.name)}</span>
+                      <code>{r.id}</code>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
           <label className="field">
             <span>Model</span>
             <input
@@ -2458,15 +2528,19 @@ function CreateAgentModal({
           <p className="form-error">Connect a computer before creating agents.</p>
         )}
         {computer && !runtimes.length && (
-          <p className="form-error">No supported agent runtime is installed on this computer.</p>
+          <p className="form-error">No installed agent runtime was reported by this computer. You can still type a custom profile id; launch will fail later if the daemon cannot run it.</p>
         )}
+        {computer && runtimes.length > 0 && !runtimes.some(r => r.id === runtimeValue) && runtimeValue && (
+          <p className="char-count">Custom runtime id. Make sure the daemon can run it, usually via ITEAM_ACP_RUNTIMES or ITEAM_RUNTIME_PROFILES.</p>
+        )}
+        {error && <p className="form-error">{error}</p>}
 
         <footer className="modal-actions">
           <button className="btn btn-ghost" onClick={onClose}>
             Cancel
           </button>
-          <button className="btn btn-primary" disabled={!valid} onClick={createAgent}>
-            Create agent
+          <button className="btn btn-primary" disabled={!valid || busy} onClick={submit}>
+            {busy ? "Creating..." : "Create agent"}
           </button>
         </footer>
       </section>
@@ -2619,10 +2693,22 @@ function RenameHumanModal({
   );
 }
 
-function runtimeLabel(runtime: string): string {
-  return ({ codex: "Codex CLI", claude: "Claude Code", gemini: "Gemini CLI", trae: "Trae CLI (traecli)" } as Record<string, string>)[
+function preferredCreateRuntime(runtimes: RuntimeInfo[]): string {
+  const installed = runtimes.filter(runtime => runtime.installed && runtime.id !== "mock");
+  const preferredAcpIds = ["trae", "gemini", "hermes"];
+  for (const id of preferredAcpIds) {
+    if (installed.some(runtime => runtime.id === id)) return id;
+  }
+  return (
+    installed.find(runtime => runtime.id.includes("acp") || /\bACP\b/i.test(runtime.name)) ||
+    installed[0]
+  )?.id || "";
+}
+
+function runtimeLabel(runtime: string, fallback?: string): string {
+  return ({ codex: "Codex CLI", claude: "Claude Code", gemini: "Gemini CLI", opencode: "OpenCode", trae: "Trae CLI (traecli)" } as Record<string, string>)[
     runtime
-  ] || runtime;
+  ] || fallback || runtime;
 }
 
 function defaultModel(runtime: string): string {
@@ -2768,7 +2854,10 @@ function ThreadPanel({
             refreshMention(event.target);
           }}
           onClick={event => refreshMention(event.target as HTMLTextAreaElement)}
-          onKeyUp={event => refreshMention(event.target as HTMLTextAreaElement)}
+          onKeyUp={event => {
+            if (mentionMatch && isMentionNavigationKey(event.key)) return;
+            refreshMention(event.target as HTMLTextAreaElement);
+          }}
           onKeyDown={handleKeyDown}
           placeholder="Reply in thread"
         />
@@ -2960,6 +3049,11 @@ function buildPath(
   return qs ? `${path}?${qs}` : path;
 }
 
+
+function agentRuntimeError(agent: Agent): string {
+  return typeof agent.lastRuntimeStatus?.error === "string" ? agent.lastRuntimeStatus.error : "";
+}
+
 function isAgentStopped(agent: Agent) {
   return (
     ["offline", "stopped", "exited", "launch_failed"].includes(agent.status) ||
@@ -2991,6 +3085,10 @@ function getMentionMembers(state: AppState, channelTarget?: string): MentionMemb
       status: agent.status
     }))
   ];
+}
+
+function isMentionNavigationKey(key: string): boolean {
+  return key === "ArrowDown" || key === "ArrowUp" || key === "Enter" || key === "Tab" || key === "Escape";
 }
 
 function findMentionMatch(value: string, cursor: number): MentionMatch | null {
@@ -3202,8 +3300,9 @@ function ComputersView({
               <div>
                 <strong>{a.name}</strong>
                 <small>{a.runtime}</small>
+                {agentRuntimeError(a) && <small className="agent-error">{agentRuntimeError(a)}</small>}
               </div>
-              <span className={`status-pill ${isAgentStopped(a) ? "closed" : "in_progress"}`}>
+              <span className={`status-pill ${agentRuntimeError(a) ? "error" : isAgentStopped(a) ? "closed" : "in_progress"}`}>
                 {a.status}
               </span>
               <button className="btn btn-ghost" onClick={() => toggleAgent(a)}>

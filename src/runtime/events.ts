@@ -14,6 +14,7 @@ export type AgentEventType =
   | "tool_call"
   | "tool_result"
   | "thinking"
+  | "plan"
   | "turn_end"
   | "error"
   | "exited";
@@ -65,6 +66,16 @@ export interface ThinkingEvent extends AgentEventBase {
   text: string;
 }
 
+export interface PlanEvent extends AgentEventBase {
+  type: "plan";
+  items: Array<{
+    id: string;
+    content: string;
+    status?: string;
+    priority?: string;
+  }>;
+}
+
 export interface TurnEndEvent extends AgentEventBase {
   type: "turn_end";
   /** Final accumulated assistant reply, if available. */
@@ -92,6 +103,7 @@ export type AgentEvent =
   | ToolCallEvent
   | ToolResultEvent
   | ThinkingEvent
+  | PlanEvent
   | TurnEndEvent
   | ErrorEvent
   | ExitedEvent;

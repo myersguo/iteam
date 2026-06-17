@@ -13,18 +13,27 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { nowIso } from "../lib.js";
 import { agentEnv, prepareAgentWorkspace, type AgentWorkspaceLayout } from "../workspace.js";
 import type { Agent, DeliveryWithContext } from "../types.js";
-import { deliveryAffinityIndex, type AgentDriver, type AgentEventListener, type DeliverResult, type DeliveryMode, type DriverCapabilities } from "./driver.js";
+import { type AgentDriver, type AgentEventListener, type DeliverResult, type DeliveryMode, type DriverCapabilities } from "./driver.js";
 import type { AgentEvent } from "./events.js";
 import { JsonRpcStdioClient } from "./jsonrpc.js";
+import {
+  renderAcpProfileArgs,
+  renderAcpProfileCwd,
+  renderAcpProfileEnv,
+  resolveAcpRuntimeProfile
+} from "./acp-profiles.js";
 
 /** ACP protocol version this client speaks. Negotiated down on initialize. */
 const PROTOCOL_VERSION = 1;
 const TURN_IDLE_TIMEOUT_MS = readPositiveMs("ITEAM_AGENT_IDLE_TIMEOUT_MS", 6 * 60 * 60 * 1000);
-const PROCESS_POOL_SIZE = 3;
+const DEFAULT_PROCESS_POOL_SIZE = readPositiveMs("ITEAM_ACP_PROCESS_POOL_SIZE", 3);
+const DEFAULT_SESSION_KEY = "__default__";
 
 interface AcpRuntimeSpec {
   command: string;
   args: string[];
+  cwd?: string;
+  env?: Record<string, string>;
 }
 
 export interface AcpDriverOptions {
@@ -37,10 +46,18 @@ export interface AcpDriverOptions {
 interface ProcessState {
   child: ChildProcessWithoutNullStreams;
   rpc: JsonRpcStdioClient;
-  sessionId: string;
+  defaultSessionId: string;
   workspace: AgentWorkspaceLayout;
+  sessions: Map<string, AcpSessionState>;
+}
+
+interface AcpSessionState {
+  key: string;
+  sessionId: string;
   inflight: Promise<unknown>;
   touchTurn?: () => void;
+  activeDeliveryId?: string;
+  activeTarget?: string;
 }
 
 export class AcpDriver implements AgentDriver {
@@ -59,8 +76,8 @@ export class AcpDriver implements AgentDriver {
   private connectToken?: string;
   
   private processes: ProcessState[] = [];
-  private nextProcessIndex = 0;
   private startPromises: Promise<void>[] = [];
+  private cancelledDeliveryIds: Set<string> = new Set();
 
   constructor(runtime: string, opts: AcpDriverOptions) {
     this.runtime = runtime;
@@ -86,8 +103,11 @@ export class AcpDriver implements AgentDriver {
   }
 
   async start(agent: Agent): Promise<void> {
-    // Start up to PROCESS_POOL_SIZE processes
-    while (this.processes.length + this.startPromises.length < PROCESS_POOL_SIZE) {
+    const profile = resolveAcpRuntimeProfile(agent.runtime);
+    const poolSize = Math.max(1, Math.floor(profile?.poolSize || DEFAULT_PROCESS_POOL_SIZE));
+    // Start up to the configured process pool size. Each process can host
+    // multiple ACP sessions, keyed by delivery.sessionKey.
+    while (this.processes.length + this.startPromises.length < poolSize) {
       const processIndex = this.processes.length + this.startPromises.length;
       const p = this.doStart(agent, processIndex).finally(() => {
         this.startPromises = this.startPromises.filter(x => x !== p);
@@ -123,8 +143,11 @@ export class AcpDriver implements AgentDriver {
     const cwd = workspace.dir;
     const spec = buildAcpSpec(agent, workspace);
     const child = spawn(spec.command, spec.args, {
-      cwd,
-      env: agentEnv({ agent, serverUrl: this.serverUrl, workspace }),
+      cwd: spec.cwd || cwd,
+      env: {
+        ...agentEnv({ agent, serverUrl: this.serverUrl, workspace }),
+        ...(spec.env || {})
+      },
       stdio: ["pipe", "pipe", "pipe"]
     }) as ChildProcessWithoutNullStreams;
 
@@ -135,7 +158,7 @@ export class AcpDriver implements AgentDriver {
         type: "exited",
         agentId: agent.id,
         launchId: this.launchId,
-        sessionId: processState?.sessionId,
+        sessionId: processState?.defaultSessionId,
         at: nowIso(),
         code,
         signal
@@ -145,7 +168,7 @@ export class AcpDriver implements AgentDriver {
 
     const rpc = new JsonRpcStdioClient(child, {
       onRequest: (method, params) => this.handleAgentRequest(method, params),
-      onNotification: (method, params) => this.handleAgentNotification(agent, method, params, processState?.sessionId)
+      onNotification: (method, params) => this.handleAgentNotification(agent, method, params, processState?.defaultSessionId)
     });
 
     // 1) initialize
@@ -164,12 +187,17 @@ export class AcpDriver implements AgentDriver {
       mcpServers: buildMcpServers(workspace)
     });
 
+    const defaultSession: AcpSessionState = {
+      key: DEFAULT_SESSION_KEY,
+      sessionId: sessionResult.sessionId,
+      inflight: Promise.resolve()
+    };
     processState = {
       child,
       rpc,
-      sessionId: sessionResult.sessionId,
+      defaultSessionId: sessionResult.sessionId,
       workspace,
-      inflight: Promise.resolve()
+      sessions: new Map([[DEFAULT_SESSION_KEY, defaultSession]])
     };
     
     this.processes.push(processState);
@@ -181,7 +209,7 @@ export class AcpDriver implements AgentDriver {
       type: "session_started",
       agentId: agent.id,
       launchId: this.launchId,
-      sessionId: processState.sessionId,
+      sessionId: processState.defaultSessionId,
       at: nowIso()
     });
   }
@@ -190,19 +218,64 @@ export class AcpDriver implements AgentDriver {
     await this.start(agent);
     if (this.processes.length === 0) throw new Error("acp processes not initialized");
 
-    const processState = this.processes[deliveryAffinityIndex(delivery, this.processes.length)];
+    if (this.cancelledDeliveryIds.has(delivery.id)) {
+      throw new Error(`delivery ${delivery.id} was cancelled`);
+    }
 
-    const turn = processState.inflight.then(() => this.runTurn(agent, processState, prompt));
-    processState.inflight = turn.catch(() => {});
+    const sessionKey = sessionKeyForDelivery(delivery);
+    const processState = this.processes[hashIndex(sessionKey, this.processes.length)];
+    const sessionState = await this.ensureSession(agent, processState, sessionKey);
+
+    const turn = sessionState.inflight.then(() => this.runTurn(agent, processState, sessionState, delivery, prompt));
+    sessionState.inflight = turn.catch(() => {});
     return turn;
+  }
+
+  async cancelDelivery(deliveryId: string): Promise<void> {
+    this.cancelledDeliveryIds.add(deliveryId);
+    for (const processState of this.processes) {
+      for (const sessionState of processState.sessions.values()) {
+        if (sessionState.activeDeliveryId !== deliveryId) continue;
+        try {
+          processState.rpc.notify("session/cancel", { sessionId: sessionState.sessionId });
+        } catch {}
+      }
+    }
+  }
+
+  private async ensureSession(agent: Agent, processState: ProcessState, sessionKey: string): Promise<AcpSessionState> {
+    const existing = processState.sessions.get(sessionKey);
+    if (existing) return existing;
+
+    const sessionResult = await processState.rpc.request<{ sessionId: string }>("session/new", {
+      cwd: processState.workspace.dir,
+      mcpServers: buildMcpServers(processState.workspace)
+    });
+    const sessionState: AcpSessionState = {
+      key: sessionKey,
+      sessionId: sessionResult.sessionId,
+      inflight: Promise.resolve()
+    };
+    processState.sessions.set(sessionKey, sessionState);
+    this.emit({
+      type: "session_started",
+      agentId: agent.id,
+      launchId: this.launchId,
+      sessionId: sessionState.sessionId,
+      at: nowIso()
+    });
+    return sessionState;
   }
 
   private async runTurn(
     agent: Agent,
     processState: ProcessState,
+    sessionState: AcpSessionState,
+    delivery: DeliveryWithContext,
     prompt: string
   ): Promise<DeliverResult> {
-    const { rpc, sessionId } = processState;
+    const { rpc } = processState;
+    const { sessionId } = sessionState;
     const accumulator: string[] = [];
     const offEvent = this.on(event => {
       if (event.type !== "message_chunk") return;
@@ -221,6 +294,11 @@ export class AcpDriver implements AgentDriver {
     }
 
     try {
+      if (this.cancelledDeliveryIds.has(delivery.id)) {
+        throw new Error(`delivery ${delivery.id} was cancelled`);
+      }
+      sessionState.activeDeliveryId = delivery.id;
+      sessionState.activeTarget = delivery.target;
       console.log(`[${nowIso()}] [AcpDriver] session/prompt (session=${sessionId}, prompt-bytes=${Buffer.byteLength(finalPrompt, "utf8")})`);
       const result = await withIdleTimeout(
         rpc.request<{ stopReason: string }>("session/prompt", {
@@ -230,15 +308,20 @@ export class AcpDriver implements AgentDriver {
         TURN_IDLE_TIMEOUT_MS,
         `${agent.runtime} response idle timeout`,
         touch => {
-          processState.touchTurn = touch;
+          sessionState.touchTurn = touch;
         }
       );
+      if (this.cancelledDeliveryIds.has(delivery.id)) {
+        throw new Error(`delivery ${delivery.id} was cancelled`);
+      }
       const text = accumulator.join("").trim() || "(No response)";
       this.emit({
         type: "turn_end",
         agentId: agent.id,
         launchId: this.launchId,
         sessionId: sessionId,
+        deliveryId: delivery.id,
+        target: delivery.target,
         at: nowIso(),
         text,
         reason: result.stopReason
@@ -251,6 +334,8 @@ export class AcpDriver implements AgentDriver {
         agentId: agent.id,
         launchId: this.launchId,
         sessionId: sessionId,
+        deliveryId: delivery.id,
+        target: delivery.target,
         at: nowIso(),
         message: err.message
       });
@@ -266,7 +351,9 @@ export class AcpDriver implements AgentDriver {
       }
       throw err;
     } finally {
-      processState.touchTurn = undefined;
+      sessionState.touchTurn = undefined;
+      sessionState.activeDeliveryId = undefined;
+      sessionState.activeTarget = undefined;
       offEvent();
     }
   }
@@ -286,8 +373,6 @@ export class AcpDriver implements AgentDriver {
 
   private handleAgentNotification(agent: Agent, method: string, params: unknown, boundSessionId?: string): void {
     if (method !== "session/update") return;
-    const processState = this.processes.find(item => item.sessionId === boundSessionId);
-    processState?.touchTurn?.();
     const payload = (params || {}) as {
       sessionId?: string;
       update?: Record<string, unknown>;
@@ -295,6 +380,16 @@ export class AcpDriver implements AgentDriver {
     const update = payload.update || {};
     const kind = String(update.sessionUpdate || "");
     const sessionId = payload.sessionId || boundSessionId;
+    const sessionState = this.findSessionState(sessionId);
+    sessionState?.touchTurn?.();
+    const common = {
+      agentId: agent.id,
+      launchId: this.launchId,
+      sessionId,
+      deliveryId: sessionState?.activeDeliveryId,
+      target: sessionState?.activeTarget,
+      at: nowIso()
+    };
 
     switch (kind) {
       case "agent_message_chunk": {
@@ -302,10 +397,7 @@ export class AcpDriver implements AgentDriver {
         if (!text) return;
         this.emit({
           type: "message_chunk",
-          agentId: agent.id,
-          launchId: this.launchId,
-          sessionId,
-          at: nowIso(),
+          ...common,
           final: false,
           text
         });
@@ -316,10 +408,7 @@ export class AcpDriver implements AgentDriver {
         if (!text) return;
         this.emit({
           type: "thinking",
-          agentId: agent.id,
-          launchId: this.launchId,
-          sessionId,
-          at: nowIso(),
+          ...common,
           text
         });
         return;
@@ -329,10 +418,7 @@ export class AcpDriver implements AgentDriver {
         if (!toolCallId) return;
         this.emit({
           type: "tool_call",
-          agentId: agent.id,
-          launchId: this.launchId,
-          sessionId,
-          at: nowIso(),
+          ...common,
           toolName: String(update.title || update.kind || "tool"),
           toolCallId,
           arguments: update.rawInput
@@ -346,13 +432,20 @@ export class AcpDriver implements AgentDriver {
         if (status !== "completed" && status !== "failed") return;
         this.emit({
           type: "tool_result",
-          agentId: agent.id,
-          launchId: this.launchId,
-          sessionId,
-          at: nowIso(),
+          ...common,
           toolCallId,
           ok: status === "completed",
           output: update.rawOutput ?? update.content
+        });
+        return;
+      }
+      case "plan": {
+        const items = extractPlanEntries(update.entries);
+        if (items.length === 0) return;
+        this.emit({
+          type: "plan",
+          ...common,
+          items
         });
         return;
       }
@@ -361,11 +454,23 @@ export class AcpDriver implements AgentDriver {
     }
   }
 
+  private findSessionState(sessionId: string | undefined): AcpSessionState | undefined {
+    if (!sessionId) return undefined;
+    for (const processState of this.processes) {
+      for (const sessionState of processState.sessions.values()) {
+        if (sessionState.sessionId === sessionId) return sessionState;
+      }
+    }
+    return undefined;
+  }
+
   async stop(_agent: Agent): Promise<void> {
     for (const processState of this.processes) {
-      try {
-        processState.rpc.notify("session/cancel", { sessionId: processState.sessionId });
-      } catch {}
+      for (const sessionState of processState.sessions.values()) {
+        try {
+          processState.rpc.notify("session/cancel", { sessionId: sessionState.sessionId });
+        } catch {}
+      }
       processState.rpc.stop();
       if (!processState.child.killed) {
         try {
@@ -379,27 +484,20 @@ export class AcpDriver implements AgentDriver {
 }
 
 function buildAcpSpec(agent: Agent, workspace: AgentWorkspaceLayout): AcpRuntimeSpec {
-  if (agent.runtime === "trae") {
+  const profile = resolveAcpRuntimeProfile(agent.runtime);
+  if (profile) {
+    const params = { agent, workspace, timeoutMs: TURN_IDLE_TIMEOUT_MS };
     return {
-      command: "traecli",
-      args: [
-        "acp", "serve",
-        "--add-dir", workspace.dir,
-        "--yolo",
-        "--disallowed-tool", "EnterPlanMode",
-        "--disallowed-tool", "ExitPlanMode"
-      ]
+      command: profile.command,
+      args: renderAcpProfileArgs(profile, params),
+      cwd: renderAcpProfileCwd(profile, params),
+      env: renderAcpProfileEnv(profile, params)
     };
-  }
-  if (agent.runtime === "gemini") {
-    const args = ["--acp", "--yolo", "--skip-trust", "--include-directories", workspace.dir];
-    if (agent.model) args.unshift("-m", agent.model);
-    return { command: "gemini", args };
   }
   // Codex's `app-server` speaks a proprietary dialect (Initialize/TurnStart/
   // AgentMessageDelta), not ACP — see `codex app-server generate-json-schema`.
   // Claude has its own stream-json wire format and lives in ClaudeDriver.
-  // AcpDriver is currently only used for trae and gemini.
+  // Other ACP runtimes can be configured with ITEAM_ACP_RUNTIMES.
   throw new Error(`acp driver does not support runtime: ${agent.runtime}`);
 }
 
@@ -424,14 +522,63 @@ function buildMcpServers(workspace: AgentWorkspaceLayout): AcpMcpServer[] {
 interface ContentBlockText {
   type: "text";
   text?: string;
+  thinking?: string;
+  resource?: { text?: string };
 }
 
 function extractContentText(content: unknown): string {
   if (!content) return "";
   if (typeof content === "string") return content;
+  if (Array.isArray(content)) return content.map(item => extractContentText(item)).join("");
   const block = content as ContentBlockText;
   if (block.type === "text" && typeof block.text === "string") return block.text;
+  if (typeof block.text === "string") return block.text;
+  if (typeof block.thinking === "string") return block.thinking;
+  if (typeof block.resource?.text === "string") return block.resource.text;
   return "";
+}
+
+function extractPlanEntries(value: unknown): Array<{ id: string; content: string; status?: string; priority?: string }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item, index) => {
+    if (!item || typeof item !== "object") return [];
+    const record = item as Record<string, unknown>;
+    const content = typeof record.content === "string" ? record.content.trim() : "";
+    if (!content) return [];
+    return [{
+      id: typeof record.id === "string" && record.id ? record.id : `plan-${index + 1}`,
+      content,
+      ...(typeof record.status === "string" ? { status: record.status } : {}),
+      ...(typeof record.priority === "string" ? { priority: record.priority } : {})
+    }];
+  });
+}
+
+function sessionKeyForDelivery(delivery: DeliveryWithContext): string {
+  const explicit = delivery.sessionKey?.trim();
+  if (explicit) return safeSessionKey(explicit);
+  if (delivery.target.includes(":msg_")) return safeSessionKey(delivery.target);
+  return DEFAULT_SESSION_KEY;
+}
+
+function safeSessionKey(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_.:-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 96) || DEFAULT_SESSION_KEY;
+}
+
+function hashIndex(key: string, poolSize: number): number {
+  if (poolSize <= 1) return 0;
+  let hash = 2166136261;
+  for (let i = 0; i < key.length; i += 1) {
+    hash ^= key.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) % poolSize;
 }
 
 function withIdleTimeout<T>(

@@ -105,9 +105,10 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
   `CREATE TABLE IF NOT EXISTS iteam_scheduled_tasks (
     id              TEXT NOT NULL PRIMARY KEY,
     target          TEXT NOT NULL,
-    agent_id        TEXT NOT NULL,
-    prompt          TEXT NOT NULL,
-    interval_ms     INTEGER,
+	    agent_id        TEXT NOT NULL,
+	    prompt          TEXT NOT NULL,
+	    session_key     TEXT,
+	    interval_ms     INTEGER,
     cron_expression TEXT,
     timezone        TEXT,
     status          TEXT NOT NULL,
@@ -126,13 +127,40 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
     parent_delivery_id TEXT,
     depth              INTEGER NOT NULL DEFAULT 0,
     agent_id           TEXT NOT NULL,
-    computer_id        TEXT NOT NULL,
-    target             TEXT NOT NULL,
-    status             TEXT NOT NULL,
+	    computer_id        TEXT NOT NULL,
+	    target             TEXT NOT NULL,
+	    session_key        TEXT,
+	    source             TEXT,
+	    status             TEXT NOT NULL,
     attempts           INTEGER NOT NULL DEFAULT 0,
     created_at         TEXT NOT NULL,
     updated_at         TEXT NOT NULL,
-    error              TEXT
+	    error              TEXT,
+	    lifecycle          TEXT
+	  )`,
+  `CREATE TABLE IF NOT EXISTS iteam_external_ingress_pairings (
+    id            TEXT NOT NULL PRIMARY KEY,
+    pair_code     TEXT NOT NULL UNIQUE,
+    target        TEXT NOT NULL,
+    agent_id      TEXT NOT NULL,
+    label         TEXT,
+    context_rules TEXT,
+    status        TEXT NOT NULL,
+    expires_at    TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    consumed_at   TEXT,
+    policy_id     TEXT
+  )`,
+  `CREATE TABLE IF NOT EXISTS iteam_external_ingress_policies (
+    id            TEXT NOT NULL PRIMARY KEY,
+    token         TEXT NOT NULL,
+    source        TEXT NOT NULL,
+    target        TEXT NOT NULL,
+    agent_id      TEXT NOT NULL,
+    context_rules TEXT,
+    status        TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS iteam_events (
     id         TEXT NOT NULL PRIMARY KEY,
@@ -162,5 +190,7 @@ export const SQLITE_INDEXES: ReadonlyArray<string> = [
   "CREATE INDEX IF NOT EXISTS idx_deliveries_status_computer ON iteam_deliveries(status, computer_id)",
   "CREATE INDEX IF NOT EXISTS idx_deliveries_agent ON iteam_deliveries(agent_id)",
   "CREATE INDEX IF NOT EXISTS idx_deliveries_message ON iteam_deliveries(message_id)",
+  "CREATE INDEX IF NOT EXISTS idx_ingress_pairings_code ON iteam_external_ingress_pairings(pair_code)",
+  "CREATE INDEX IF NOT EXISTS idx_ingress_policies_token ON iteam_external_ingress_policies(id, token)",
   "CREATE INDEX IF NOT EXISTS idx_events_type_created ON iteam_events(type, created_at)"
 ];

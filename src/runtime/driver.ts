@@ -91,6 +91,9 @@ export interface AgentDriver {
    */
   deliver(agent: Agent, delivery: DeliveryWithContext, prompt: string): Promise<DeliverResult>;
 
+  /** Cancel an active delivery if the driver can map it to a runtime turn. */
+  cancelDelivery?(deliveryId: string): Promise<void>;
+
   /** Tear down any long-lived resources. Idempotent. */
   stop?(agent: Agent): Promise<void>;
 
@@ -108,7 +111,7 @@ export interface AgentDriver {
  */
 export function deliveryAffinityIndex(delivery: DeliveryWithContext, poolSize: number): number {
   if (poolSize <= 1) return 0;
-  const key = delivery.target.includes(":msg_") ? delivery.target : delivery.id;
+  const key = delivery.sessionKey || (delivery.target.includes(":msg_") ? delivery.target : delivery.id);
   let hash = 2166136261;
   for (let i = 0; i < key.length; i += 1) {
     hash ^= key.charCodeAt(i);

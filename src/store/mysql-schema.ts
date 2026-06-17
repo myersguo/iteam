@@ -146,9 +146,10 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
     ddl: `CREATE TABLE IF NOT EXISTS iteam_scheduled_tasks (
       id              VARCHAR(64)  NOT NULL PRIMARY KEY,
       target          VARCHAR(255) NOT NULL,
-      agent_id        VARCHAR(64)  NOT NULL,
-      prompt          TEXT         NOT NULL,
-      interval_ms     INT          DEFAULT NULL,
+	      agent_id        VARCHAR(64)  NOT NULL,
+	      prompt          TEXT         NOT NULL,
+	      session_key     VARCHAR(255) DEFAULT NULL,
+	      interval_ms     INT          DEFAULT NULL,
       cron_expression VARCHAR(255) DEFAULT NULL,
       timezone        VARCHAR(128) DEFAULT NULL,
       status          VARCHAR(32)  NOT NULL,
@@ -172,16 +173,52 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
       parent_delivery_id VARCHAR(64)  DEFAULT NULL,
       depth              INT          NOT NULL DEFAULT 0,
       agent_id           VARCHAR(64)  NOT NULL,
-      computer_id        VARCHAR(64)  NOT NULL,
-      target             VARCHAR(255) NOT NULL,
-      status             VARCHAR(32)  NOT NULL,
+	      computer_id        VARCHAR(64)  NOT NULL,
+	      target             VARCHAR(255) NOT NULL,
+	      session_key        VARCHAR(255) DEFAULT NULL,
+	      source             VARCHAR(64)  DEFAULT NULL,
+	      status             VARCHAR(32)  NOT NULL,
       attempts           INT          NOT NULL DEFAULT 0,
       created_at         VARCHAR(40)  NOT NULL,
       updated_at         VARCHAR(40)  NOT NULL,
-      error              MEDIUMTEXT   DEFAULT NULL,
-      KEY idx_status_computer (status, computer_id),
+	      error              MEDIUMTEXT   DEFAULT NULL,
+	      lifecycle          JSON         DEFAULT NULL,
+	      KEY idx_status_computer (status, computer_id),
       KEY idx_agent (agent_id),
       KEY idx_message (message_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+	  },
+  {
+    name: "iteam_external_ingress_pairings",
+    ddl: `CREATE TABLE IF NOT EXISTS iteam_external_ingress_pairings (
+      id            VARCHAR(64)  NOT NULL PRIMARY KEY,
+      pair_code     VARCHAR(128) NOT NULL,
+      target        VARCHAR(255) NOT NULL,
+      agent_id      VARCHAR(64)  NOT NULL,
+      label         VARCHAR(255) DEFAULT NULL,
+      context_rules JSON         DEFAULT NULL,
+      status        VARCHAR(32)  NOT NULL,
+      expires_at    VARCHAR(40)  NOT NULL,
+      created_at    VARCHAR(40)  NOT NULL,
+      consumed_at   VARCHAR(40)  DEFAULT NULL,
+      policy_id     VARCHAR(64)  DEFAULT NULL,
+      UNIQUE KEY uniq_pair_code (pair_code),
+      KEY idx_pair_code (pair_code)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+  },
+  {
+    name: "iteam_external_ingress_policies",
+    ddl: `CREATE TABLE IF NOT EXISTS iteam_external_ingress_policies (
+      id            VARCHAR(64)  NOT NULL PRIMARY KEY,
+      token         VARCHAR(128) NOT NULL,
+      source        VARCHAR(128) NOT NULL,
+      target        VARCHAR(255) NOT NULL,
+      agent_id      VARCHAR(64)  NOT NULL,
+      context_rules JSON         DEFAULT NULL,
+      status        VARCHAR(32)  NOT NULL,
+      created_at    VARCHAR(40)  NOT NULL,
+      updated_at    VARCHAR(40)  NOT NULL,
+      KEY idx_policy_token (id, token)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
   },
   {

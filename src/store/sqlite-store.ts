@@ -5,6 +5,8 @@ import type {
   Channel,
   Computer,
   Delivery,
+  ExternalIngressPairing,
+  ExternalIngressPolicy,
   Human,
   MentionRef,
   Message,
@@ -92,6 +94,10 @@ export class SqliteStore extends BaseStore {
     this.addColumnIfMissing("iteam_computers", "connect_token", "TEXT");
     this.addColumnIfMissing("iteam_scheduled_tasks", "cron_expression", "TEXT");
     this.addColumnIfMissing("iteam_scheduled_tasks", "timezone", "TEXT");
+    this.addColumnIfMissing("iteam_scheduled_tasks", "session_key", "TEXT");
+    this.addColumnIfMissing("iteam_deliveries", "session_key", "TEXT");
+    this.addColumnIfMissing("iteam_deliveries", "source", "TEXT");
+    this.addColumnIfMissing("iteam_deliveries", "lifecycle", "TEXT");
     this.migrateAgentsModelNullable();
   }
 
@@ -295,11 +301,14 @@ export class SqliteStore extends BaseStore {
         agent_id: string;
         computer_id: string;
         target: string;
+        session_key: string | null;
+        source: string | null;
         status: string;
         attempts: number;
         created_at: string;
         updated_at: string;
         error: string | null;
+        lifecycle: string | null;
       }>;
 
     const scheduledTaskRows = this.db
@@ -309,6 +318,7 @@ export class SqliteStore extends BaseStore {
         target: string;
         agent_id: string;
         prompt: string;
+        session_key: string | null;
         interval_ms: number | null;
         cron_expression: string | null;
         timezone: string | null;
@@ -318,6 +328,36 @@ export class SqliteStore extends BaseStore {
         last_message_id: string | null;
         run_count: number;
         created_by: string;
+        created_at: string;
+        updated_at: string;
+      }>;
+
+    const ingressPairingRows = this.db
+      .prepare("SELECT * FROM iteam_external_ingress_pairings ORDER BY created_at ASC")
+      .all() as Array<{
+        id: string;
+        pair_code: string;
+        target: string;
+        agent_id: string;
+        label: string | null;
+        context_rules: string | null;
+        status: string;
+        expires_at: string;
+        created_at: string;
+        consumed_at: string | null;
+        policy_id: string | null;
+      }>;
+
+    const ingressPolicyRows = this.db
+      .prepare("SELECT * FROM iteam_external_ingress_policies ORDER BY created_at ASC")
+      .all() as Array<{
+        id: string;
+        token: string;
+        source: string;
+        target: string;
+        agent_id: string;
+        context_rules: string | null;
+        status: string;
         created_at: string;
         updated_at: string;
       }>;
@@ -439,11 +479,14 @@ export class SqliteStore extends BaseStore {
       agentId: row.agent_id,
       computerId: row.computer_id,
       target: row.target,
+      sessionKey: row.session_key,
+      source: row.source,
       status: row.status,
       attempts: row.attempts,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
-      error: row.error
+      error: row.error,
+      lifecycle: parseJsonField(row.lifecycle, [])
     }));
 
     const scheduledTasks: ScheduledTask[] = scheduledTaskRows.map(row => ({
@@ -451,6 +494,7 @@ export class SqliteStore extends BaseStore {
       target: row.target,
       agentId: row.agent_id,
       prompt: row.prompt,
+      sessionKey: row.session_key,
       intervalMs: row.interval_ms,
       cronExpression: row.cron_expression,
       timezone: row.timezone,
@@ -460,6 +504,32 @@ export class SqliteStore extends BaseStore {
       lastMessageId: row.last_message_id,
       runCount: row.run_count,
       createdBy: row.created_by,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
+
+    const externalIngressPairings: ExternalIngressPairing[] = ingressPairingRows.map(row => ({
+      id: row.id,
+      pairCode: row.pair_code,
+      target: row.target,
+      agentId: row.agent_id,
+      ...(row.label ? { label: row.label } : {}),
+      contextRules: parseJsonField<Record<string, string[]> | undefined>(row.context_rules, undefined),
+      status: row.status,
+      expiresAt: row.expires_at,
+      createdAt: row.created_at,
+      consumedAt: row.consumed_at,
+      policyId: row.policy_id
+    }));
+
+    const externalIngressPolicies: ExternalIngressPolicy[] = ingressPolicyRows.map(row => ({
+      id: row.id,
+      token: row.token,
+      source: row.source,
+      target: row.target,
+      agentId: row.agent_id,
+      contextRules: parseJsonField<Record<string, string[]> | undefined>(row.context_rules, undefined),
+      status: row.status,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     }));
@@ -482,6 +552,8 @@ export class SqliteStore extends BaseStore {
       deliveries,
       tasks,
       scheduledTasks,
+      externalIngressPairings,
+      externalIngressPolicies,
       events
     };
   }
@@ -645,7 +717,7 @@ export class SqliteStore extends BaseStore {
     this.db.exec("DELETE FROM iteam_deliveries");
     if (state.deliveries.length) {
       const stmt = this.db.prepare(
-        "INSERT INTO iteam_deliveries (id, message_id, root_message_id, parent_delivery_id, depth, agent_id, computer_id, target, status, attempts, created_at, updated_at, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO iteam_deliveries (id, message_id, root_message_id, parent_delivery_id, depth, agent_id, computer_id, target, session_key, source, status, attempts, created_at, updated_at, error, lifecycle) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       );
       for (const d of state.deliveries) {
         stmt.run(
@@ -657,11 +729,14 @@ export class SqliteStore extends BaseStore {
           d.agentId,
           d.computerId,
           d.target,
+          d.sessionKey ?? null,
+          d.source ?? null,
           d.status,
           d.attempts ?? 0,
           d.createdAt,
           d.updatedAt,
-          d.error ?? null
+          d.error ?? null,
+          JSON.stringify(d.lifecycle || [])
         );
       }
     }
@@ -669,7 +744,7 @@ export class SqliteStore extends BaseStore {
     this.db.exec("DELETE FROM iteam_scheduled_tasks");
     if (state.scheduledTasks.length) {
       const stmt = this.db.prepare(
-        "INSERT INTO iteam_scheduled_tasks (id, target, agent_id, prompt, interval_ms, cron_expression, timezone, status, next_run_at, last_run_at, last_message_id, run_count, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO iteam_scheduled_tasks (id, target, agent_id, prompt, session_key, interval_ms, cron_expression, timezone, status, next_run_at, last_run_at, last_message_id, run_count, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       );
       for (const task of state.scheduledTasks) {
         stmt.run(
@@ -677,6 +752,7 @@ export class SqliteStore extends BaseStore {
           task.target,
           task.agentId,
           task.prompt,
+          task.sessionKey ?? null,
           task.intervalMs ?? 0,
           task.cronExpression ?? null,
           task.timezone ?? null,
@@ -688,6 +764,48 @@ export class SqliteStore extends BaseStore {
           task.createdBy,
           task.createdAt,
           task.updatedAt
+        );
+      }
+    }
+
+    this.db.exec("DELETE FROM iteam_external_ingress_pairings");
+    if (state.externalIngressPairings.length) {
+      const stmt = this.db.prepare(
+        "INSERT INTO iteam_external_ingress_pairings (id, pair_code, target, agent_id, label, context_rules, status, expires_at, created_at, consumed_at, policy_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      );
+      for (const pairing of state.externalIngressPairings) {
+        stmt.run(
+          pairing.id,
+          pairing.pairCode,
+          pairing.target,
+          pairing.agentId,
+          pairing.label ?? null,
+          pairing.contextRules ? JSON.stringify(pairing.contextRules) : null,
+          pairing.status,
+          pairing.expiresAt,
+          pairing.createdAt,
+          pairing.consumedAt ?? null,
+          pairing.policyId ?? null
+        );
+      }
+    }
+
+    this.db.exec("DELETE FROM iteam_external_ingress_policies");
+    if (state.externalIngressPolicies.length) {
+      const stmt = this.db.prepare(
+        "INSERT INTO iteam_external_ingress_policies (id, token, source, target, agent_id, context_rules, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      );
+      for (const policy of state.externalIngressPolicies) {
+        stmt.run(
+          policy.id,
+          policy.token,
+          policy.source,
+          policy.target,
+          policy.agentId,
+          policy.contextRules ? JSON.stringify(policy.contextRules) : null,
+          policy.status,
+          policy.createdAt,
+          policy.updatedAt
         );
       }
     }

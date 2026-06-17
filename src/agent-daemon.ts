@@ -518,6 +518,12 @@ function handlePushEvent(rawEvent: string): void {
   } else if (type === "delivery") {
     const delivery = payload as DeliveryWithContext;
     runDelivery(delivery, "push");
+  } else if (type === "cancel_delivery") {
+    const event = payload as { deliveryId: string; agentId?: string; reason?: string };
+    console.log(`[${nowIso()}] push: cancel delivery ${event.deliveryId}${event.reason ? ` (${event.reason})` : ""}`);
+    launcher.cancelDelivery(event.deliveryId, event.agentId).catch((error: Error) => {
+      console.error(`[${nowIso()}] cancel delivery ${event.deliveryId} failed: ${error.message}`);
+    });
   }
   // ping / ready are keepalives, nothing to do
 }

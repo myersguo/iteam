@@ -1,6 +1,6 @@
 // Shared domain types used across the daemon, agent launcher, and CLI.
 
-export type AgentRuntime = "codex" | "claude" | "gemini" | "opencode" | "trae";
+export type AgentRuntime = string;
 
 export type AgentDesiredStatus = "running" | "stopped";
 
@@ -125,6 +125,21 @@ export interface Message {
 
 export type TaskStatus = "todo" | "in_progress" | "in_review" | "done" | string;
 
+export type DeliveryLifecycleIntent =
+  | "delivery.dispatch"
+  | "delivery.ack"
+  | "delivery.progress"
+  | "delivery.help_needed"
+  | "delivery.result"
+  | "delivery.cancel";
+
+export interface DeliveryLifecycleRecord {
+  intent: DeliveryLifecycleIntent;
+  at: string;
+  message?: string;
+  details?: Record<string, unknown>;
+}
+
 export interface Task {
   id: string;
   number: number;
@@ -147,6 +162,7 @@ export interface ScheduledTask {
   target: string;
   agentId: string;
   prompt: string;
+  sessionKey?: string | null;
   intervalMs: number | null;
   cronExpression?: string | null;
   timezone?: string | null;
@@ -169,11 +185,40 @@ export interface Delivery {
   agentId: string;
   computerId: string;
   target: string;
+  sessionKey?: string | null;
+  source?: string | null;
   status: "pending" | "delivering" | "done" | "failed" | string;
   attempts: number;
   createdAt: string;
   updatedAt: string;
   error?: string | null;
+  lifecycle?: DeliveryLifecycleRecord[];
+}
+
+export interface ExternalIngressPairing {
+  id: string;
+  pairCode: string;
+  target: string;
+  agentId: string;
+  label?: string;
+  contextRules?: Record<string, string[]>;
+  status: "waiting" | "consumed" | "expired" | string;
+  expiresAt: string;
+  createdAt: string;
+  consumedAt?: string | null;
+  policyId?: string | null;
+}
+
+export interface ExternalIngressPolicy {
+  id: string;
+  token: string;
+  source: string;
+  target: string;
+  agentId: string;
+  contextRules?: Record<string, string[]>;
+  status: "active" | "revoked" | string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface StoreEvent {
@@ -200,6 +245,8 @@ export interface State {
   deliveries: Delivery[];
   tasks: Task[];
   scheduledTasks: ScheduledTask[];
+  externalIngressPairings: ExternalIngressPairing[];
+  externalIngressPolicies: ExternalIngressPolicy[];
   events: StoreEvent[];
 }
 

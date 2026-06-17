@@ -3,6 +3,7 @@ import { createId, nowIso } from "./lib.js";
 import type { Agent, ContextMessage, DeliveryWithContext, MentionRef, Message } from "./types.js";
 import type { AgentDriver } from "./runtime/driver.js";
 import { getRuntimeDescriptor, isPersistentRuntime } from "./runtime/registry.js";
+import { resolveRuntimeProfile } from "./runtime/profiles.js";
 import { agentEnv, prepareAgentWorkspace, type AgentWorkspaceLayout } from "./workspace.js";
 
 interface RuntimeSpec {
@@ -332,6 +333,15 @@ export class AgentLauncher {
     await this.report(agent.id, "stopped", { launchId: agent.launchId || null, pid: null, requestedAt: nowIso() });
   }
 
+  async cancelDelivery(deliveryId: string, agentId?: string): Promise<void> {
+    const entries = agentId
+      ? [...this.drivers.entries()].filter(([id]) => id === agentId)
+      : [...this.drivers.entries()];
+    await Promise.all(entries.map(([, entry]) =>
+      entry.driver.cancelDelivery?.(deliveryId).catch(() => {})
+    ));
+  }
+
   async deliver(delivery: DeliveryWithContext): Promise<{ ok: true; text: string }> {
     const agent = delivery.agent;
     const message = delivery.message;
@@ -437,6 +447,14 @@ export function formatTaskRuntimeProgress(event: import("./runtime/events.js").A
         : `执行过程：sub agent ${tool} 失败。`;
     }
   }
+  if (event.type === "plan" && event.items.length > 0) {
+    const summary = event.items
+      .map(item => compactText(item.content, 120))
+      .filter(Boolean)
+      .slice(0, 3)
+      .join("；");
+    return summary ? `执行计划：${summary}` : "执行计划已更新。";
+  }
   return null;
 }
 
@@ -458,6 +476,10 @@ interface BuildRuntimeSpecArgs {
 }
 
 function buildRuntimeSpec({ agent, workspace }: BuildRuntimeSpecArgs): RuntimeSpec | null {
+  if (resolveRuntimeProfile(agent.runtime)) {
+    return null;
+  }
+
   if (agent.runtime === "claude") {
     const args = [
       "--allow-dangerously-skip-permissions",
@@ -545,9 +567,10 @@ ${taskInstructions}
 - Only @mention another teammate when you genuinely need their input. Do NOT @mention anyone just to acknowledge, confirm, or say you'll wait.
 - If asked to stop, pause, or wait — confirm briefly and STOP. Do not @mention anyone.
 
-Message source target: ${message.target}
-Reply target: ${replyTarget}
-Message author: ${author.name || message.authorId}${author.handle ? ` (@${author.handle})` : ""}
+	Message source target: ${message.target}
+	Reply target: ${replyTarget}
+	Session key: ${delivery.sessionKey || "(none)"}
+	Message author: ${author.name || message.authorId}${author.handle ? ` (@${author.handle})` : ""}
 Available members:
 ${members || "- No other members"}
 Conversation history:
