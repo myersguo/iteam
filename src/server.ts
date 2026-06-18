@@ -9,6 +9,7 @@ import { DAEMON_VERSION, defaultHome } from "./lib.js";
 import { IteamCore } from "./core.js";
 import { startHttpServer } from "./http-server.js";
 import { acquireLock, LockHeldError } from "./machine-lock.js";
+import { LarkBotIntegration, readLarkBotConfig, isLikelyLarkAppId } from "./integrations/lark.js";
 
 const port = Number(readArg("--port", process.env.ITEAM_PORT || "4318"));
 const host = readArg("--host", process.env.ITEAM_HOST || "0.0.0.0") || "0.0.0.0";
@@ -35,7 +36,91 @@ const core = await IteamCore.create({
 });
 console.log(`Data: ${core.store.home} (backend: ${process.env.ITEAM_STORE || "sqlite"})`);
 
-const http = startHttpServer({ core, port, host, serveWeb, webRoot });
+class LarkBotRuntime {
+  private readonly bots = new Map<string, LarkBotIntegration>();
+
+  constructor(private readonly core: IteamCore) {}
+
+  startAll(): void {
+    const envConfig = readLarkBotConfig(process.env);
+    if (envConfig.enabled) void this.startConfig(envConfig);
+    for (const stored of this.core.listExternalBotConfigs()) {
+      void this.syncProvider(stored.provider);
+    }
+  }
+
+  async syncProvider(provider: string): Promise<void> {
+    const normalized = normalizeRuntimeProvider(provider);
+    if (!isLarkRuntimeProvider(normalized)) return;
+    this.removeProvider(normalized);
+
+    const stored = this.core.getExternalBotConfig(normalized);
+    if (!stored) return;
+    if (!stored.enabled) {
+      this.core.updateExternalBotStatus(normalized, "disabled", null);
+      return;
+    }
+    if (stored.appId && !isLikelyLarkAppId(stored.appId)) {
+      console.warn(`[lark] skip long-connection client for ${stored.provider}: invalid appId`);
+      this.core.updateExternalBotStatus(normalized, "invalid", "App ID should look like cli_xxx");
+      return;
+    }
+
+    const config = readLarkBotConfig({}, stored);
+    if (!config.enabled) {
+      this.core.updateExternalBotStatus(normalized, "pending", "App ID and App Secret are required before pairing");
+      return;
+    }
+    await this.startConfig(config);
+  }
+
+  removeProvider(provider: string): void {
+    const normalized = normalizeRuntimeProvider(provider);
+    const bot = this.bots.get(normalized);
+    if (!bot) return;
+    bot.close();
+    this.bots.delete(normalized);
+  }
+
+  closeAll(): void {
+    for (const bot of this.bots.values()) bot.close();
+    this.bots.clear();
+  }
+
+  private async startConfig(config: ReturnType<typeof readLarkBotConfig>): Promise<void> {
+    this.removeProvider(config.provider);
+    const bot = new LarkBotIntegration(this.core, config);
+    this.bots.set(config.provider, bot);
+    try {
+      await bot.start();
+    } catch (error) {
+      bot.close();
+      this.bots.delete(config.provider);
+      console.error(`[lark] failed to start long-connection client for ${config.provider}: ${(error as Error).message}`);
+    }
+  }
+}
+
+function normalizeRuntimeProvider(provider: string): string {
+  return String(provider || "").trim().toLowerCase();
+}
+
+function isLarkRuntimeProvider(provider: string): boolean {
+  return provider.startsWith("lark") || provider.startsWith("feishu");
+}
+
+const larkRuntime = new LarkBotRuntime(core);
+const http = startHttpServer({
+  core,
+  port,
+  host,
+  serveWeb,
+  webRoot,
+  externalBotRuntime: {
+    sync: provider => larkRuntime.syncProvider(provider),
+    remove: provider => larkRuntime.removeProvider(provider)
+  }
+});
 
 http.server.on("listening", () => {
   console.log(`iTeam daemon listening on http://${host}:${port}`);
@@ -44,6 +129,7 @@ http.server.on("listening", () => {
   } else {
     console.log("Web: static hosting disabled (--no-serve-web)");
   }
+  larkRuntime.startAll();
 });
 http.server.on("error", error => {
   console.error(`http server error: ${(error as Error).message}`);
@@ -54,6 +140,11 @@ async function shutdown(reason: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`shutting down (${reason})`);
+  try {
+    larkRuntime.closeAll();
+  } catch (error) {
+    console.error(`lark close error: ${(error as Error).message}`);
+  }
   try {
     await http.close();
   } catch (error) {

@@ -6,8 +6,11 @@ import type {
   Channel,
   Computer,
   Delivery,
+  ExternalBotBinding,
+  ExternalBotConfig,
   ExternalIngressPairing,
   ExternalIngressPolicy,
+  ExternalMessageLink,
   Message,
   ScheduledTask,
   State,
@@ -51,6 +54,9 @@ export function initialState(): State {
     scheduledTasks: [],
     externalIngressPairings: [],
     externalIngressPolicies: [],
+    externalBotConfigs: [],
+    externalBotBindings: [],
+    externalMessageLinks: [],
     events: []
   };
 }
@@ -149,8 +155,49 @@ export function sanitizeState(state: State): State {
     contextRules: normalizeContextRules(policy.contextRules),
     updatedAt: policy.updatedAt || policy.createdAt || nowIso()
   }));
+  const providerMigration = new Map<string, string>();
+  state.externalBotConfigs = (state.externalBotConfigs || []).map((config: ExternalBotConfig) => {
+    const oldProvider = String(config.provider || "").toLowerCase();
+    const provider = normalizeExternalBotConfigProvider(oldProvider, config.appId);
+    if (oldProvider && oldProvider !== provider) providerMigration.set(oldProvider, provider);
+    return {
+      ...config,
+      provider,
+      alias: config.alias ?? null,
+      appSecret: config.appSecret ?? null,
+      domain: config.domain ?? null,
+      enabled: !!config.enabled,
+      status: config.status || (!config.enabled ? "disabled" : "pending"),
+      statusMessage: config.statusMessage ?? null,
+      lastConnectedAt: config.lastConnectedAt ?? null,
+      updatedAt: config.updatedAt || config.createdAt || nowIso()
+    };
+  }).filter(config => config.provider && config.appId);
+  state.externalBotBindings = (state.externalBotBindings || []).map((binding: ExternalBotBinding) => ({
+    ...binding,
+    provider: providerMigration.get(String(binding.provider || "").toLowerCase()) || String(binding.provider || "").toLowerCase(),
+    chatType: binding.chatType ?? null,
+    defaultTarget: binding.defaultTarget ?? null,
+    defaultAgentId: binding.defaultAgentId ?? null,
+    status: binding.status || "active",
+    updatedAt: binding.updatedAt || binding.createdAt || nowIso()
+  }));
+  state.externalMessageLinks = (state.externalMessageLinks || []).map((link: ExternalMessageLink) => ({
+    ...link,
+    provider: providerMigration.get(String(link.provider || "").toLowerCase()) || String(link.provider || "").toLowerCase(),
+    externalMessageId: link.externalMessageId ?? null,
+    rootMessageId: link.rootMessageId ?? null
+  }));
   state.events = (state.events || []).filter(event => !String(event.type || "").startsWith("agent:"));
   return state;
+}
+
+function normalizeExternalBotConfigProvider(provider: string, appId: string): string {
+  const normalized = String(provider || "").trim().toLowerCase();
+  const app = String(appId || "").trim().toLowerCase();
+  const baseProvider = normalized.split(":")[0];
+  if ((baseProvider === "lark" || baseProvider === "feishu") && app) return `${baseProvider}:${app}`;
+  return normalized;
 }
 
 function normalizeContextRules(value: Record<string, string[]> | undefined): Record<string, string[]> | undefined {

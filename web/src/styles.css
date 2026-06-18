@@ -928,6 +928,12 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
   border-color: var(--surface-dark-elevated);
 }
 .btn-secondary-on-dark:hover { background: var(--surface-dark-soft); }
+.btn-danger-on-dark {
+  background: rgba(198, 69, 69, 0.16);
+  color: #ffd4d4;
+  border-color: rgba(255, 150, 150, 0.28);
+}
+.btn-danger-on-dark:hover { background: rgba(198, 69, 69, 0.24); }
 
 .btn.wide { width: 100%; }
 
@@ -1425,6 +1431,24 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
   position: relative;
   z-index: 1;
 }
+.bot-status-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  align-items: center;
+  margin: 0 0 18px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: var(--r-md);
+  background: rgba(255, 255, 255, 0.06);
+}
+.bot-status-card > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.bot-status-card strong { color: var(--on-dark); font-weight: 600; }
+.bot-status-card small {
+  color: var(--on-dark-soft);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
 
 /* ===========================================================
    Computers
@@ -1794,6 +1818,138 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
   font-size: 13px;
   margin: 0 0 16px;
 }
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--body);
+  font-size: 14px;
+}
+.check-row.on-dark { color: var(--on-dark-soft); }
+.check-row input { accent-color: var(--primary); }
+.bots-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 36px 48px 48px;
+  min-width: 0;
+}
+.bots-layout > .panel {
+  min-width: 0;
+  max-width: 100%;
+}
+.bots-guidance {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
+  align-items: start;
+  gap: 18px 28px;
+}
+.bots-guidance > .eyebrow {
+  grid-column: 1 / -1;
+}
+.integrations-grid {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+}
+.integrations-grid > .panel {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+.integrations-grid .terminal-body-inline {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 6px;
+}
+.integrations-grid .terminal-command {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.integration-summary-card {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0 18px;
+  padding: 12px;
+  background: var(--canvas);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+}
+.integration-summary-card > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.integration-summary-card strong {
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.integration-summary-card small {
+  color: var(--muted);
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bot-command-help {
+  min-width: 0;
+}
+.bot-command-list {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+.bot-command-list li {
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--canvas);
+  overflow-x: auto;
+}
+.bot-command-list code {
+  display: block;
+  min-width: max-content;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+.integration-summary-card .status-pill { justify-self: end; }
+.bound-chat-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+.bound-chat-row {
+  display: grid;
+  grid-template-columns: 28px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: var(--r-md);
+  background: rgba(255, 255, 255, 0.06);
+}
+.bound-chat-row svg { color: var(--on-dark-soft); }
+.bound-chat-row > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.bound-chat-row strong { color: var(--on-dark); font-weight: 600; }
+.bound-chat-row small {
+  color: var(--on-dark-soft);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.empty-note {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+.empty-note.on-dark { color: var(--on-dark-soft); }
 
 /* terminal block (Connect Computer) */
 .connect-command-block {
@@ -1954,6 +2110,8 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
   .task-board, .task-list, .member-grid,
   .computer-card, .section-head, .agent-table,
   .computers-empty, .message-list { padding-left: 22px; padding-right: 22px; }
+  .bots-layout { padding-left: 22px; padding-right: 22px; }
+  .bots-guidance { grid-template-columns: 1fr; }
   .connect-command-block { padding-left: 22px; padding-right: 22px; }
   .task-board { grid-template-columns: 1fr; }
   .member-grid { grid-template-columns: 1fr; }

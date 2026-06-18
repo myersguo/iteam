@@ -162,6 +162,41 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS iteam_external_bot_configs (
+    provider   TEXT NOT NULL PRIMARY KEY,
+    alias      TEXT,
+    app_id     TEXT NOT NULL,
+    app_secret TEXT,
+    domain     TEXT,
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    status     TEXT,
+    status_message TEXT,
+    last_connected_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS iteam_external_bot_bindings (
+    id               TEXT NOT NULL PRIMARY KEY,
+    provider         TEXT NOT NULL,
+    tenant_key       TEXT NOT NULL,
+    chat_id          TEXT NOT NULL,
+    chat_type        TEXT,
+    default_target   TEXT,
+    default_agent_id TEXT,
+    status           TEXT NOT NULL,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS iteam_external_message_links (
+    id                       TEXT NOT NULL PRIMARY KEY,
+    provider                 TEXT NOT NULL,
+    external_conversation_id TEXT NOT NULL,
+    external_message_id      TEXT,
+    message_id               TEXT NOT NULL,
+    root_message_id          TEXT,
+    direction                TEXT NOT NULL,
+    created_at               TEXT NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS iteam_events (
     id         TEXT NOT NULL PRIMARY KEY,
     type       TEXT NOT NULL,
@@ -192,5 +227,9 @@ export const SQLITE_INDEXES: ReadonlyArray<string> = [
   "CREATE INDEX IF NOT EXISTS idx_deliveries_message ON iteam_deliveries(message_id)",
   "CREATE INDEX IF NOT EXISTS idx_ingress_pairings_code ON iteam_external_ingress_pairings(pair_code)",
   "CREATE INDEX IF NOT EXISTS idx_ingress_policies_token ON iteam_external_ingress_policies(id, token)",
+  "CREATE INDEX IF NOT EXISTS idx_external_bot_configs_enabled ON iteam_external_bot_configs(enabled)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_external_bot_bindings_chat ON iteam_external_bot_bindings(provider, tenant_key, chat_id)",
+  "CREATE INDEX IF NOT EXISTS idx_external_message_links_message ON iteam_external_message_links(message_id)",
+  "CREATE INDEX IF NOT EXISTS idx_external_message_links_external ON iteam_external_message_links(provider, external_conversation_id, external_message_id)",
   "CREATE INDEX IF NOT EXISTS idx_events_type_created ON iteam_events(type, created_at)"
 ];

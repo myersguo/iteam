@@ -62,6 +62,10 @@ export interface HttpServerOptions {
   serveWeb?: boolean;
   /** Override the directory used to serve the web bundle. Default: <pkg>/dist. */
   webRoot?: string;
+  externalBotRuntime?: {
+    sync(provider: string): void | Promise<void>;
+    remove(provider: string): void | Promise<void>;
+  };
 }
 
 export interface RunningHttpServer {
@@ -103,7 +107,7 @@ export function startHttpServer(options: HttpServerOptions): RunningHttpServer {
       console.log(`[http] ${method} ${pathname} -> ${res.statusCode} (${ms}ms)`);
     });
     try {
-      await route(core, sseClients, req, res, { serveWeb, webRoot });
+      await route(core, sseClients, req, res, { serveWeb, webRoot, externalBotRuntime: options.externalBotRuntime });
     } catch (error) {
       if (error instanceof HttpError) {
         sendJson(res, error.status, { error: error.message });
@@ -154,6 +158,7 @@ export function startHttpServer(options: HttpServerOptions): RunningHttpServer {
 interface StaticConfig {
   serveWeb: boolean;
   webRoot: string | null;
+  externalBotRuntime?: HttpServerOptions["externalBotRuntime"];
 }
 
 async function route(
@@ -230,6 +235,9 @@ async function route(
   if (req.method === "GET" && url.pathname === "/api/deliveries") return sendJson(res, 200, core.listDeliveries());
   if (req.method === "GET" && url.pathname === "/api/ingress/pairing-codes") return sendJson(res, 200, core.listIngressPairings());
   if (req.method === "GET" && url.pathname === "/api/ingress/policies") return sendJson(res, 200, core.listIngressPolicies());
+  if (req.method === "GET" && url.pathname === "/api/external/bot-configs") return sendJson(res, 200, core.listExternalBotConfigs());
+  if (req.method === "GET" && url.pathname === "/api/external/bot-bindings") return sendJson(res, 200, core.listExternalBotBindings());
+  if (req.method === "GET" && url.pathname === "/api/external/message-links") return sendJson(res, 200, core.listExternalMessageLinks());
   if (req.method === "GET" && url.pathname === "/api/pending-connections") {
     return sendJson(res, 200, core.listPendingConnections());
   }
@@ -394,6 +402,39 @@ async function route(
       policyId: body.policyId || policyId,
       token: body.token || token
     }));
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/external/bot-bindings") {
+    const body = await parseJsonBody<any>(req);
+    return sendJson(res, 201, core.upsertExternalBotBinding(body));
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/external/bot-configs") {
+    const body = await parseJsonBody<any>(req);
+    const saved = core.upsertExternalBotConfig(body);
+    void Promise.resolve(staticConfig.externalBotRuntime?.sync(saved.provider)).catch(error => {
+      console.error(`[http] external bot runtime sync failed for ${saved.provider}: ${(error as Error).message}`);
+    });
+    return sendJson(res, 201, { ...saved, appSecret: saved.appSecret ? "configured" : null });
+  }
+
+  const externalBotConfigDelete = url.pathname.match(/^\/api\/external\/bot-configs\/([^/]+)$/);
+  if (req.method === "DELETE" && externalBotConfigDelete) {
+    const result = core.deleteExternalBotConfig(decodeURIComponent(externalBotConfigDelete[1]));
+    void Promise.resolve(staticConfig.externalBotRuntime?.remove(result.provider)).catch(error => {
+      console.error(`[http] external bot runtime remove failed for ${result.provider}: ${(error as Error).message}`);
+    });
+    return sendJson(res, 200, result);
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/external/routed-messages") {
+    const body = await parseJsonBody<any>(req);
+    return sendJson(res, 201, core.createExternalRoutedMessage(body));
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/external/message-links/backfill") {
+    const body = await parseJsonBody<any>(req);
+    return sendJson(res, 200, core.backfillExternalMessageLinks(body.rootMessageId));
   }
 
   if (req.method === "POST" && url.pathname === "/api/tasks") {

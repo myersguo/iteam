@@ -30,6 +30,8 @@ Usage:
   iteam channel list
   iteam message send <#channel> <message...>
   iteam message read <#channel>
+  iteam bot lark config --app-id <id> [--app-secret <secret>] [--domain <domain>] [--disable]
+  iteam bot lark list
   iteam task create <#channel> <title...> [--agent <agent-id>]
   iteam task list
 
@@ -179,6 +181,50 @@ async function main(): Promise<void> {
       console.log(`[${m.createdAt}] ${author}: ${m.text}`);
     }
     return;
+  }
+
+  if (area === "bot" && action === "lark") {
+    const sub = rest[0];
+    if (sub === "config") {
+      const appId = readFlag("--app-id", process.env.ITEAM_LARK_APP_ID || process.env.ITEAM_FEISHU_APP_ID);
+      const appSecret = readFlag("--app-secret", process.env.ITEAM_LARK_APP_SECRET || process.env.ITEAM_FEISHU_APP_SECRET);
+      const domain = readFlag("--domain", process.env.ITEAM_LARK_DOMAIN || process.env.ITEAM_FEISHU_DOMAIN);
+      if (!appId) throw new Error("--app-id is required");
+      const body = {
+        provider: "lark",
+        appId: String(appId),
+        ...(appSecret ? { appSecret: String(appSecret) } : {}),
+        ...(domain ? { domain: String(domain) } : {}),
+        enabled: !rest.includes("--disable")
+      };
+      console.log(JSON.stringify(await requestJson(`${baseUrl}/api/external/bot-configs`, { method: "POST", body }), null, 2));
+      console.log("The iTeam daemon will start or reconnect this bot automatically.");
+      return;
+    }
+    if (sub === "list") {
+      const [configs, bindings] = await Promise.all([
+        requestJson<any[]>(`${baseUrl}/api/external/bot-configs`),
+        requestJson<any[]>(`${baseUrl}/api/external/bot-bindings`)
+      ]);
+      console.log("Configs:");
+      console.table(configs.map(config => ({
+        provider: config.provider,
+        appId: config.appId,
+        enabled: config.enabled,
+        secret: config.appSecret ? "configured" : "",
+        domain: config.domain || ""
+      })));
+      console.log("Bindings:");
+      console.table(bindings.map(binding => ({
+        provider: binding.provider,
+        tenant: binding.tenantKey,
+        chat: binding.chatId,
+        target: binding.defaultTarget || "",
+        status: binding.status
+      })));
+      return;
+    }
+    throw new Error("usage: iteam bot lark config|list");
   }
 
   if (area === "task" && action === "create") {

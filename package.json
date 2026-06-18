@@ -54,6 +54,7 @@
     "prepublishOnly": "npm run typecheck && npm run build"
   },
   "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.67.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "cron-parser": "^5.5.0",
     "lucide-react": "^0.468.0",

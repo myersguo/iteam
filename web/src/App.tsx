@@ -29,7 +29,8 @@ import "./styles.css";
 
 // ---------- types ----------
 
-type SectionId = "chat" | "members" | "computers" | "scheduled";
+type SectionId = "chat" | "members" | "computers" | "scheduled" | "integrations";
+const NEW_BOT_PROVIDER = "__new_bot__";
 
 interface Human {
   id: string;
@@ -125,6 +126,30 @@ interface ComputerEntity {
   runtimes: RuntimeInfo[];
 }
 
+interface ExternalBotConfig {
+  provider: string;
+  alias?: string | null;
+  appId: string;
+  appSecret?: string | null;
+  domain?: string | null;
+  enabled: boolean;
+  status?: string | null;
+  statusMessage?: string | null;
+  lastConnectedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface ExternalBotBinding {
+  id: string;
+  provider: string;
+  tenantKey: string;
+  chatId: string;
+  chatType?: string | null;
+  defaultTarget?: string | null;
+  status: string;
+}
+
 interface AppState {
   humans: Human[];
   agents: Agent[];
@@ -133,6 +158,8 @@ interface AppState {
   tasks: Task[];
   scheduledTasks: ScheduledTask[];
   computers: ComputerEntity[];
+  externalBotConfigs: ExternalBotConfig[];
+  externalBotBindings: ExternalBotBinding[];
   events: unknown[];
 }
 
@@ -169,19 +196,21 @@ const api = {
     return fetch(`/api/messages/channel/${encodeURIComponent(selectedChannel.id)}?${params}`).then(r => r.json());
   },
   async getState(channelTarget = "#all"): Promise<AppState> {
-    const [humans, agents, channels, tasks, scheduledTasks, computers] = await Promise.all([
+    const [humans, agents, channels, tasks, scheduledTasks, computers, externalBotConfigs, externalBotBindings] = await Promise.all([
       fetch("/api/humans").then(r => r.json()),
       fetch("/api/agents").then(r => r.json()),
       fetch("/api/channels").then(r => r.json()),
       fetch("/api/tasks").then(r => r.json()),
       fetch("/api/scheduled-tasks").then(r => r.json()),
-      fetch("/api/computers").then(r => r.json())
+      fetch("/api/computers").then(r => r.json()),
+      fetch("/api/external/bot-configs").then(r => r.json()),
+      fetch("/api/external/bot-bindings").then(r => r.json())
     ]);
     const selectedChannel = resolveChannel(channels, channelTarget);
     const messages = selectedChannel
       ? await fetch(`/api/messages/channel/${encodeURIComponent(selectedChannel.id)}?limit=10`).then(r => r.json())
       : [];
-    return { humans, agents, channels, messages, tasks, scheduledTasks, computers, events: [] };
+    return { humans, agents, channels, messages, tasks, scheduledTasks, computers, externalBotConfigs, externalBotBindings, events: [] };
   },
   async post<T = any>(path: string, body: Record<string, unknown> = {}): Promise<T> {
     const res = await fetch(path, {
@@ -219,6 +248,7 @@ function App() {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(initialRoute.agentId);
   const [selectedComputerId, setSelectedComputerId] = useState<string | null>(initialRoute.computerId);
   const [scheduledAgentId, setScheduledAgentId] = useState("");
+  const [selectedBotProvider, setSelectedBotProvider] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [asTask, setAsTask] = useState(false);
   const [agentName, setAgentName] = useState("codex");
@@ -343,6 +373,14 @@ function App() {
       setScheduledAgentId("");
     }
   }, [scheduledAgentId, state]);
+
+  useEffect(() => {
+    if (!state || selectedBotProvider === NEW_BOT_PROVIDER) return;
+    const larkConfigs = state.externalBotConfigs.filter(config => config.provider.startsWith("lark") || config.provider.startsWith("feishu"));
+    if (selectedBotProvider && !larkConfigs.some(config => config.provider === selectedBotProvider)) {
+      setSelectedBotProvider(null);
+    }
+  }, [state, selectedBotProvider]);
 
   // resolve dm:<handle> in URL into dm:<agentId> once state arrives
   useEffect(() => {
@@ -567,6 +605,12 @@ function App() {
             icon={<List size={18} />}
             onClick={() => setSection("scheduled")}
           />
+          <RailButton
+            active={section === "integrations"}
+            label="Bots"
+            icon={<Bot size={18} />}
+            onClick={() => setSection("integrations")}
+          />
         </div>
         <div className="rail-foot">
           <button className="ghost-btn" title="Refresh" onClick={() => refresh()}>
@@ -623,6 +667,13 @@ function App() {
             setSelectedAgentId={setSelectedAgentId}
             openCreateAgent={() => setCreateAgentOpen(true)}
             openRenameHuman={setRenameHuman}
+          />
+        )}
+        {section === "integrations" && (
+          <IntegrationsSidebar
+            state={state}
+            selectedBotProvider={selectedBotProvider}
+            setSelectedBotProvider={setSelectedBotProvider}
           />
         )}
         {!sidebarCollapsed && (
@@ -684,6 +735,14 @@ function App() {
             selectAgent={setScheduledAgentId}
             updateScheduledTask={updateScheduledTask}
             deleteScheduledTask={deleteScheduledTask}
+          />
+        )}
+        {section === "integrations" && (
+          <IntegrationsView
+            state={state}
+            refresh={refresh}
+            selectedBotProvider={selectedBotProvider}
+            setSelectedBotProvider={setSelectedBotProvider}
           />
         )}
       </main>
@@ -785,7 +844,7 @@ function RailButton({
 }
 
 function titleFor(section: SectionId): string {
-  return ({ chat: "Channels", members: "Members", computers: "Computers", scheduled: "Scheduled" } as const)[section];
+  return ({ chat: "Channels", members: "Members", computers: "Computers", scheduled: "Scheduled", integrations: "Bots" } as const)[section];
 }
 
 function ChatSidebar({
@@ -1433,7 +1492,8 @@ function MessageRow({
 }) {
   const agent = state.agents.find(a => a.id === message.authorId);
   const human = state.humans.find(h => h.id === message.authorId);
-  const author = agent || human || { name: message.authorId, role: "system" };
+  const ingressBot = resolveIngressBotAuthor(state, message.authorId);
+  const author = agent || human || ingressBot || { name: message.authorId, role: "system" };
   const task = state.tasks.find(t => t.id === message.taskId || t.messageId === message.id);
   const replyCount = countThreadReplies(state, message);
   return (
@@ -1466,6 +1526,17 @@ function MessageRow({
       </div>
     </article>
   );
+}
+
+function resolveIngressBotAuthor(state: AppState, authorId: string): { name: string; role: string } | null {
+  if (!authorId.startsWith("ingress:")) return null;
+  const provider = authorId.slice("ingress:".length);
+  const config = state.externalBotConfigs.find(config => config.provider === provider);
+  if (!config) return null;
+  return {
+    name: config.alias || config.appId || config.provider,
+    role: "external-bot"
+  };
 }
 
 // ---------- tasks ----------
@@ -2334,6 +2405,272 @@ function MembersView({
   );
 }
 
+function IntegrationsSidebar({
+  state,
+  selectedBotProvider,
+  setSelectedBotProvider
+}: {
+  state: AppState;
+  selectedBotProvider: string | null;
+  setSelectedBotProvider: (provider: string | null) => void;
+}) {
+  const larkConfigs = state.externalBotConfigs.filter(config => config.provider.startsWith("lark") || config.provider.startsWith("feishu"));
+  const activeProvider = selectedBotProvider || larkConfigs[0]?.provider || NEW_BOT_PROVIDER;
+  return (
+    <div className="side-section">
+      <SectionLabel
+        action={
+          <button className="side-add" onClick={() => setSelectedBotProvider(NEW_BOT_PROVIDER)} title="Add bot">
+            <Plus size={14} />
+          </button>
+        }
+      >
+        Bot integrations
+      </SectionLabel>
+      <button className="side-row is-selected">
+        <Bot size={16} />
+        <span>Lark / Feishu</span>
+        <small>{larkConfigs.filter(config => config.enabled).length || "setup"}</small>
+      </button>
+      {larkConfigs.map(config => (
+        <button
+          className={`side-row member ${activeProvider === config.provider ? "is-selected" : ""}`}
+          key={config.provider}
+          onClick={() => setSelectedBotProvider(config.provider)}
+        >
+          <span>{config.alias || config.appId}</span>
+          <small>{botStatusLabel(config)}</small>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function IntegrationsView({
+  state,
+  refresh,
+  selectedBotProvider,
+  setSelectedBotProvider
+}: {
+  state: AppState;
+  refresh: () => void;
+  selectedBotProvider: string | null;
+  setSelectedBotProvider: (provider: string | null) => void;
+}) {
+  const larkConfigs = state.externalBotConfigs.filter(config => config.provider.startsWith("lark") || config.provider.startsWith("feishu"));
+  const activeProvider = selectedBotProvider || larkConfigs[0]?.provider || NEW_BOT_PROVIDER;
+  const existing = activeProvider === NEW_BOT_PROVIDER ? null : larkConfigs.find(config => config.provider === activeProvider) || null;
+  const boundChats = existing ? state.externalBotBindings.filter(binding => binding.provider === existing.provider) : [];
+  const [alias, setAlias] = useState(existing?.alias || "");
+  const [appId, setAppId] = useState(existing?.appId || "");
+  const [appSecret, setAppSecret] = useState("");
+  const [domain, setDomain] = useState(existing?.domain || "");
+  const [enabled, setEnabled] = useState(existing?.enabled ?? true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    setAlias(existing?.alias || "");
+    setAppId(existing?.appId || "");
+    setDomain(existing?.domain || "");
+    setEnabled(existing?.enabled ?? true);
+    setAppSecret("");
+  }, [existing?.alias, existing?.appId, existing?.domain, existing?.enabled, activeProvider]);
+
+  async function save() {
+    if (!appId.trim()) return;
+    setSaving(true);
+    setError("");
+    try {
+      const saved = await api.post<ExternalBotConfig>("/api/external/bot-configs", {
+        provider: existing?.provider || "lark",
+        alias: alias.trim() || null,
+        appId: appId.trim(),
+        ...(appSecret.trim() ? { appSecret: appSecret.trim() } : {}),
+        domain: domain.trim() || null,
+        enabled
+      });
+      setSelectedBotProvider(saved.provider);
+      await refresh();
+    } catch (err) {
+      setError((err as Error).message || "Failed to save bot config");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteBot() {
+    if (!existing) return;
+    const label = existing.alias || existing.appId;
+    if (!window.confirm(`Delete bot ${label}? This also removes its bound chats.`)) return;
+    setSaving(true);
+    setError("");
+    try {
+      await api.del(`/api/external/bot-configs/${encodeURIComponent(existing.provider)}`);
+      setSelectedBotProvider(null);
+      await refresh();
+    } catch (err) {
+      setError((err as Error).message || "Failed to delete bot config");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="pane">
+      <Topbar
+        eyebrow="Integrations"
+        title="Lark / Feishu bot"
+        subtitle="Use a self-built app bot over long-connection events to talk with iTeam agents."
+      />
+      <div className="bots-layout">
+        <aside className="panel panel-cream bots-guidance">
+          <p className="eyebrow">How users talk to agents</p>
+          <div className="integration-summary-card">
+            <Bot size={16} />
+            <div>
+              <strong>{existing ? (existing.alias || existing.appId) : "New bot"}</strong>
+              <small title={existing?.provider}>{existing ? existing.appId : `${larkConfigs.length} configured apps`}</small>
+            </div>
+            {existing && <span className={`status-pill ${botStatusClass(existing)}`}>{botStatusLabel(existing)}</span>}
+          </div>
+          <div className="bot-command-help">
+            <p className="panel-note">After adding the bot to a chat, these messages are supported:</p>
+            <ul className="bot-command-list">
+              <li><code>/all @codex 帮我看一下这个问题</code></li>
+              <li><code>/task /all @codex 帮我看一下这个问题</code></li>
+              <li><code>/all 帮我看一下这个问题</code></li>
+              <li><code>/iteam bind #all</code></li>
+              <li><code>@codex 帮我看一下这个问题</code></li>
+            </ul>
+            <p className="panel-note">No channel + one agent mention routes to that agent's iTeam DM, not #all.</p>
+          </div>
+        </aside>
+        <article className="panel panel-dark profile">
+          <div className="profile-head">
+            <Avatar name={alias || existing?.alias || "Lark"} agent large />
+            <div>
+              <p className="eyebrow on-dark">Bot app</p>
+              <h1>
+                {alias || existing?.alias || "Feishu bot"} <small>{existing ? (existing.enabled ? "configured" : "disabled") : "new"}</small>
+              </h1>
+            </div>
+          </div>
+          {existing && (
+            <div className="bot-status-card">
+              <span className={`status-pill ${botStatusClass(existing)}`}>{botStatusLabel(existing)}</span>
+              <div>
+                <strong>{botStatusTitle(existing)}</strong>
+                <small>{existing.statusMessage || botStatusHint(existing)}</small>
+              </div>
+            </div>
+          )}
+          <label className="profile-rename">
+            <span>Bot name / alias</span>
+            <div>
+              <input value={alias} onChange={event => setAlias(event.target.value)} placeholder="Production Feishu bot" />
+            </div>
+          </label>
+          <label className="profile-rename">
+            <span>App ID</span>
+            <div>
+              <input value={appId} onChange={event => setAppId(event.target.value)} placeholder="cli_xxx" disabled={!!existing} />
+            </div>
+          </label>
+          <label className="profile-rename">
+            <span>App Secret</span>
+            <div>
+              <input
+                type="password"
+                value={appSecret}
+                onChange={event => setAppSecret(event.target.value)}
+                placeholder={existing?.appSecret ? "leave blank to keep existing secret" : "app secret"}
+              />
+            </div>
+          </label>
+          <label className="profile-rename">
+            <span>Domain (optional)</span>
+            <div>
+              <input value={domain} onChange={event => setDomain(event.target.value)} placeholder="open.feishu.cn / open.larksuite.com" />
+            </div>
+          </label>
+          <label className="check-row on-dark">
+            <input type="checkbox" checked={enabled} onChange={event => setEnabled(event.target.checked)} />
+            <span>Enable long-connection bot on daemon restart</span>
+          </label>
+          {error && <p className="form-error">{error}</p>}
+          <div className="profile-actions">
+            <button className="btn btn-secondary-on-dark" disabled={!appId.trim() || saving} onClick={save}>
+              {saving ? "Saving..." : "Save bot config"}
+            </button>
+            <a className="btn btn-secondary-on-dark" href="https://open.larkoffice.com/page/launcher?from=backend_oneclick" target="_blank" rel="noreferrer">
+              <ExternalLink size={14} /> Create app
+            </a>
+            {existing && (
+              <button className="btn btn-danger-on-dark" disabled={saving} onClick={deleteBot}>
+                <Trash2 size={14} /> Delete bot
+              </button>
+            )}
+          </div>
+          <p className="profile-warning">
+            Saving credentials now starts or reconnects the long-connection client automatically. If pairing stays pending, check App ID, App Secret, permissions, and event subscription.
+          </p>
+          <SectionLabel>Bound chats · {boundChats.length}</SectionLabel>
+          <div className="bound-chat-list">
+            {boundChats.map(binding => (
+              <div className="bound-chat-row" key={binding.id}>
+                <MessageSquare size={16} />
+                <div>
+                  <strong>{binding.defaultTarget || "No default channel"}</strong>
+                  <small>{binding.chatId}</small>
+                </div>
+                <span className={`status-pill ${binding.status === "active" ? "done" : "closed"}`}>{binding.status}</span>
+              </div>
+            ))}
+            {!existing && (
+              <p className="empty-note on-dark">Save this bot before binding Feishu chats.</p>
+            )}
+            {existing && !boundChats.length && (
+              <p className="empty-note on-dark">No Feishu chat bound yet — use /iteam bind #all in this bot chat.</p>
+            )}
+          </div>
+        </article>
+      </div>
+    </section>
+  );
+}
+
+function botStatusLabel(config: ExternalBotConfig): string {
+  const status = config.enabled ? (config.status || "pending") : "disabled";
+  return status === "connected" ? "paired" : status;
+}
+
+function botStatusClass(config: ExternalBotConfig): string {
+  const status = config.enabled ? (config.status || "pending") : "disabled";
+  if (status === "connected") return "done";
+  if (status === "error" || status === "invalid") return "error";
+  if (status === "pending") return "todo";
+  return "closed";
+}
+
+function botStatusTitle(config: ExternalBotConfig): string {
+  const status = config.enabled ? (config.status || "pending") : "disabled";
+  if (status === "connected") return "Feishu long connection paired.";
+  if (status === "invalid") return "Not paired: invalid app id.";
+  if (status === "error") return "Not paired: connection failed.";
+  if (status === "disabled") return "Bot is disabled.";
+  return "Waiting for daemon restart / connection.";
+}
+
+function botStatusHint(config: ExternalBotConfig): string {
+  const status = config.enabled ? (config.status || "pending") : "disabled";
+  if (status === "connected" && config.lastConnectedAt) return `Last paired at ${new Date(config.lastConnectedAt).toLocaleString()}.`;
+  if (status === "invalid") return "Use the real Feishu/Lark App ID, usually cli_xxx.";
+  if (status === "error") return "Check App Secret, permissions, and long-connection availability, then restart the daemon.";
+  if (status === "disabled") return "Enable this bot and restart the daemon to pair.";
+  return "Save credentials, then restart the iTeam daemon so it can pair with Feishu/Lark.";
+}
+
 function CreateAgentModal({
   state,
   agentName,
@@ -3013,6 +3350,11 @@ function parseLocation(loc: Location | { pathname: string; search: string }): Ro
       route.section = "scheduled";
       return route;
     }
+    case "bots":
+    case "integrations": {
+      route.section = "integrations";
+      return route;
+    }
     default:
       return route;
   }
@@ -3042,6 +3384,8 @@ function buildPath(
     else path = "/computers";
   } else if (route.section === "scheduled") {
     path = "/scheduled";
+  } else if (route.section === "integrations") {
+    path = "/bots";
   }
   const params = new URLSearchParams();
   if (route.threadId) params.set("thread", route.threadId);

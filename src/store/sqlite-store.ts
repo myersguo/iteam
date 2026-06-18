@@ -5,8 +5,11 @@ import type {
   Channel,
   Computer,
   Delivery,
+  ExternalBotBinding,
+  ExternalBotConfig,
   ExternalIngressPairing,
   ExternalIngressPolicy,
+  ExternalMessageLink,
   Human,
   MentionRef,
   Message,
@@ -98,6 +101,10 @@ export class SqliteStore extends BaseStore {
     this.addColumnIfMissing("iteam_deliveries", "session_key", "TEXT");
     this.addColumnIfMissing("iteam_deliveries", "source", "TEXT");
     this.addColumnIfMissing("iteam_deliveries", "lifecycle", "TEXT");
+    this.addColumnIfMissing("iteam_external_bot_configs", "alias", "TEXT");
+    this.addColumnIfMissing("iteam_external_bot_configs", "status", "TEXT");
+    this.addColumnIfMissing("iteam_external_bot_configs", "status_message", "TEXT");
+    this.addColumnIfMissing("iteam_external_bot_configs", "last_connected_at", "TEXT");
     this.migrateAgentsModelNullable();
   }
 
@@ -362,6 +369,50 @@ export class SqliteStore extends BaseStore {
         updated_at: string;
       }>;
 
+    const externalBotConfigRows = this.db
+      .prepare("SELECT * FROM iteam_external_bot_configs ORDER BY created_at ASC")
+      .all() as Array<{
+        provider: string;
+        alias: string | null;
+        app_id: string;
+        app_secret: string | null;
+        domain: string | null;
+        enabled: number;
+        status: string | null;
+        status_message: string | null;
+        last_connected_at: string | null;
+        created_at: string;
+        updated_at: string;
+      }>;
+
+    const externalBotBindingRows = this.db
+      .prepare("SELECT * FROM iteam_external_bot_bindings ORDER BY created_at ASC")
+      .all() as Array<{
+        id: string;
+        provider: string;
+        tenant_key: string;
+        chat_id: string;
+        chat_type: string | null;
+        default_target: string | null;
+        default_agent_id: string | null;
+        status: string;
+        created_at: string;
+        updated_at: string;
+      }>;
+
+    const externalMessageLinkRows = this.db
+      .prepare("SELECT * FROM iteam_external_message_links ORDER BY created_at ASC")
+      .all() as Array<{
+        id: string;
+        provider: string;
+        external_conversation_id: string;
+        external_message_id: string | null;
+        message_id: string;
+        root_message_id: string | null;
+        direction: string;
+        created_at: string;
+      }>;
+
     const eventRows = this.db
       .prepare("SELECT * FROM iteam_events ORDER BY created_at ASC LIMIT 500")
       .all() as Array<{ id: string; type: string; payload: string; created_at: string }>;
@@ -534,6 +585,44 @@ export class SqliteStore extends BaseStore {
       updatedAt: row.updated_at
     }));
 
+    const externalBotConfigs: ExternalBotConfig[] = externalBotConfigRows.map(row => ({
+      provider: row.provider,
+      alias: row.alias,
+      appId: row.app_id,
+      appSecret: row.app_secret,
+      domain: row.domain,
+      enabled: !!row.enabled,
+      status: row.status || undefined,
+      statusMessage: row.status_message,
+      lastConnectedAt: row.last_connected_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
+
+    const externalBotBindings: ExternalBotBinding[] = externalBotBindingRows.map(row => ({
+      id: row.id,
+      provider: row.provider,
+      tenantKey: row.tenant_key,
+      chatId: row.chat_id,
+      chatType: row.chat_type,
+      defaultTarget: row.default_target,
+      defaultAgentId: row.default_agent_id,
+      status: row.status,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
+
+    const externalMessageLinks: ExternalMessageLink[] = externalMessageLinkRows.map(row => ({
+      id: row.id,
+      provider: row.provider,
+      externalConversationId: row.external_conversation_id,
+      externalMessageId: row.external_message_id,
+      messageId: row.message_id,
+      rootMessageId: row.root_message_id,
+      direction: row.direction,
+      createdAt: row.created_at
+    }));
+
     const events: StoreEvent[] = eventRows.map(row => ({
       id: row.id,
       type: row.type,
@@ -554,6 +643,9 @@ export class SqliteStore extends BaseStore {
       scheduledTasks,
       externalIngressPairings,
       externalIngressPolicies,
+      externalBotConfigs,
+      externalBotBindings,
+      externalMessageLinks,
       events
     };
   }
@@ -806,6 +898,68 @@ export class SqliteStore extends BaseStore {
           policy.status,
           policy.createdAt,
           policy.updatedAt
+        );
+      }
+    }
+
+    this.db.exec("DELETE FROM iteam_external_bot_configs");
+    if (state.externalBotConfigs.length) {
+      const stmt = this.db.prepare(
+        "INSERT INTO iteam_external_bot_configs (provider, alias, app_id, app_secret, domain, enabled, status, status_message, last_connected_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      );
+      for (const config of state.externalBotConfigs) {
+        stmt.run(
+          config.provider,
+          config.alias ?? null,
+          config.appId,
+          config.appSecret ?? null,
+          config.domain ?? null,
+          config.enabled ? 1 : 0,
+          config.status ?? null,
+          config.statusMessage ?? null,
+          config.lastConnectedAt ?? null,
+          config.createdAt,
+          config.updatedAt
+        );
+      }
+    }
+
+    this.db.exec("DELETE FROM iteam_external_bot_bindings");
+    if (state.externalBotBindings.length) {
+      const stmt = this.db.prepare(
+        "INSERT INTO iteam_external_bot_bindings (id, provider, tenant_key, chat_id, chat_type, default_target, default_agent_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      );
+      for (const binding of state.externalBotBindings) {
+        stmt.run(
+          binding.id,
+          binding.provider,
+          binding.tenantKey,
+          binding.chatId,
+          binding.chatType ?? null,
+          binding.defaultTarget ?? null,
+          binding.defaultAgentId ?? null,
+          binding.status,
+          binding.createdAt,
+          binding.updatedAt
+        );
+      }
+    }
+
+    this.db.exec("DELETE FROM iteam_external_message_links");
+    if (state.externalMessageLinks.length) {
+      const stmt = this.db.prepare(
+        "INSERT INTO iteam_external_message_links (id, provider, external_conversation_id, external_message_id, message_id, root_message_id, direction, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+      );
+      for (const link of state.externalMessageLinks) {
+        stmt.run(
+          link.id,
+          link.provider,
+          link.externalConversationId,
+          link.externalMessageId ?? null,
+          link.messageId,
+          link.rootMessageId ?? null,
+          link.direction,
+          link.createdAt
         );
       }
     }

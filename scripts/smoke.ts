@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
@@ -11,7 +13,9 @@ import { detectRuntimes } from "../src/runtimes.js";
 import { deliveryAffinityIndex } from "../src/runtime/driver.js";
 import { renderAcpProfileArgs, resolveAcpRuntimeProfile } from "../src/runtime/acp-profiles.js";
 import { renderProfileArgs, resolveRuntimeProfile } from "../src/runtime/profiles.js";
+import { parseIteamCommand } from "../src/integrations/lark.js";
 
+const execFileAsync = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const tsxBin = resolve(root, "node_modules/.bin/tsx");
 const home = mkdtempSync(join(tmpdir(), "iteam-smoke-"));
@@ -59,6 +63,18 @@ const daemon = spawn(tsxBin, [resolve(root, "src/server.ts"), "--port", String(p
 });
 
 try {
+  const larkRouteCommand = parseIteamCommand("/all @codex 帮我看一下这个问题");
+  if (larkRouteCommand.kind !== "message" || larkRouteCommand.target !== "#all" || larkRouteCommand.text !== "@codex 帮我看一下这个问题") {
+    throw new Error("Lark /all route command was not parsed");
+  }
+  const larkBindCommand = parseIteamCommand("/iteam bind #all");
+  if (larkBindCommand.kind !== "bind" || larkBindCommand.target !== "#all") {
+    throw new Error("Lark /iteam bind command was not parsed");
+  }
+  const larkTaskCommand = parseIteamCommand("/task /all @codex 帮我看一下这个问题");
+  if (larkTaskCommand.kind !== "task" || larkTaskCommand.target !== "#all" || larkTaskCommand.text !== "@codex 帮我看一下这个问题") {
+    throw new Error("Lark /task route command was not parsed");
+  }
   const affinityA = deliveryAffinityIndex({
     id: "delivery_a",
     target: "#all:msg_task",
@@ -331,6 +347,76 @@ try {
     status: "online"
   }, { "x-iteam-connection": `${computerId}:${connectToken}` });
   const computerAuth = { "x-iteam-connection": `${computerId}:${connectToken}` };
+  const savedBotConfig = await post(port, "/api/external/bot-configs", {
+    provider: "lark",
+    alias: "Smoke Bot",
+    appId: "cli_smoke",
+    appSecret: "secret_smoke",
+    enabled: true
+  });
+  if (savedBotConfig.appSecret !== "configured") throw new Error("bot config save should not echo raw app secret");
+  if (savedBotConfig.alias !== "Smoke Bot") throw new Error("bot config alias was not saved");
+  const botConfigs = await get(port, "/api/external/bot-configs");
+  if (!botConfigs.some((config: any) => String(config.provider).startsWith("lark") && config.appId === "cli_smoke" && String(config.appSecret).includes("…"))) {
+    throw new Error("saved bot config was not listed with a masked secret");
+  }
+  if (savedBotConfig.status !== "pending") throw new Error("valid saved bot config should wait for pairing");
+  const invalidBotConfig = await post(port, "/api/external/bot-configs", {
+    provider: "lark",
+    appId: "not-a-real-app-id",
+    appSecret: "bad_secret",
+    enabled: true
+  });
+  if (invalidBotConfig.status !== "invalid") throw new Error("invalid Lark App ID should be saved with invalid status");
+  await del(port, `/api/external/bot-configs/${encodeURIComponent(invalidBotConfig.provider)}`);
+  const botConfigsAfterDelete = await get(port, "/api/external/bot-configs");
+  if (botConfigsAfterDelete.some((config: any) => config.provider === invalidBotConfig.provider)) {
+    throw new Error("deleted bot config was still listed");
+  }
+  const secondBotConfig = await post(port, "/api/external/bot-configs", {
+    provider: "lark",
+    appId: "cli_smoke_two",
+    appSecret: "secret_smoke_two",
+    enabled: true
+  });
+  if (secondBotConfig.provider === savedBotConfig.provider) throw new Error("second Lark bot config overwrote the first config");
+  const botConfigsAfterSecond = await get(port, "/api/external/bot-configs");
+  if (botConfigsAfterSecond.filter((config: any) => String(config.provider).startsWith("lark")).length < 2) {
+    throw new Error("multiple Lark bot configs were not persisted");
+  }
+  await post(port, "/api/external/bot-configs", {
+    provider: savedBotConfig.provider,
+    appId: "cli_smoke_three",
+    appSecret: "secret_smoke_three",
+    enabled: true
+  });
+  const botConfigsAfterStaleProviderCreate = await get(port, "/api/external/bot-configs");
+  if (!botConfigsAfterStaleProviderCreate.some((config: any) => config.provider === savedBotConfig.provider && config.appId === "cli_smoke")) {
+    throw new Error("stale selected provider should not overwrite the original Lark bot config");
+  }
+  if (!botConfigsAfterStaleProviderCreate.some((config: any) => config.appId === "cli_smoke_three")) {
+    throw new Error("stale selected provider with a new App ID should create a separate Lark bot config");
+  }
+  const cliConfig = await execFileText(tsxBin, [
+    resolve(root, "bin/iteam.ts"),
+    "bot",
+    "lark",
+    "config",
+    "--app-id",
+    "cli_from_smoke",
+    "--app-secret",
+    "cli_secret"
+  ], { ITEAM_URL: `http://127.0.0.1:${port}` });
+  if (cliConfig.includes("cli_secret")) throw new Error("bot CLI config echoed raw app secret");
+  const cliList = await execFileText(tsxBin, [
+    resolve(root, "bin/iteam.ts"),
+    "bot",
+    "lark",
+    "list"
+  ], { ITEAM_URL: `http://127.0.0.1:${port}` });
+  if (!cliList.includes("cli_from_smoke") || cliList.includes("cli_secret")) {
+    throw new Error("bot CLI list did not show masked config");
+  }
   // Phase 4: SSE push channel — open the stream and verify a delivery push
   // arrives in real time when a new mention is created.
   const sse = await openSse(port, computerId, connectToken);
@@ -341,6 +427,110 @@ try {
     const noAuthSse = await fetch(`http://127.0.0.1:${port}/api/computers/${encodeURIComponent(computerId)}/stream`);
     if (noAuthSse.status !== 401) throw new Error(`SSE without auth should be 401, got ${noAuthSse.status}`);
     await noAuthSse.body?.cancel();
+    const larkExplicitSend = post(port, "/api/external/routed-messages", {
+      provider: "lark",
+      tenantKey: "tenant-smoke",
+      chatId: "chat-smoke",
+      externalMessageId: "lark-msg-explicit",
+      target: "#all",
+      text: `@${agent.handle} explicit lark route`
+    });
+    const larkExplicitDelivery = await sse.waitFor("delivery", 2_000);
+    const larkExplicitMessage = await larkExplicitSend;
+    if (!larkExplicitMessage.ok || larkExplicitDelivery?.messageId !== larkExplicitMessage.message.id) {
+      throw new Error("explicit Lark routed message did not push a delivery");
+    }
+    if (larkExplicitDelivery.target !== "#all" || larkExplicitDelivery.source !== "lark") {
+      throw new Error("explicit Lark routed delivery did not keep #all/source");
+    }
+    const larkDefaultSend = post(port, "/api/external/routed-messages", {
+      provider: "lark",
+      tenantKey: "tenant-smoke",
+      chatId: "chat-smoke",
+      externalMessageId: "lark-msg-default-agent",
+      target: "#all",
+      text: "default agent lark route"
+    });
+    const larkDefaultDelivery = await sse.waitFor("delivery", 2_000);
+    const larkDefaultMessage = await larkDefaultSend;
+    if (!larkDefaultMessage.ok || larkDefaultDelivery?.messageId !== larkDefaultMessage.message.id) {
+      throw new Error("Lark /all message without explicit agent did not use channel default/fallback agent");
+    }
+    if (larkDefaultDelivery.agentId !== agent.id || larkDefaultDelivery.target !== "#all") {
+      throw new Error("Lark /all fallback delivery should target the first running #all agent");
+    }
+    const larkDmSend = post(port, "/api/external/routed-messages", {
+      provider: "lark",
+      tenantKey: "tenant-smoke",
+      chatId: "chat-smoke-dm",
+      externalMessageId: "lark-msg-dm",
+      text: `@${agent.handle} no default should be dm`
+    });
+    const larkDmDelivery = await sse.waitFor("delivery", 2_000);
+    const larkDmMessage = await larkDmSend;
+    if (!larkDmMessage.ok || larkDmDelivery?.messageId !== larkDmMessage.message.id) {
+      throw new Error("Lark single-agent message without channel/default did not push a DM delivery");
+    }
+    if (larkDmDelivery.target !== `dm:${agent.id}` || !String(larkDmDelivery.sessionKey || "").includes(`dm:${agent.id}`)) {
+      throw new Error("Lark no-channel single-agent message should route to agent DM");
+    }
+    const larkBinding = await post(port, "/api/external/bot-bindings", {
+      provider: "lark",
+      tenantKey: "tenant-smoke",
+      chatId: "chat-bound",
+      defaultTarget: "#all"
+    });
+    if (larkBinding.defaultTarget !== "#all") throw new Error("Lark bind did not persist default channel");
+    const larkBoundSend = post(port, "/api/external/routed-messages", {
+      provider: "lark",
+      tenantKey: "tenant-smoke",
+      chatId: "chat-bound",
+      externalMessageId: "lark-msg-bound",
+      text: `@${agent.handle} bound channel route`
+    });
+    const larkBoundDelivery = await sse.waitFor("delivery", 2_000);
+    const larkBoundMessage = await larkBoundSend;
+    if (!larkBoundMessage.ok || larkBoundDelivery?.messageId !== larkBoundMessage.message.id || larkBoundDelivery.target !== "#all") {
+      throw new Error("Lark bound chat did not route no-selector message to default #all");
+    }
+    await post(port, `/api/deliveries/${encodeURIComponent(larkBoundDelivery.id)}/result`,
+      { ok: true, text: "lark bound reply" }, computerAuth);
+    const larkLinks = await get(port, "/api/external/message-links");
+    if (!larkLinks.some((link: any) => link.direction === "out" && link.rootMessageId === larkBoundMessage.message.id)) {
+      throw new Error("Lark inbound root did not create an outbound reply link");
+    }
+    const larkTaskSend = post(port, "/api/external/routed-messages", {
+      provider: "lark",
+      tenantKey: "tenant-smoke",
+      chatId: "chat-bound",
+      externalMessageId: "lark-msg-task",
+      target: "#all",
+      text: `@${agent.handle} lark task title`,
+      asTask: true
+    });
+    const larkTaskDelivery = await sse.waitFor("delivery", 2_000);
+    const larkTaskMessage = await larkTaskSend;
+    if (!larkTaskMessage.ok || !larkTaskMessage.task || larkTaskMessage.message?.type !== "task") {
+      throw new Error("Lark task route did not create a task root message");
+    }
+    if (larkTaskMessage.task.assigneeId !== agent.id || larkTaskDelivery?.messageId !== larkTaskMessage.message.id) {
+      throw new Error("Lark task route did not assign and deliver to the mentioned agent");
+    }
+    const larkTaskThreadReply = await post(port, "/api/messages", {
+      target: larkTaskMessage.task.threadTarget,
+      text: "intermediate task update",
+      authorId: agent.id
+    });
+    const larkTaskLinks = await get(port, "/api/external/message-links");
+    if (!larkTaskLinks.some((link: any) => link.direction === "out" && link.messageId === larkTaskThreadReply.id && link.rootMessageId === larkTaskMessage.message.id)) {
+      throw new Error("agent task thread update was not linked back to the Lark root");
+    }
+    const larkBackfill = await post(port, "/api/external/message-links/backfill", {
+      rootMessageId: larkTaskMessage.message.id
+    });
+    if (!larkBackfill.ok || larkBackfill.rootMessageId !== larkTaskMessage.message.id) {
+      throw new Error("Lark external link backfill endpoint failed");
+    }
     const ingressPairing = await post(port, "/api/ingress/pairing-codes", {
       target: dm.target,
       agentId: agent.id,
@@ -819,6 +1009,14 @@ async function get(port: number, path: string): Promise<any> {
   return response.json();
 }
 
+async function execFileText(command: string, args: string[], env: Record<string, string>): Promise<string> {
+  const result = await execFileAsync(command, args, {
+    env: { ...process.env, ...env },
+    cwd: root
+  });
+  return `${result.stdout}${result.stderr}`;
+}
+
 async function post(port: number, path: string, body: unknown, headers: Record<string, string> = {}): Promise<any> {
   const response = await fetch(`http://127.0.0.1:${port}${path}`, {
     method: "POST",
@@ -844,6 +1042,12 @@ async function patch(port: number, path: string, body: unknown): Promise<any> {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body)
   });
+  if (!response.ok) throw new Error(`${response.status} ${path}: ${await response.text()}`);
+  return response.json();
+}
+
+async function del(port: number, path: string): Promise<any> {
+  const response = await fetch(`http://127.0.0.1:${port}${path}`, { method: "DELETE" });
   if (!response.ok) throw new Error(`${response.status} ${path}: ${await response.text()}`);
   return response.json();
 }

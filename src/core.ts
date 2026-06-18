@@ -19,8 +19,11 @@ import type {
   DeliveryLifecycleIntent,
   DeliveryLifecycleRecord,
   DeliveryWithContext,
+  ExternalBotBinding,
+  ExternalBotConfig,
   ExternalIngressPairing,
   ExternalIngressPolicy,
+  ExternalMessageLink,
   Fingerprint,
   MentionRef,
   Message,
@@ -198,6 +201,46 @@ export interface IngressMessageInput {
   source?: string;
   context?: Record<string, string>;
   sessionKey?: string;
+}
+
+export interface ExternalBindingUpsertInput {
+  provider: string;
+  tenantKey: string;
+  chatId: string;
+  chatType?: string | null;
+  defaultTarget?: string | null;
+  defaultAgentId?: string | null;
+}
+
+export interface ExternalBotConfigUpsertInput {
+  provider?: string;
+  alias?: string | null;
+  appId: string;
+  appSecret?: string | null;
+  domain?: string | null;
+  enabled?: boolean;
+}
+
+export interface ExternalRoutedMessageInput {
+  provider: string;
+  tenantKey: string;
+  chatId: string;
+  chatType?: string | null;
+  senderId?: string | null;
+  externalMessageId?: string | null;
+  text: string;
+  target?: string | null;
+  defaultAgentId?: string | null;
+  sessionKey?: string | null;
+  asTask?: boolean;
+}
+
+export interface ExternalRoutedMessageResult {
+  ok: boolean;
+  message?: Message;
+  task?: Task;
+  binding?: ExternalBotBinding | null;
+  replyText?: string;
 }
 
 export interface RuntimeStatusInput {
@@ -411,6 +454,26 @@ export class IteamCore {
     }));
   }
 
+  listExternalBotConfigs() {
+    return (this.store.snapshot().externalBotConfigs || []).map(config => ({
+      ...config,
+      appSecret: maskToken(config.appSecret)
+    }));
+  }
+
+  getExternalBotConfig(provider: string): ExternalBotConfig | null {
+    const normalized = normalizeProvider(provider);
+    return (this.store.snapshot().externalBotConfigs || []).find(config => config.provider === normalized) || null;
+  }
+
+  listExternalBotBindings() {
+    return this.store.snapshot().externalBotBindings || [];
+  }
+
+  listExternalMessageLinks() {
+    return this.store.snapshot().externalMessageLinks || [];
+  }
+
   listPendingConnections() {
     return this.store.snapshot().pendingComputerConnections || [];
   }
@@ -514,27 +577,7 @@ export class IteamCore {
   ensureAgentDmChannel(agentId: string) {
     return this.store.mutate(s => {
       const now = this.clock();
-      const agent = s.agents.find(a => a.id === agentId);
-      if (!agent) throw new HttpError(404, "agent not found");
-      const target = `dm:${agent.id}`;
-      const existing = s.channels.find(channel => channel.kind === "dm" && channel.target === target);
-      if (existing) {
-        existing.name = agent.name;
-        existing.description = `Direct message with ${agent.name}`;
-        existing.memberIds = uniqueIds(["human-local", agent.id]);
-        return existing;
-      }
-      const created = {
-        id: this.newId("dm"),
-        name: agent.name,
-        target,
-        kind: "dm",
-        description: `Direct message with ${agent.name}`,
-        memberIds: uniqueIds(["human-local", agent.id]),
-        createdAt: now
-      };
-      s.channels.push(created);
-      return created;
+      return this.ensureAgentDmChannelInState(s, agentId, now);
     });
   }
 
@@ -941,6 +984,9 @@ export class IteamCore {
         threadId: input.threadId !== undefined ? input.threadId : threadRootFromTarget(input.target)
       };
       s.messages.push(created);
+      if (authorAgent) {
+        this.linkOutboundForExternalRoot(s, created, created.threadId || created.id, now);
+      }
       if (authorAgent && scheduleParse.directive) {
         this.applyScheduleDirective(s, {
           target: created.target,
@@ -1052,6 +1098,7 @@ export class IteamCore {
         // not fan out to other agents — only the DM peer is reachable from
         // inside `dm:<peer>`.
         this.filterDmMentions(s, created, now);
+        this.linkOutboundForExternalRoot(s, created, delivery.rootMessageId || delivery.messageId, now);
         if (directive) {
           const source = s.messages.find(message => message.id === delivery.messageId);
           if (source && (source.type || "human") === "human" && source.authorId !== "system") {
@@ -1119,6 +1166,7 @@ export class IteamCore {
         threadId: task.messageId
       };
       s.messages.push(message);
+      this.linkOutboundForExternalRoot(s, message, delivery.rootMessageId || delivery.messageId, now);
       delivery.updatedAt = now;
       pushDeliveryLifecycle(delivery, "delivery.progress", now, text.slice(0, 240), {
         ...(input.elapsedMs !== undefined ? { elapsedMs: input.elapsedMs } : {})
@@ -1144,7 +1192,7 @@ export class IteamCore {
       pushDeliveryLifecycle(delivery, "delivery.help_needed", now, text.slice(0, 240), {
         ...(input.reason ? { reason: input.reason } : {})
       });
-      s.messages.push({
+      const message: Message = {
         id: this.newId("msg"),
         target: delivery.target,
         authorId: delivery.agentId,
@@ -1153,7 +1201,9 @@ export class IteamCore {
         mentions: [],
         createdAt: now,
         threadId: threadRootFromTarget(delivery.target)
-      });
+      };
+      s.messages.push(message);
+      this.linkOutboundForExternalRoot(s, message, delivery.rootMessageId || delivery.messageId, now);
       return delivery;
     });
   }
@@ -1616,6 +1666,314 @@ export class IteamCore {
     return message;
   }
 
+  upsertExternalBotConfig(input: ExternalBotConfigUpsertInput): ExternalBotConfig {
+    const provider = providerKeyForExternalBotConfig(input.provider || "lark", input.appId);
+    const appId = String(input.appId || "").trim();
+    if (!provider) throw new HttpError(400, "provider is required");
+    if (!appId) throw new HttpError(400, "appId is required");
+    return this.store.mutate<ExternalBotConfig>(s => {
+      const now = this.clock();
+      s.externalBotConfigs ||= [];
+      let config = s.externalBotConfigs.find(item => item.provider === provider);
+      if (!config) {
+        config = {
+          provider,
+          alias: normalizeOptionalString(input.alias),
+          appId,
+          appSecret: normalizeOptionalString(input.appSecret),
+          domain: normalizeOptionalString(input.domain),
+          enabled: input.enabled !== false,
+          status: initialExternalBotStatus(input.provider || "lark", appId, input.enabled !== false),
+          statusMessage: null,
+          lastConnectedAt: null,
+          createdAt: now,
+          updatedAt: now
+        };
+        s.externalBotConfigs.push(config);
+      } else {
+        const appChanged = config.appId !== appId;
+        config.appId = appId;
+        if (input.alias !== undefined) config.alias = normalizeOptionalString(input.alias);
+        if (input.appSecret !== undefined) config.appSecret = normalizeOptionalString(input.appSecret);
+        config.domain = normalizeOptionalString(input.domain);
+        if (input.enabled !== undefined) config.enabled = !!input.enabled;
+        if (appChanged || input.appSecret !== undefined || input.enabled !== undefined) {
+          config.status = initialExternalBotStatus(input.provider || provider, appId, config.enabled);
+          config.statusMessage = null;
+          config.lastConnectedAt = null;
+        }
+        config.updatedAt = now;
+      }
+      return config;
+    });
+  }
+
+  updateExternalBotStatus(provider: string, status: string, message?: string | null): ExternalBotConfig | null {
+    const normalized = normalizeProvider(provider);
+    if (!normalized) return null;
+    return this.store.mutate<ExternalBotConfig | null>(s => {
+      const config = (s.externalBotConfigs || []).find(item => item.provider === normalized);
+      if (!config) return null;
+      const now = this.clock();
+      config.status = status;
+      config.statusMessage = normalizeOptionalString(message);
+      if (status === "connected") config.lastConnectedAt = now;
+      config.updatedAt = now;
+      return config;
+    });
+  }
+
+  deleteExternalBotConfig(provider: string): { ok: true; provider: string; deletedBindings: number; deletedMessageLinks: number } {
+    const normalized = normalizeProvider(provider);
+    if (!normalized) throw new HttpError(400, "provider is required");
+    return this.store.mutate(s => {
+      const beforeConfigs = s.externalBotConfigs || [];
+      if (!beforeConfigs.some(config => config.provider === normalized)) {
+        throw new HttpError(404, "bot config not found");
+      }
+      const beforeBindings = s.externalBotBindings || [];
+      const beforeLinks = s.externalMessageLinks || [];
+      s.externalBotConfigs = beforeConfigs.filter(config => config.provider !== normalized);
+      s.externalBotBindings = beforeBindings.filter(binding => binding.provider !== normalized);
+      s.externalMessageLinks = beforeLinks.filter(link => link.provider !== normalized);
+      return {
+        ok: true,
+        provider: normalized,
+        deletedBindings: beforeBindings.length - s.externalBotBindings.length,
+        deletedMessageLinks: beforeLinks.length - s.externalMessageLinks.length
+      };
+    });
+  }
+
+  upsertExternalBotBinding(input: ExternalBindingUpsertInput): ExternalBotBinding {
+    const provider = normalizeProvider(input.provider);
+    const tenantKey = String(input.tenantKey || "").trim();
+    const chatId = String(input.chatId || "").trim();
+    if (!provider || !tenantKey || !chatId) throw new HttpError(400, "provider, tenantKey and chatId are required");
+    return this.store.mutate<ExternalBotBinding>(s => {
+      const now = this.clock();
+      const target = normalizeTarget(input.defaultTarget);
+      const agentId = normalizeOptionalString(input.defaultAgentId);
+      if (target && !findChannel(s, target)) throw new HttpError(404, "target channel not found");
+      if (agentId && !s.agents.some(agent => agent.id === agentId)) throw new HttpError(404, "agent not found");
+      s.externalBotBindings ||= [];
+      let binding = s.externalBotBindings.find(item =>
+        item.provider === provider && item.tenantKey === tenantKey && item.chatId === chatId
+      );
+      if (!binding) {
+        binding = {
+          id: this.newId("ext_bind"),
+          provider,
+          tenantKey,
+          chatId,
+          chatType: normalizeOptionalString(input.chatType),
+          defaultTarget: target,
+          defaultAgentId: agentId,
+          status: "active",
+          createdAt: now,
+          updatedAt: now
+        };
+        s.externalBotBindings.push(binding);
+      } else {
+        binding.chatType = normalizeOptionalString(input.chatType) || binding.chatType || null;
+        binding.defaultTarget = target;
+        binding.defaultAgentId = agentId;
+        binding.status = "active";
+        binding.updatedAt = now;
+      }
+      return binding;
+    });
+  }
+
+  createExternalRoutedMessage(input: ExternalRoutedMessageInput): ExternalRoutedMessageResult {
+    const provider = normalizeProvider(input.provider);
+    const tenantKey = String(input.tenantKey || "").trim();
+    const chatId = String(input.chatId || "").trim();
+    const text = String(input.text || "").trim();
+    if (!provider || !tenantKey || !chatId) throw new HttpError(400, "provider, tenantKey and chatId are required");
+    if (!text) throw new HttpError(400, "text is required");
+    const conversationId = externalConversationId(provider, tenantKey, chatId);
+    const createdIds: string[] = [];
+    const result = this.store.mutate<ExternalRoutedMessageResult>(s => {
+      const now = this.clock();
+      const externalMessageId = normalizeOptionalString(input.externalMessageId);
+      if (externalMessageId && (s.externalMessageLinks || []).some(link =>
+        link.provider === provider &&
+        link.externalConversationId === conversationId &&
+        link.externalMessageId === externalMessageId &&
+        link.direction === "in"
+      )) {
+        return { ok: true, replyText: "duplicate message ignored" };
+      }
+      const binding = (s.externalBotBindings || []).find(item =>
+        item.provider === provider &&
+        item.tenantKey === tenantKey &&
+        item.chatId === chatId &&
+        item.status === "active"
+      ) || null;
+      const target = normalizeTarget(input.target) || binding?.defaultTarget || null;
+      const mentionedAgents = parseMentions(text, s).filter(mention => mention.kind === "agent");
+      let routeTarget = target;
+      let defaultAgentId = normalizeOptionalString(input.defaultAgentId) || binding?.defaultAgentId || null;
+
+      if (!routeTarget) {
+        if (mentionedAgents.length === 1) {
+          routeTarget = this.ensureAgentDmChannelInState(s, mentionedAgents[0].id, now).target;
+        } else {
+          return {
+            ok: false,
+            binding,
+            replyText: mentionedAgents.length > 1
+              ? "请指定 iTeam 频道，例如 `/all @codex xxx`，或先执行 `/iteam bind #all`。"
+              : "请指定 iTeam 频道或 agent，例如 `/all @codex xxx`、`@codex xxx`，或先执行 `/iteam bind #all`。"
+          };
+        }
+      }
+
+      if (routeTarget.startsWith("dm:")) {
+        defaultAgentId ||= routeTarget.slice(3);
+      } else if (!findChannel(s, routeTarget)) {
+        return { ok: false, binding, replyText: `iTeam channel not found: ${routeTarget}` };
+      }
+
+      const createdBy = `ingress:${provider}`;
+      const assigneeId = defaultAgentId || (mentionedAgents.length === 1 ? mentionedAgents[0].id : null);
+      if (input.asTask) {
+        const messageId = this.newId("msg");
+        const task: Task = {
+          id: this.newId("task"),
+          number: nextTaskNumber(s, routeTarget),
+          target: routeTarget,
+          title: text,
+          description: "",
+          status: "todo",
+          assigneeId,
+          createdBy,
+          messageId,
+          threadTarget: `${routeTarget}:${messageId}`,
+          createdAt: now,
+          updatedAt: now
+        };
+        s.tasks.push(task);
+        const created: Message = {
+          id: messageId,
+          target: routeTarget,
+          authorId: createdBy,
+          type: "task",
+          text: task.title,
+          taskId: task.id,
+          mentions: [],
+          createdAt: now,
+          threadId: null
+        };
+        s.messages.push(created);
+        if (task.assigneeId) {
+          this.enqueueSingleAgentDelivery(s, created, task.assigneeId, {
+            target: task.threadTarget,
+            rootMessageId: created.id,
+            depth: 0,
+            createdIds,
+            sessionKey: normalizeOptionalString(input.sessionKey) || `${conversationId}:${routeTarget}:task:${task.id}`,
+            source: provider
+          });
+        }
+        s.externalMessageLinks ||= [];
+        s.externalMessageLinks.push({
+          id: this.newId("ext_msg"),
+          provider,
+          externalConversationId: conversationId,
+          externalMessageId,
+          messageId: created.id,
+          rootMessageId: created.id,
+          direction: "in",
+          createdAt: now
+        });
+        return { ok: true, message: created, task, binding };
+      }
+
+      const created: Message = {
+        id: this.newId("msg"),
+        target: routeTarget,
+        authorId: createdBy,
+        type: "human",
+        text,
+        mentions: parseMentions(text, s),
+        createdAt: now,
+        threadId: threadRootFromTarget(routeTarget)
+      };
+      s.messages.push(created);
+      this.filterDmMentions(s, created, now);
+      const finalMentions = (created.mentions || []).filter(mention => mention.kind === "agent");
+      if (finalMentions.length > 0) {
+        this.enqueueMentionDeliveries(s, created, {
+          rootMessageId: created.id,
+          parentDeliveryId: null,
+          depth: 0,
+          excludeAgentId: null,
+          createdIds,
+          sessionKey: normalizeOptionalString(input.sessionKey) || `${conversationId}:${routeTarget}`,
+          source: provider
+        });
+      } else if (defaultAgentId || !routeTarget.startsWith("dm:")) {
+        this.enqueueDefaultAgentDelivery(s, created, defaultAgentId || undefined, createdIds, {
+          sessionKey: normalizeOptionalString(input.sessionKey) || `${conversationId}:${routeTarget}`,
+          source: provider
+        });
+      }
+      s.externalMessageLinks ||= [];
+      s.externalMessageLinks.push({
+        id: this.newId("ext_msg"),
+        provider,
+        externalConversationId: conversationId,
+        externalMessageId,
+        messageId: created.id,
+        rootMessageId: created.id,
+        direction: "in",
+        createdAt: now
+      });
+      return { ok: true, message: created, binding };
+    });
+    this.publishDeliveriesById(createdIds);
+    if (result.task) this.runtimes.onTask(result.task);
+    return result;
+  }
+
+  markExternalMessageLinkSent(linkId: string, externalMessageId: string): ExternalMessageLink {
+    return this.store.mutate<ExternalMessageLink>(s => {
+      const link = (s.externalMessageLinks || []).find(item => item.id === linkId);
+      if (!link) throw new HttpError(404, "external message link not found");
+      link.externalMessageId = externalMessageId;
+      return link;
+    });
+  }
+
+  backfillExternalMessageLinks(rootMessageId: string): { ok: true; rootMessageId: string; created: number } {
+    const rootId = String(rootMessageId || "").trim();
+    if (!rootId) throw new HttpError(400, "rootMessageId is required");
+    return this.store.mutate(s => {
+      const inbound = (s.externalMessageLinks || []).find(link =>
+        link.direction === "in" &&
+        (link.rootMessageId === rootId || link.messageId === rootId)
+      );
+      if (!inbound) throw new HttpError(404, "external inbound root not found");
+      const before = (s.externalMessageLinks || []).length;
+      const root = inbound.rootMessageId || inbound.messageId;
+      const messages = (s.messages || []).filter(message =>
+        message.type === "agent" &&
+        message.threadId === root
+      );
+      const now = this.clock();
+      for (const message of messages) {
+        this.linkOutboundForExternalRoot(s, message, root, now);
+      }
+      return {
+        ok: true,
+        rootMessageId: root,
+        created: (s.externalMessageLinks || []).length - before
+      };
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // private: delivery enqueueing
 
@@ -1645,6 +2003,50 @@ export class IteamCore {
       mentions: [],
       createdAt: now,
       threadId: threadRootFromTarget(created.target)
+    });
+  }
+
+  private ensureAgentDmChannelInState(s: State, agentId: string, now: string) {
+    const agent = s.agents.find(a => a.id === agentId);
+    if (!agent) throw new HttpError(404, "agent not found");
+    const target = `dm:${agent.id}`;
+    const existing = s.channels.find(channel => channel.kind === "dm" && channel.target === target);
+    if (existing) {
+      existing.name = agent.name;
+      existing.description = `Direct message with ${agent.name}`;
+      existing.memberIds = uniqueIds(["human-local", agent.id]);
+      return existing;
+    }
+    const created = {
+      id: this.newId("dm"),
+      name: agent.name,
+      target,
+      kind: "dm",
+      description: `Direct message with ${agent.name}`,
+      memberIds: uniqueIds(["human-local", agent.id]),
+      createdAt: now
+    };
+    s.channels.push(created);
+    return created;
+  }
+
+  private linkOutboundForExternalRoot(s: State, message: Message, rootMessageId: string, now: string): void {
+    const inbound = (s.externalMessageLinks || []).find(link =>
+      link.direction === "in" &&
+      (link.rootMessageId === rootMessageId || link.messageId === rootMessageId)
+    );
+    if (!inbound) return;
+    s.externalMessageLinks ||= [];
+    if (s.externalMessageLinks.some(link => link.direction === "out" && link.messageId === message.id)) return;
+    s.externalMessageLinks.push({
+      id: this.newId("ext_msg"),
+      provider: inbound.provider,
+      externalConversationId: inbound.externalConversationId,
+      externalMessageId: null,
+      messageId: message.id,
+      rootMessageId: inbound.rootMessageId || inbound.messageId,
+      direction: "out",
+      createdAt: now
     });
   }
 
@@ -1946,6 +2348,39 @@ function sessionKeyFromTarget(target: string): string | null {
 function normalizeOptionalString(value: string | null | undefined): string | null {
   const text = String(value || "").trim();
   return text || null;
+}
+
+function normalizeProvider(value: string | null | undefined): string {
+  return String(value || "").trim().toLowerCase();
+}
+
+function providerKeyForExternalBotConfig(provider: string | null | undefined, appId: string | null | undefined): string {
+  const normalized = normalizeProvider(provider || "lark");
+  const app = String(appId || "").trim().toLowerCase();
+  const baseProvider = normalized.split(":")[0];
+  if ((baseProvider === "lark" || baseProvider === "feishu") && app) return `${baseProvider}:${app}`;
+  if (normalized.includes(":")) return normalized;
+  return normalized;
+}
+
+function initialExternalBotStatus(provider: string | null | undefined, appId: string, enabled: boolean): string {
+  if (!enabled) return "disabled";
+  const baseProvider = normalizeProvider(provider || "lark").split(":")[0];
+  if ((baseProvider === "lark" || baseProvider === "feishu") && !/^cli_[A-Za-z0-9]+$/.test(String(appId || "").trim())) {
+    return "invalid";
+  }
+  return "pending";
+}
+
+function normalizeTarget(value: string | null | undefined): string | null {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  if (text.startsWith("dm:")) return text;
+  return `#${text.replace(/^[/#]+/, "")}`;
+}
+
+function externalConversationId(provider: string, tenantKey: string, chatId: string): string {
+  return `${provider}:${tenantKey}:${chatId}`;
 }
 
 function normalizeContextRules(value: Record<string, string[]> | undefined): Record<string, string[]> | undefined {

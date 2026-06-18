@@ -222,6 +222,54 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
   },
   {
+    name: "iteam_external_bot_configs",
+    ddl: `CREATE TABLE IF NOT EXISTS iteam_external_bot_configs (
+      provider   VARCHAR(32)  NOT NULL PRIMARY KEY,
+      alias      VARCHAR(128) DEFAULT NULL,
+      app_id     VARCHAR(128) NOT NULL,
+      app_secret VARCHAR(255) DEFAULT NULL,
+      domain     VARCHAR(128) DEFAULT NULL,
+      enabled    TINYINT      NOT NULL DEFAULT 1,
+      status     VARCHAR(32)  DEFAULT NULL,
+      status_message VARCHAR(255) DEFAULT NULL,
+      last_connected_at VARCHAR(40) DEFAULT NULL,
+      created_at VARCHAR(40)  NOT NULL,
+      updated_at VARCHAR(40)  NOT NULL,
+      KEY idx_enabled (enabled)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+  },
+  {
+    name: "iteam_external_bot_bindings",
+    ddl: `CREATE TABLE IF NOT EXISTS iteam_external_bot_bindings (
+      id               VARCHAR(64)  NOT NULL PRIMARY KEY,
+      provider         VARCHAR(32)  NOT NULL,
+      tenant_key       VARCHAR(128) NOT NULL,
+      chat_id          VARCHAR(128) NOT NULL,
+      chat_type        VARCHAR(64)  DEFAULT NULL,
+      default_target   VARCHAR(255) DEFAULT NULL,
+      default_agent_id VARCHAR(64)  DEFAULT NULL,
+      status           VARCHAR(32)  NOT NULL,
+      created_at       VARCHAR(40)  NOT NULL,
+      updated_at       VARCHAR(40)  NOT NULL,
+      UNIQUE KEY uniq_provider_chat (provider, tenant_key, chat_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+  },
+  {
+    name: "iteam_external_message_links",
+    ddl: `CREATE TABLE IF NOT EXISTS iteam_external_message_links (
+      id                       VARCHAR(64)  NOT NULL PRIMARY KEY,
+      provider                 VARCHAR(32)  NOT NULL,
+      external_conversation_id VARCHAR(255) NOT NULL,
+      external_message_id      VARCHAR(255) DEFAULT NULL,
+      message_id               VARCHAR(64)  NOT NULL,
+      root_message_id          VARCHAR(64)  DEFAULT NULL,
+      direction                VARCHAR(16)  NOT NULL,
+      created_at               VARCHAR(40)  NOT NULL,
+      KEY idx_message (message_id),
+      KEY idx_external (provider, external_conversation_id, external_message_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+  },
+  {
     name: "iteam_events",
     ddl: `CREATE TABLE IF NOT EXISTS iteam_events (
       id         VARCHAR(64) NOT NULL PRIMARY KEY,

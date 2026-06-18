@@ -221,6 +221,44 @@ export interface ExternalIngressPolicy {
   updatedAt: string;
 }
 
+export interface ExternalBotBinding {
+  id: string;
+  provider: string;
+  tenantKey: string;
+  chatId: string;
+  chatType?: string | null;
+  defaultTarget?: string | null;
+  defaultAgentId?: string | null;
+  status: "active" | "revoked" | string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ExternalBotConfig {
+  provider: string;
+  alias?: string | null;
+  appId: string;
+  appSecret?: string | null;
+  domain?: string | null;
+  enabled: boolean;
+  status?: "pending" | "connected" | "error" | "invalid" | "disabled" | string;
+  statusMessage?: string | null;
+  lastConnectedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ExternalMessageLink {
+  id: string;
+  provider: string;
+  externalConversationId: string;
+  externalMessageId?: string | null;
+  messageId: string;
+  rootMessageId?: string | null;
+  direction: "in" | "out" | string;
+  createdAt: string;
+}
+
 export interface StoreEvent {
   id: string;
   type: string;
@@ -247,6 +285,9 @@ export interface State {
   scheduledTasks: ScheduledTask[];
   externalIngressPairings: ExternalIngressPairing[];
   externalIngressPolicies: ExternalIngressPolicy[];
+  externalBotConfigs: ExternalBotConfig[];
+  externalBotBindings: ExternalBotBinding[];
+  externalMessageLinks: ExternalMessageLink[];
   events: StoreEvent[];
 }
 

@@ -100,6 +100,9 @@ Key flags/envs:
 | `--host` | Listen host, default `127.0.0.1` |
 | `--serve-web` / `--no-serve-web` / `ITEAM_SERVE_WEB` | Serve `dist/` static assets (enabled by default) |
 | `--web-root` / `ITEAM_WEB_ROOT` | Custom static root when serving web |
+| `ITEAM_LARK_APP_ID` / `ITEAM_FEISHU_APP_ID` | Enable the Lark/Feishu bot long-connection client when paired with an app secret |
+| `ITEAM_LARK_APP_SECRET` / `ITEAM_FEISHU_APP_SECRET` | App secret for the Lark/Feishu bot |
+| `ITEAM_LARK_ENABLED=false` / `ITEAM_FEISHU_ENABLED=false` | Disable the bot client even when credentials are present |
 
 Data root is controlled by `ITEAM_HOME` (default `~/.iteam`).
 
@@ -182,6 +185,30 @@ iteam-agent message read   --target #all [--limit 30] [--around <msg_id>]
 iteam-agent message search <query> [--target #all] [--limit 20]
 iteam-agent message send   --target #all <message...>
 ```
+
+## Lark / Feishu bot
+
+iTeam can connect an enterprise self-built Lark/Feishu bot through the official
+long-connection event client. Configure the app credentials before starting the
+daemon:
+
+```bash
+ITEAM_LARK_APP_ID=cli_xxx \
+ITEAM_LARK_APP_SECRET=xxx \
+iteam daemon start
+```
+
+Supported bot message patterns:
+
+```text
+@iTeamBot /all @codex 帮我看一下这个问题   # route to iTeam #all and mention @codex
+@iTeamBot /all 帮我看一下这个问题          # route to #all; iTeam picks the channel/default agent
+@iTeamBot /iteam bind #all                # bind this Lark/Feishu chat to iTeam #all
+@iTeamBot @codex 帮我看一下这个问题        # no channel/default: route to @codex's iTeam DM
+```
+
+The integration records inbound/outbound external message links so agent replies
+can be mirrored back to the originating Lark/Feishu chat.
 
 ## Storage backends
 
