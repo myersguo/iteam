@@ -28,8 +28,8 @@
     "node": ">=20"
   },
   "bin": {
-    "iteam": "./bin/iteam.mjs",
-    "iteam-agent": "./bin/iteam-agent.mjs"
+    "iteam": "bin/iteam.mjs",
+    "iteam-agent": "bin/iteam-agent.mjs"
   },
   "files": [
     "bin/iteam.mjs",
