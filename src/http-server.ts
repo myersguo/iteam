@@ -245,7 +245,11 @@ async function route(
   if (req.method === "GET" && url.pathname === "/api/tasks") {
     return sendJson(res, 200, core.listTasks({
       target: url.searchParams.get("target"),
-      status: url.searchParams.get("status")
+      status: url.searchParams.get("status"),
+      assigneeId: url.searchParams.get("assigneeId"),
+      createdBy: url.searchParams.get("createdBy"),
+      q: url.searchParams.get("q"),
+      includeDone: parseBooleanQuery(url.searchParams.get("includeDone"))
     }));
   }
 
@@ -568,6 +572,10 @@ function readComputerCredentials(
   const queryToken = url.searchParams.get("token");
   if (queryToken) return { computerId: expectedComputerId, token: queryToken };
   throw new HttpError(401, "X-Iteam-Connection header or ?token= required");
+}
+
+function parseBooleanQuery(value: string | null): boolean {
+  return value === "1" || value === "true" || value === "yes";
 }
 
 function parseConnectionHeader(req: IncomingMessage): { computerId: string; token: string } {

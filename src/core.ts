@@ -478,11 +478,44 @@ export class IteamCore {
     return this.store.snapshot().pendingComputerConnections || [];
   }
 
-  listTasks(filter: { target?: string | null; status?: string | null } = {}) {
-    let tasks = this.store.snapshot().tasks || [];
+  listTasks(filter: {
+    target?: string | null;
+    status?: string | null;
+    assigneeId?: string | null;
+    createdBy?: string | null;
+    q?: string | null;
+    includeDone?: boolean;
+  } = {}) {
+    const snapshot = this.store.snapshot();
+    const replyCounts = new Map<string, number>();
+    for (const message of snapshot.messages || []) {
+      const threadId = threadRootFromTarget(message.target);
+      if (!threadId) continue;
+      replyCounts.set(threadId, (replyCounts.get(threadId) || 0) + 1);
+    }
+    let tasks = snapshot.tasks || [];
     if (filter.target) tasks = tasks.filter(task => task.target === filter.target);
-    if (filter.status) tasks = tasks.filter(task => task.status === filter.status);
-    return tasks;
+    const status = normalizeOptionalString(filter.status);
+    if (status && status !== "all") {
+      tasks = status === "open"
+        ? tasks.filter(task => isOpenTaskStatus(task.status))
+        : tasks.filter(task => task.status === status);
+    } else if (status !== "all" && !filter.includeDone) {
+      tasks = tasks.filter(task => isOpenTaskStatus(task.status));
+    }
+    if (filter.assigneeId) tasks = tasks.filter(task => task.assigneeId === filter.assigneeId);
+    if (filter.createdBy) tasks = tasks.filter(task => task.createdBy === filter.createdBy);
+    const query = normalizeOptionalString(filter.q)?.toLowerCase();
+    if (query) {
+      tasks = tasks.filter(task =>
+        task.title.toLowerCase().includes(query) ||
+        task.description.toLowerCase().includes(query)
+      );
+    }
+    return tasks.map(task => ({
+      ...task,
+      replyCount: replyCounts.get(task.messageId) || 0
+    }));
   }
 
   listScheduledTasks(filter: { target?: string | null; status?: string | null; agentId?: string | null } = {}) {
@@ -2348,6 +2381,10 @@ function sessionKeyFromTarget(target: string): string | null {
 function normalizeOptionalString(value: string | null | undefined): string | null {
   const text = String(value || "").trim();
   return text || null;
+}
+
+function isOpenTaskStatus(status: string | null | undefined): boolean {
+  return status !== "done" && status !== "closed";
 }
 
 function normalizeProvider(value: string | null | undefined): string {

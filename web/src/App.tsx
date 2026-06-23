@@ -29,7 +29,7 @@ import "./styles.css";
 
 // ---------- types ----------
 
-type SectionId = "chat" | "members" | "computers" | "scheduled" | "integrations";
+type SectionId = "chat" | "tasks" | "members" | "computers" | "scheduled" | "integrations";
 const NEW_BOT_PROVIDER = "__new_bot__";
 
 interface Human {
@@ -87,8 +87,12 @@ interface Task {
   status: string;
   target: string;
   messageId: string;
+  threadTarget?: string;
   createdBy?: string;
   assigneeId?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+  replyCount?: number;
 }
 
 interface ScheduledTask {
@@ -185,6 +189,22 @@ interface MentionMatch {
 // ---------- api ----------
 
 const api = {
+  async fetchTasks(filter: {
+    target?: string;
+    status?: string;
+    assigneeId?: string;
+    createdBy?: string;
+    q?: string;
+  } = {}): Promise<Task[]> {
+    const params = new URLSearchParams();
+    if (filter.target) params.set("target", filter.target);
+    if (filter.status) params.set("status", filter.status);
+    if (filter.assigneeId) params.set("assigneeId", filter.assigneeId);
+    if (filter.createdBy) params.set("createdBy", filter.createdBy);
+    if (filter.q) params.set("q", filter.q);
+    const qs = params.toString();
+    return fetch(`/api/tasks${qs ? `?${qs}` : ""}`).then(r => r.json());
+  },
   async fetchMessages(channelTarget: string, before?: string, limit = 10): Promise<Message[]> {
     const selectedChannel = resolveChannel(
       await fetch("/api/channels").then(r => r.json()),
@@ -200,7 +220,7 @@ const api = {
       fetch("/api/humans").then(r => r.json()),
       fetch("/api/agents").then(r => r.json()),
       fetch("/api/channels").then(r => r.json()),
-      fetch("/api/tasks").then(r => r.json()),
+      api.fetchTasks(),
       fetch("/api/scheduled-tasks").then(r => r.json()),
       fetch("/api/computers").then(r => r.json()),
       fetch("/api/external/bot-configs").then(r => r.json()),
@@ -264,6 +284,7 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [channelsCollapsed, setChannelsCollapsed] = useState(false);
   const [threadRootId, setThreadRootIdState] = useState<string | null>(initialRoute.threadId);
+  const [taskThreadRoot, setTaskThreadRoot] = useState<Message | null>(null);
   const [threadMessages, setThreadMessages] = useState<Message[]>([]);
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
     if (typeof window === "undefined") return 272;
@@ -395,8 +416,22 @@ function App() {
   const selectedAgent = state?.agents.find(a => a.id === selectedAgentId) || null;
   const selectedComputer = state?.computers.find(c => c.id === selectedComputerId) || null;
   const channelMessages = useMemo(() => state?.messages || [], [state]);
-  const threadRoot = state?.messages.find(m => m.id === threadRootId) || null;
+  const threadRoot = (
+    taskThreadRoot && taskThreadRoot.id === threadRootId
+      ? taskThreadRoot
+      : state?.messages.find(m => m.id === threadRootId)
+  ) || null;
   const threadTarget = threadRoot ? `${threadRoot.target}:${threadRoot.id}` : null;
+
+  function openThread(messageId: string) {
+    setTaskThreadRoot(null);
+    setThreadRootId(messageId);
+  }
+
+  function openTaskThread(task: Task) {
+    setTaskThreadRoot(taskToRootMessage(task));
+    setThreadRootId(task.messageId);
+  }
 
   async function loadThreadMessages(target: string) {
     const messages = await fetch(`/api/messages?target=${encodeURIComponent(target)}&limit=50`).then(r => r.json());
@@ -471,6 +506,7 @@ function App() {
 
   async function createTask(body: Record<string, unknown>) {
     const task = await api.post<Task>("/api/tasks", { target: channel, ...body });
+    setTaskThreadRoot(taskToRootMessage(task));
     setThreadRootId(task.messageId);
     refresh();
   }
@@ -582,7 +618,7 @@ function App() {
         </div>
         <div className="rail-nav">
           <RailButton
-            active={section === "chat"}
+            active={section === "chat" || section === "tasks"}
             label="Chat"
             icon={<MessageSquare size={18} />}
             onClick={() => setSection("chat")}
@@ -632,9 +668,11 @@ function App() {
           <p className="eyebrow">Workspace</p>
           <h2>{titleFor(section)}</h2>
         </header>
-        {section === "chat" && (
+        {(section === "chat" || section === "tasks") && (
           <ChatSidebar
             state={state}
+            section={section}
+            setSection={setSection}
             channel={channel}
             setChannel={setChannel}
             channelsCollapsed={channelsCollapsed}
@@ -704,9 +742,19 @@ function App() {
             sendMessage={sendMessage}
             createTask={createTask}
             updateTask={updateTask}
-            openThread={setThreadRootId}
+            openThread={openThread}
+            openTaskThread={openTaskThread}
             tab={chatTab}
             setTab={setChatTab}
+          />
+        )}
+        {section === "tasks" && (
+          <AllTasksView
+            state={state}
+            updateTask={updateTask}
+            openTaskThread={openTaskThread}
+            setChannel={setChannel}
+            setSection={setSection}
           />
         )}
         {section === "members" && (
@@ -796,12 +844,16 @@ function App() {
           state={state}
           root={threadRoot}
           messages={threadMessages}
-          onClose={() => setThreadRootId(null)}
+          onClose={() => {
+            setThreadRootId(null);
+            setTaskThreadRoot(null);
+          }}
           onViewChannel={() => {
             setSection("chat");
             setChatTab("chat");
             if (threadRoot) setChannel(threadRoot.target);
             setThreadRootId(null);
+            setTaskThreadRoot(null);
             requestAnimationFrame(() => {
               if (!threadRoot) return;
               const el = document.querySelector(
@@ -844,11 +896,13 @@ function RailButton({
 }
 
 function titleFor(section: SectionId): string {
-  return ({ chat: "Channels", members: "Members", computers: "Computers", scheduled: "Scheduled", integrations: "Bots" } as const)[section];
+  return ({ chat: "Channels", tasks: "Channels", members: "Members", computers: "Computers", scheduled: "Scheduled", integrations: "Bots" } as const)[section];
 }
 
 function ChatSidebar({
   state,
+  section,
+  setSection,
   channel,
   setChannel,
   channelsCollapsed,
@@ -859,6 +913,8 @@ function ChatSidebar({
   setSelectedAgentId
 }: {
   state: AppState;
+  section: SectionId;
+  setSection: (section: SectionId) => void;
   channel: string;
   setChannel: (c: string) => void;
   channelsCollapsed: boolean;
@@ -890,6 +946,14 @@ function ChatSidebar({
       >
         Channels · {publicChannels.length}
       </SectionLabel>
+      <button
+        className={`side-row channel-row ${section === "tasks" ? "is-selected" : ""}`}
+        onClick={() => setSection("tasks")}
+      >
+        <Kanban size={15} />
+        <span>Task</span>
+        <small>{state.tasks.length}</small>
+      </button>
       {!channelsCollapsed && (
         <div className="side-collapsible">
           {publicChannels.map(c => {
@@ -899,10 +963,16 @@ function ChatSidebar({
                 key={c.id}
                 role="button"
                 tabIndex={0}
-                className={`side-row channel-row ${channel === c.target ? "is-selected" : ""}`}
-                onClick={() => setChannel(c.target)}
+                className={`side-row channel-row ${section === "chat" && channel === c.target ? "is-selected" : ""}`}
+                onClick={() => {
+                  setChannel(c.target);
+                  setSection("chat");
+                }}
                 onKeyDown={event => {
-                  if (event.key === "Enter" || event.key === " ") setChannel(c.target);
+                  if (event.key === "Enter" || event.key === " ") {
+                    setChannel(c.target);
+                    setSection("chat");
+                  }
                 }}
               >
                 <Hash size={15} />
@@ -933,10 +1003,11 @@ function ChatSidebar({
             return (
               <button
                 key={dm.id}
-                className={`side-row member ${channel === dm.target ? "is-selected" : ""}`}
+                className={`side-row member ${section === "chat" && channel === dm.target ? "is-selected" : ""}`}
                 onClick={() => {
                   if (agent) setSelectedAgentId(agent.id);
                   setChannel(dm.target);
+                  setSection("chat");
                 }}
               >
                 <Avatar name={agent?.name || dm.name} agent />
@@ -1189,6 +1260,7 @@ function ChatView({
   createTask,
   updateTask,
   openThread,
+  openTaskThread,
   tab,
   setTab
 }: {
@@ -1203,6 +1275,7 @@ function ChatView({
   createTask: (body: Record<string, unknown>) => Promise<void>;
   updateTask: (task: Task, patch: Record<string, unknown>) => Promise<void>;
   openThread: (id: string) => void;
+  openTaskThread: (task: Task) => void;
   tab: "chat" | "tasks";
   setTab: (tab: "chat" | "tasks") => void;
 }) {
@@ -1428,7 +1501,7 @@ function ChatView({
           channel={channel}
           createTask={createTask}
           updateTask={updateTask}
-          openThread={openThread}
+          openTaskThread={openTaskThread}
         />
       )}
     </section>
@@ -1546,13 +1619,13 @@ function TasksView({
   channel,
   createTask,
   updateTask,
-  openThread
+  openTaskThread
 }: {
   state: AppState;
   channel: string;
   createTask: (body: Record<string, unknown>) => Promise<void>;
   updateTask: (task: Task, patch: Record<string, unknown>) => Promise<void>;
-  openThread: (id: string) => void;
+  openTaskThread: (task: Task) => void;
 }) {
   const [view, setView] = useState<"board" | "list">("board");
   const [creator, setCreator] = useState("");
@@ -1631,7 +1704,7 @@ function TasksView({
                       task={task}
                       state={state}
                       updateTask={updateTask}
-                      openThread={openThread}
+                      openTaskThread={openTaskThread}
                     />
                   ))}
                   {columnTasks.length === 0 && (
@@ -1650,7 +1723,7 @@ function TasksView({
               task={task}
               state={state}
               updateTask={updateTask}
-              openThread={openThread}
+              openTaskThread={openTaskThread}
               list
             />
           ))}
@@ -1668,25 +1741,212 @@ function TasksView({
   );
 }
 
+function AllTasksView({
+  state,
+  updateTask,
+  openTaskThread,
+  setChannel,
+  setSection
+}: {
+  state: AppState;
+  updateTask: (task: Task, patch: Record<string, unknown>) => Promise<void>;
+  openTaskThread: (task: Task) => void;
+  setChannel: (channel: string) => void;
+  setSection: (section: SectionId) => void;
+}) {
+  const [view, setView] = useState<"board" | "list">("board");
+  const [target, setTarget] = useState("");
+  const [status, setStatus] = useState("open");
+  const [assignee, setAssignee] = useState("");
+  const [creator, setCreator] = useState("");
+  const [query, setQuery] = useState("");
+  const [tasks, setTasks] = useState<Task[]>(state.tasks);
+  const [loading, setLoading] = useState(false);
+  const statuses = taskStatuses();
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    api.fetchTasks({
+      target,
+      status,
+      assigneeId: assignee,
+      createdBy: creator,
+      q: query.trim()
+    }).then(next => {
+      if (alive) setTasks(next);
+    }).catch(() => {
+      if (alive) setTasks([]);
+    }).finally(() => {
+      if (alive) setLoading(false);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [target, status, assignee, creator, query, state.tasks]);
+
+  return (
+    <section className="pane tasks-page">
+      <Topbar
+        eyebrow="Tasks"
+        title="All Tasks"
+        subtitle="A cross-channel task view for every task in this workspace."
+      />
+      <div className="task-toolbar">
+        <label className="select-shell">
+          <span>Channel</span>
+          <select value={target} onChange={e => setTarget(e.target.value)}>
+            <option value="">Any channel</option>
+            {state.channels.map(channel => (
+              <option key={channel.id} value={channel.target}>
+                {channel.kind === "dm" ? formatChatTitle(state, channel.target) : `#${channel.name}`}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="select-shell">
+          <span>Status</span>
+          <select value={status} onChange={e => setStatus(e.target.value)}>
+            <option value="open">Open</option>
+            <option value="all">Any status</option>
+            {statuses.map(status => (
+              <option key={status.id} value={status.id}>
+                {status.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="select-shell">
+          <span>Assignee</span>
+          <select value={assignee} onChange={e => setAssignee(e.target.value)}>
+            <option value="">Anyone</option>
+            {state.agents.map(agent => (
+              <option key={agent.id} value={agent.id}>
+                {agent.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="select-shell">
+          <span>Creator</span>
+          <select value={creator} onChange={e => setCreator(e.target.value)}>
+            <option value="">Anyone</option>
+            {state.humans.map(human => (
+              <option key={human.id} value={human.id}>
+                {human.name}
+              </option>
+            ))}
+            {state.agents.map(agent => (
+              <option key={agent.id} value={agent.id}>
+                {agent.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="select-shell">
+          <span>Search</span>
+          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Title or description" />
+        </label>
+        <span className="toolbar-spacer" />
+        <div className="seg">
+          <button className={view === "board" ? "is-active" : ""} onClick={() => setView("board")}>
+            <Kanban size={14} /> Board
+          </button>
+          <button className={view === "list" ? "is-active" : ""} onClick={() => setView("list")}>
+            <List size={14} /> List
+          </button>
+        </div>
+      </div>
+      {loading && <div className="message-loading">Loading tasks...</div>}
+      {view === "board" ? (
+        <div className="task-board">
+          {statuses.map(status => {
+            const columnTasks = tasks.filter(task => task.status === status.id);
+            return (
+              <section className="task-column" key={status.id}>
+                <header>
+                  <span className={`status-pill ${status.id}`}>{status.label}</span>
+                  <small>{columnTasks.length}</small>
+                </header>
+                <div className="task-column-body">
+                  {columnTasks.map(task => (
+                    <TaskCard
+                      key={task.id}
+                      task={task}
+                      state={state}
+                      updateTask={updateTask}
+                      openTaskThread={openTaskThread}
+                      showChannel
+                    />
+                  ))}
+                  {columnTasks.length === 0 && (
+                    <div className="task-empty">No {status.label.toLowerCase()} tasks.</div>
+                  )}
+                </div>
+              </section>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="task-list">
+          {tasks.map(task => (
+            <TaskCard
+              key={task.id}
+              task={task}
+              state={state}
+              updateTask={updateTask}
+              openTaskThread={openTaskThread}
+              showChannel
+              list
+            />
+          ))}
+          {tasks.length === 0 && <div className="empty">No tasks yet.</div>}
+        </div>
+      )}
+      <div className="task-page-foot">
+        {target && (
+          <button
+            className="btn btn-ghost"
+            onClick={() => {
+              setChannel(target);
+              setSection("chat");
+            }}
+          >
+            <MessageSquare size={14} /> View selected channel
+          </button>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function TaskCard({
   task,
   state,
   updateTask,
-  openThread,
-  list = false
+  openTaskThread,
+  list = false,
+  showChannel = false
 }: {
   task: Task;
   state: AppState;
   updateTask: (task: Task, patch: Record<string, unknown>) => Promise<void>;
-  openThread: (id: string) => void;
+  openTaskThread: (task: Task) => void;
   list?: boolean;
+  showChannel?: boolean;
 }) {
   const assignee = state.agents.find(a => a.id === task.assigneeId);
-  const replies = countThreadReplies(state, { target: task.target, id: task.messageId } as Message);
+  const replies = typeof task.replyCount === "number"
+    ? task.replyCount
+    : countThreadReplies(state, { target: task.target, id: task.messageId } as Message);
+  const channel = resolveChannel(state.channels, task.target);
   return (
-    <article className={`task-card ${list ? "list" : ""}`} onClick={() => openThread(task.messageId)}>
+    <article className={`task-card ${list ? "list" : ""}`} onClick={() => openTaskThread(task)}>
       <small className="task-num">#{task.number || task.id}</small>
-      <h3>{task.title}</h3>
+      <div>
+        {showChannel && <small className="task-channel">{channel?.kind === "dm" ? formatChatTitle(state, task.target) : (channel ? `#${channel.name}` : task.target)}</small>}
+        <h3>{task.title}</h3>
+      </div>
       {task.description && <p>{task.description}</p>}
       <div className="task-meta">
         <span>{assignee ? `@${assignee.handle || assignee.name}` : "Unassigned"}</span>
@@ -3218,6 +3478,20 @@ function taskStatuses() {
   ];
 }
 
+function taskToRootMessage(task: Task): Message {
+  return {
+    id: task.messageId,
+    target: task.target,
+    authorId: task.createdBy || "human-local",
+    text: task.title,
+    type: "task",
+    createdAt: task.createdAt || task.updatedAt || new Date().toISOString(),
+    threadId: null,
+    taskId: task.id,
+    replyCount: task.replyCount
+  };
+}
+
 function countThreadReplies(state: AppState, message: { target?: string; id?: string }) {
   if (!message?.target || !message?.id) return 0;
   const counted = state.messages.find(item => item.id === message.id)?.replyCount;
@@ -3328,6 +3602,11 @@ function parseLocation(loc: Location | { pathname: string; search: string }): Ro
       if (rest[0]) route.channel = `dm:${rest[0]}`;
       return route;
     }
+    case "tasks":
+    case "task": {
+      route.section = "tasks";
+      return route;
+    }
     case "agents": {
       route.section = "members";
       return route;
@@ -3365,7 +3644,9 @@ function buildPath(
   state: AppState
 ): string {
   let path = "/";
-  if (route.section === "chat") {
+  if (route.section === "tasks") {
+    path = "/tasks";
+  } else if (route.section === "chat") {
     if (route.channel.startsWith("dm:")) {
       const agentId = route.channel.slice(3);
       const agent = state.agents.find(a => a.id === agentId);

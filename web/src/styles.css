@@ -979,6 +979,7 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
   color: var(--muted);
 }
 .select-shell select,
+.select-shell input,
 .task-toolbar select,
 .task-card select.task-status {
   height: 38px;
@@ -990,7 +991,8 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
   color: var(--ink);
   outline: none;
 }
-.select-shell select:focus { border-color: var(--primary); }
+.select-shell select:focus,
+.select-shell input:focus { border-color: var(--primary); }
 
 .seg {
   display: inline-flex;
@@ -1086,6 +1088,13 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
   font-size: 19px;
   letter-spacing: -0.01em;
 }
+.task-channel {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
 .task-num { color: var(--muted); font-size: 12px; font-weight: 500; }
 .task-card p { color: var(--body); margin: 0; font-size: 13px; line-height: 1.5; }
 .task-meta {
@@ -1110,6 +1119,9 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+.task-page-foot {
+  padding: 0 48px 32px;
 }
 
 .schedule-summary {
