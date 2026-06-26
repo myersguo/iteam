@@ -37,6 +37,20 @@ const BUILTIN_ACP_RUNTIME_PROFILES: Record<string, AcpRuntimeProfile> = {
   }
 };
 
+function assertSafeCliArgValue(label: string, value: string): void {
+  if (value.startsWith("-")) {
+    throw new Error(`${label} must not start with '-' (got: ${JSON.stringify(value)})`);
+  }
+  if (/\s/.test(value)) {
+    throw new Error(`${label} must not contain whitespace (got: ${JSON.stringify(value)})`);
+  }
+}
+
+function assertSafeAgentModel(model: string): void {
+  assertSafeCliArgValue("Invalid agent model", model);
+}
+
+
 export function resolveAcpRuntimeProfile(runtime: string): ResolvedAcpRuntimeProfile | null {
   const profiles = loadConfiguredAcpProfiles();
   const profile = profiles[runtime] || BUILTIN_ACP_RUNTIME_PROFILES[runtime];
@@ -66,7 +80,9 @@ export function renderAcpProfileArgs(
 ): string[] {
   return (profile.args || []).flatMap(arg => {
     if (/^\{\{\s*modelArgs\s*\}\}$/.test(arg)) {
-      return params.agent.model ? ["-m", params.agent.model] : [];
+      if (!params.agent.model) return [];
+      assertSafeAgentModel(params.agent.model);
+      return ["-m", params.agent.model];
     }
     const rendered = renderAcpProfileValue(arg, params);
     return rendered ? [rendered] : [];
@@ -102,10 +118,18 @@ function renderAcpProfileValue(
         return params.agent.id;
       case "agentName":
         return params.agent.name;
-      case "model":
-        return params.agent.model || "";
-      case "modelArgs":
-        return params.agent.model ? `-m ${params.agent.model}` : "";
+      case "model": {
+        const model = params.agent.model;
+        if (!model) return "";
+        assertSafeAgentModel(model);
+        return model;
+      }
+      case "modelArgs": {
+        const model = params.agent.model;
+        if (!model) return "";
+        assertSafeAgentModel(model);
+        return `-m ${model}`;
+      }
       case "timeoutSeconds":
         return String(Math.floor(params.timeoutMs / 1000));
       default:
