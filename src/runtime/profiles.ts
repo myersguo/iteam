@@ -22,7 +22,7 @@ export interface ResolvedRuntimeProfile extends RuntimeProfile {
 const BUILTIN_RUNTIME_PROFILES: Record<string, RuntimeProfile> = {
   opencode: {
     command: "opencode",
-    args: ["run", "{{prompt}}"],
+    args: ["run", "--", "{{prompt}}"],
     timeoutMs: 300_000
   }
 };

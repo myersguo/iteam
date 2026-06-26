@@ -1,8 +1,8 @@
 # iTeam 需求与方向调研
 
-> 生成日期: 2026-06-25  
+> 生成日期: 2026-06-26  
 > 调研者: research subagent  
-> 当前版本快照: master (v0.1.39)
+> 当前版本快照: feature_agents_daily_vv2 (基于 03a6ecb, v0.1.39)
 
 ## 1. 行业现状速读
 
@@ -14,14 +14,15 @@
 
 ## 2. iteam 现有能力盘点
 
-- **核心能力：本地优先的多 Agent 协作**：支持 Codex/Claude/Gemini 等主流 CLI Agent 的统一调度。
+- **核心能力：本地优先的多 Agent 协作**：支持 Codex/Claude/Gemini/Trae 等主流 CLI Agent 的统一调度。
 - **核心能力：多机协同架构**：通过 connect-token 实现跨机器的 Agent 分发与消息投递。
-- **核心能力：任务看板集成**：内置 todo/in_progress/done 状态管理，支持任务与线程关联。
+- **核心能力：任务看板集成**：内置 todo/in_progress/in_review/done 状态管理，支持任务与线程关联。
 - **核心能力：MCP 协议桥接**：为 Agent 提供内置的 `iteam_message_*` 工具，具备基础上下文感知能力。
 - **核心能力：编辑式 Web UI**：采用奶油色画布+珊瑚色强调的高质量视觉系统。
 - **核心能力：ACP 协议支持**：已实现 AcpDriver，支持 Trae/Codex 等的 ACP 模式长连接。
 - **核心能力：定时任务**：支持 cron 表达式和 interval 两种定时调度方式。
 - **核心能力：飞书/Lark 集成**：支持 Lark Bot 长连接模式，外部消息双向同步。
+- **核心能力：SSE 推送**：已实现 Computer Push 机制，替代轮询实现实时命令下发。
 - **缺口：缺乏结构化审批流**：聊天/任务模型尚不支持 Agent 在执行关键操作前强制请求人类确认。
 - **缺口：UI 组件扩展性不足**：仅支持文本输出，无法渲染 MCP 服务器返回的交互式 UI。
 - **缺口：并发执行冲突**：未在设计中明确多个 Agent 同时修改本地文件时的隔离方案。
@@ -60,6 +61,13 @@
 - **验收标准**: Token 消耗降低 30% 以上。
 - **涉及模块**: `src/chat-bridge.ts`, `src/store/base.ts`
 
+### [优先级 P2] Store 层写放大优化
+- **背景与痛点**: `BaseStore.emit` 每次事件都触发全量 `persist`，与 `mutate` 的 persist 形成双重写入。
+- **用户故事**: As a developer, I want the store to batch writes efficiently, so that high-frequency SSE events don't cause excessive disk IO.
+- **关键能力点**: 引入脏标记 + debounce 机制，由 mutate 统一刷盘。
+- **验收标准**: 高频事件场景下 persist 调用次数降低 80% 以上。
+- **涉及模块**: `src/store/base.ts`
+
 ## 4. 不在本次范围
 
 - **云端中心化存储**：坚持 Local-first 原则。
@@ -71,3 +79,4 @@
 - **API 鉴权与现有 CLI 的兼容性**：如何在不破坏现有 CLI 使用体验的前提下引入鉴权？
 - **Git Worktree 在局域网外的性能表现**：跨机器分配任务涉及大量代码同步时如何保证效率？
 - **审批流的超时策略**：Agent 等待审批时的超时时间如何合理配置？
+- **写放大优化的副作用**：debounce 可能导致进程崩溃时丢失最近的若干事件，需要权衡。

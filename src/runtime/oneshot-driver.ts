@@ -239,7 +239,7 @@ function buildOneShotSpec(agent: Agent, delivery: DeliveryWithContext, prompt: s
   if (agent.runtime === "codex") {
     const codexArgs = ["exec", "--skip-git-repo-check", "--sandbox", "read-only"];
     if (agent.model) codexArgs.push("-m", agent.model);
-    codexArgs.push(prompt);
+    codexArgs.push("--", prompt);
     return { command: "codex", args: codexArgs };
   }
   if (agent.runtime === "trae") {
@@ -252,6 +252,7 @@ function buildOneShotSpec(agent: Agent, delivery: DeliveryWithContext, prompt: s
         "--output-format", "json",
         "--yolo",
         "--query-timeout", `${Math.floor(timeoutMs / 1000)}s`,
+        "--",
         prompt
       ]
     };
