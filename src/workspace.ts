@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { defaultHome } from "./lib.js";
 import type { IStore } from "./store/types.js";
 import type { Agent } from "./types.js";
+import { shellEscape } from "./utils/shell-escape.js";
 
 export interface AgentWorkspaceLayout {
   dir: string;
@@ -109,9 +110,10 @@ Use this file for long-lived facts, decisions, user preferences, active work con
     agentEntry.command === "npx"
       ? `npx tsx "${resolve(root, "bin/iteam-agent.ts")}" "$@"`
       : `"${agentEntry.command}" "${agentEntry.args[0]}" "$@"`;
+  // Shell-escape all interpolated values to prevent injection.
   writeFileSync(wrapperPath, `#!/bin/sh
-export ITEAM_AGENT_ID="${agent.id}"
-export ITEAM_SERVER_URL="${serverUrl}"
+export ITEAM_AGENT_ID=${shellEscape(agent.id)}
+export ITEAM_SERVER_URL=${shellEscape(serverUrl)}
 exec ${wrapperExec}
 `);
   chmodSync(wrapperPath, 0o755);

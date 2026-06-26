@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { State } from "../types.js";
 import { BaseStore, initialState } from "./base.js";
@@ -25,7 +25,19 @@ export class JsonStore extends BaseStore {
     return JSON.parse(readFileSync(this.file, "utf8")) as State;
   }
 
+  // TODO(perf): make this async and debounce; today only addresses atomicity.
   protected persist(state: State): void {
-    writeFileSync(this.file, JSON.stringify(state, null, 2));
+    const tmp = `${this.file}.tmp.${process.pid}.${Date.now()}`;
+    try {
+      writeFileSync(tmp, JSON.stringify(state, null, 2));
+      renameSync(tmp, this.file);
+    } catch (error) {
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // Best-effort cleanup only.
+      }
+      throw error;
+    }
   }
 }

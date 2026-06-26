@@ -42,7 +42,21 @@ export async function acquireLock(options: AcquireOptions): Promise<AcquiredLock
     port: options.port,
     startedAt: new Date().toISOString()
   };
-  await writeFile(options.lockPath, JSON.stringify(info, null, 2), "utf8");
+
+  // Write to a temporary file first, then atomically rename to prevent lock corruption/race conditions
+  const tempPath = `${options.lockPath}.tmp.${process.pid}`;
+  await writeFile(tempPath, JSON.stringify(info, null, 2), "utf8");
+  try {
+    const { rename } = await import("node:fs/promises");
+    await rename(tempPath, options.lockPath);
+  } catch (error) {
+    try {
+      unlinkSync(tempPath);
+    } catch {
+      // ignore
+    }
+    throw error;
+  }
 
   let released = false;
   const release = async () => {
