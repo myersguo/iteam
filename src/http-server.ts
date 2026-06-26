@@ -110,6 +110,11 @@ export function startHttpServer(options: HttpServerOptions): RunningHttpServer {
       await route(core, sseClients, req, res, { serveWeb, webRoot, externalBotRuntime: options.externalBotRuntime });
     } catch (error) {
       if (error instanceof HttpError) {
+        if (error.status >= 400 && error.status < 500) {
+          // 4xxs are usually client mistakes (bad JSON, missing auth, etc).
+          // Log minimal context for debugging without leaking request bodies.
+          console.warn(`[http] ${method} ${pathname} -> ${error.status}: ${error.message}`);
+        }
         sendJson(res, error.status, { error: error.message });
         return;
       }
@@ -159,6 +164,20 @@ interface StaticConfig {
   serveWeb: boolean;
   webRoot: string | null;
   externalBotRuntime?: HttpServerOptions["externalBotRuntime"];
+}
+
+async function parseJsonBodyOrThrow<T = Record<string, unknown>>(req: IncomingMessage): Promise<T> {
+  try {
+    return await parseJsonBody<T>(req);
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new HttpError(400, "Invalid JSON");
+    }
+    if (error instanceof Error && error.message === "request body too large") {
+      throw new HttpError(413, "Request body too large");
+    }
+    throw error;
+  }
 }
 
 async function route(
@@ -279,7 +298,7 @@ async function route(
   }
 
   if (req.method === "POST" && url.pathname === "/api/channels") {
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 201, core.createChannel(body));
   }
 
@@ -291,18 +310,18 @@ async function route(
 
   const channelPatch = url.pathname.match(/^\/api\/channels\/([^/]+)$/);
   if (req.method === "PATCH" && channelPatch) {
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     const channelId = decodeURIComponent(channelPatch[1]);
     return sendJson(res, 200, core.patchChannel(channelId, body));
   }
 
   if (req.method === "POST" && url.pathname === "/api/computers/connect-command") {
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 201, core.createConnectInvite(body, `http://${req.headers.host}`));
   }
 
   if (req.method === "POST" && url.pathname === "/api/computers/connect") {
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 200, core.connectComputer(body));
   }
 
@@ -318,33 +337,33 @@ async function route(
   }
 
   if (req.method === "POST" && url.pathname === "/api/agents") {
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 201, core.createAgent(body));
   }
 
   const agentPatch = url.pathname.match(/^\/api\/agents\/([^/]+)$/);
   if (req.method === "PATCH" && agentPatch) {
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 200, core.patchAgent(agentPatch[1], body));
   }
 
   const humanPatch = url.pathname.match(/^\/api\/humans\/([^/]+)$/);
   if (req.method === "PATCH" && humanPatch) {
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 200, core.patchHuman(decodeURIComponent(humanPatch[1]), body));
   }
 
   const runtimeStatus = url.pathname.match(/^\/api\/agents\/([^/]+)\/runtime-status$/);
   if (req.method === "POST" && runtimeStatus) {
     requireComputerAuth(core, req, runtimeStatus[1], "agent");
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 200, core.reportRuntimeStatus(runtimeStatus[1], body));
   }
 
   const runtimeEvent = url.pathname.match(/^\/api\/agents\/([^/]+)\/runtime-event$/);
   if (req.method === "POST" && runtimeEvent) {
     requireComputerAuth(core, req, runtimeEvent[1], "agent");
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     core.recordRuntimeEvent(runtimeEvent[1], body);
     return sendJson(res, 200, { ok: true });
   }
@@ -356,49 +375,49 @@ async function route(
   }
 
   if (req.method === "POST" && url.pathname === "/api/messages") {
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 201, core.createMessage(body));
   }
 
   const deliveryResult = url.pathname.match(/^\/api\/deliveries\/([^/]+)\/result$/);
   if (req.method === "POST" && deliveryResult) {
     requireComputerAuth(core, req, deliveryResult[1], "delivery");
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 200, core.applyDeliveryResult(deliveryResult[1], body));
   }
 
   const deliveryProgress = url.pathname.match(/^\/api\/deliveries\/([^/]+)\/progress$/);
   if (req.method === "POST" && deliveryProgress) {
     requireComputerAuth(core, req, deliveryProgress[1], "delivery");
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 201, core.applyDeliveryProgress(deliveryProgress[1], body));
   }
 
   const deliveryHelpNeeded = url.pathname.match(/^\/api\/deliveries\/([^/]+)\/help-needed$/);
   if (req.method === "POST" && deliveryHelpNeeded) {
     requireComputerAuth(core, req, deliveryHelpNeeded[1], "delivery");
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 200, core.applyDeliveryHelpNeeded(deliveryHelpNeeded[1], body));
   }
 
   const deliveryCancel = url.pathname.match(/^\/api\/deliveries\/([^/]+)\/cancel$/);
   if (req.method === "POST" && deliveryCancel) {
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 200, core.cancelDelivery(deliveryCancel[1], body?.reason));
   }
 
   if (req.method === "POST" && url.pathname === "/api/ingress/pairing-codes") {
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 201, core.createIngressPairing(body));
   }
 
   if (req.method === "POST" && url.pathname === "/api/ingress/pair") {
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 201, core.pairIngress(body));
   }
 
   if (req.method === "POST" && url.pathname === "/api/ingress/messages") {
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     const header = String(req.headers["x-iteam-ingress"] || "");
     const [policyId, token] = header.includes(":") ? header.split(/:(.*)/s).filter(Boolean) : [];
     return sendJson(res, 201, core.createIngressMessage({
@@ -409,12 +428,12 @@ async function route(
   }
 
   if (req.method === "POST" && url.pathname === "/api/external/bot-bindings") {
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 201, core.upsertExternalBotBinding(body));
   }
 
   if (req.method === "POST" && url.pathname === "/api/external/bot-configs") {
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     const saved = core.upsertExternalBotConfig(body);
     void Promise.resolve(staticConfig.externalBotRuntime?.sync(saved.provider)).catch(error => {
       console.error(`[http] external bot runtime sync failed for ${saved.provider}: ${(error as Error).message}`);
@@ -432,34 +451,34 @@ async function route(
   }
 
   if (req.method === "POST" && url.pathname === "/api/external/routed-messages") {
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 201, core.createExternalRoutedMessage(body));
   }
 
   if (req.method === "POST" && url.pathname === "/api/external/message-links/backfill") {
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 200, core.backfillExternalMessageLinks(body.rootMessageId));
   }
 
   if (req.method === "POST" && url.pathname === "/api/tasks") {
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 201, core.createTask(body));
   }
 
   const taskPatch = url.pathname.match(/^\/api\/tasks\/([^/]+)$/);
   if (req.method === "PATCH" && taskPatch) {
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 200, core.patchTask(taskPatch[1], body));
   }
 
   if (req.method === "POST" && url.pathname === "/api/scheduled-tasks") {
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 201, core.createScheduledTask(body));
   }
 
   const scheduledTask = url.pathname.match(/^\/api\/scheduled-tasks\/([^/]+)$/);
   if (scheduledTask && req.method === "PATCH") {
-    const body = await parseJsonBody<any>(req);
+    const body = await parseJsonBodyOrThrow<any>(req);
     return sendJson(res, 200, core.patchScheduledTask(scheduledTask[1], body));
   }
   if (scheduledTask && req.method === "DELETE") {
