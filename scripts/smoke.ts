@@ -13,7 +13,7 @@ import { detectRuntimes } from "../src/runtimes.js";
 import { deliveryAffinityIndex } from "../src/runtime/driver.js";
 import { renderAcpProfileArgs, resolveAcpRuntimeProfile } from "../src/runtime/acp-profiles.js";
 import { renderProfileArgs, resolveRuntimeProfile } from "../src/runtime/profiles.js";
-import { parseIteamCommand } from "../src/integrations/lark.js";
+import { parseIteamCommand, stripLarkBotMention } from "../src/integrations/lark.js";
 
 const execFileAsync = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -70,6 +70,16 @@ try {
   const larkBindCommand = parseIteamCommand("/iteam bind #all");
   if (larkBindCommand.kind !== "bind" || larkBindCommand.target !== "#all") {
     throw new Error("Lark /iteam bind command was not parsed");
+  }
+  const larkMentionedBindCommand = parseIteamCommand("@iteam /iteam bind #all");
+  if (larkMentionedBindCommand.kind !== "bind" || larkMentionedBindCommand.target !== "#all") {
+    throw new Error("Lark bot-mentioned /iteam bind command was not parsed");
+  }
+  const strippedBotMention = stripLarkBotMention("@_user_1 /iteam bind #all", [
+    { key: "@_user_1", name: "iteam", mentioned_type: "bot" }
+  ]);
+  if (strippedBotMention !== "/iteam bind #all" || parseIteamCommand(strippedBotMention).kind !== "bind") {
+    throw new Error("Lark bot mention key was not stripped before bind parsing");
   }
   const larkTaskCommand = parseIteamCommand("/task /all @codex 帮我看一下这个问题");
   if (larkTaskCommand.kind !== "task" || larkTaskCommand.target !== "#all" || larkTaskCommand.text !== "@codex 帮我看一下这个问题") {

@@ -4,6 +4,7 @@ import type { Agent, ExternalBotConfig, State, StoreEvent } from "../types.js";
 
 export interface LarkBotConfig {
   provider: string;
+  alias?: string | null;
   appId: string;
   appSecret: string;
   domain?: string;
@@ -87,7 +88,7 @@ export class LarkBotIntegration {
     const chatId = message.chat_id;
     const senderId = data.sender?.sender_id?.open_id || data.sender?.sender_id?.user_id || data.sender?.sender_id?.union_id || "unknown";
     const rawText = extractText(message.content || "", message.message_type || "");
-    const text = stripLarkBotMention(rawText, message.mentions || []);
+    const text = stripLarkBotMention(rawText, message.mentions || [], [this.config.alias]);
     if (!text) return;
 
     const parsed = parseIteamCommand(text);
@@ -189,6 +190,7 @@ export function readLarkBotConfig(env: NodeJS.ProcessEnv = process.env, stored?:
   const enabled = Boolean(appId && appSecret && isLikelyLarkAppId(appId) && enabledByEnv && (stored?.enabled ?? true));
   return {
     provider: stored?.provider || providerKeyForLarkApp(appId),
+    alias: stored?.alias || null,
     appId,
     appSecret,
     enabled,
@@ -206,7 +208,7 @@ export function providerKeyForLarkApp(appId: string): string {
 }
 
 export function parseIteamCommand(input: string): ParsedCommand {
-  const text = input.trim();
+  const text = stripKnownIteamBotPrefix(input.trim());
   if (!text) return { kind: "message", text: "" };
   const lowered = text.toLowerCase();
   if (lowered === "/iteam" || lowered === "/iteam help" || lowered === "help") return { kind: "help" };
@@ -240,14 +242,37 @@ function extractText(content: string, messageType: string): string {
   return content;
 }
 
-function stripLarkBotMention(text: string, mentions: Array<{ key?: string; name?: string; mentioned_type?: string }>): string {
+export function stripLarkBotMention(
+  text: string,
+  mentions: Array<{ key?: string; name?: string; mentioned_type?: string }>,
+  aliases: Array<string | null | undefined> = []
+): string {
   let out = text;
   for (const mention of mentions) {
-    if (mention.mentioned_type && mention.mentioned_type !== "app") continue;
+    if (!isBotMention(mention)) continue;
     if (mention.key) out = out.replaceAll(mention.key, "");
-    if (mention.name) out = out.replace(new RegExp(`^\\s*@?${escapeRegExp(mention.name)}\\s*`), "");
+    if (mention.name) out = stripLeadingMentionName(out, mention.name);
   }
-  return out.replace(/^\s*@iTeamBot\s*/i, "").trim();
+  return stripKnownIteamBotPrefix(out, aliases).trim();
+}
+
+function isBotMention(mention: { mentioned_type?: string }): boolean {
+  const type = String(mention.mentioned_type || "").trim().toLowerCase();
+  return !type || type === "app" || type === "bot" || type.includes("bot");
+}
+
+function stripKnownIteamBotPrefix(text: string, aliases: Array<string | null | undefined> = []): string {
+  let out = text;
+  for (const name of ["iTeamBot", "iteam", ...aliases]) {
+    out = stripLeadingMentionName(out, name);
+  }
+  return out.trim();
+}
+
+function stripLeadingMentionName(text: string, name: string | null | undefined): string {
+  const normalized = String(name || "").trim().replace(/^@+/, "");
+  if (!normalized) return text;
+  return text.replace(new RegExp(`^\\s*@${escapeRegExp(normalized)}(?:\\s+|$)`, "i"), "");
 }
 
 function parseLarkConversationId(value: string): { tenantKey: string; chatId: string } {
