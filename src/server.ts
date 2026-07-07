@@ -140,6 +140,14 @@ async function shutdown(reason: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`shutting down (${reason})`);
+  // Hard-exit safety net: if graceful shutdown stalls (usually a stuck HTTP
+  // connection or store close), bail out after 5s so Ctrl+C / kill still
+  // frees the port and lock.
+  const forceExit = setTimeout(() => {
+    console.error("shutdown timed out after 5s, forcing exit");
+    process.exit(1);
+  }, 5000);
+  forceExit.unref();
   try {
     larkRuntime.closeAll();
   } catch (error) {
@@ -156,11 +164,24 @@ async function shutdown(reason: string): Promise<void> {
     console.error(`store close error: ${(error as Error).message}`);
   }
   await lock.release();
+  clearTimeout(forceExit);
   process.exit(0);
 }
 
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
+// Second Ctrl+C / SIGTERM while a shutdown is already in progress: give up on
+// graceful shutdown and exit immediately.
+let signalCount = 0;
+function handleSignal(name: string): void {
+  signalCount += 1;
+  if (signalCount > 1) {
+    console.error(`received ${name} again, forcing exit`);
+    process.exit(1);
+  }
+  void shutdown(name);
+}
+
+process.on("SIGINT", () => handleSignal("SIGINT"));
+process.on("SIGTERM", () => handleSignal("SIGTERM"));
 
 function readArg(name: string, fallback?: string): string | undefined {
   const index = process.argv.indexOf(name);

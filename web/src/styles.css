@@ -316,6 +316,55 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
   letter-spacing: -0.015em;
 }
 
+/* ---- space switcher ---- */
+.space-switcher {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.space-switcher-label {
+  margin: 0;
+}
+.space-switcher-select {
+  position: relative;
+  display: block;
+}
+.space-switcher-select select {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  padding: 9px 34px 9px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--canvas);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: var(--sans);
+  letter-spacing: 0;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+}
+.space-switcher-select select:hover {
+  border-color: var(--muted);
+  background: var(--surface-soft);
+}
+.space-switcher-select select:focus-visible {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(204, 120, 92, 0.18);
+}
+.space-switcher-caret {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  transform: translateY(-50%);
+  color: var(--muted);
+  pointer-events: none;
+}
+.app.is-sidebar-collapsed .space-switcher { display: none; }
+
 .side-section-label {
   display: flex;
   justify-content: space-between;
@@ -1696,9 +1745,9 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(20, 20, 19, 0.42);
+  background: rgba(20, 20, 19, 0.55);
   backdrop-filter: blur(6px);
-  z-index: 60;
+  z-index: 2000;
   display: grid;
   place-items: center;
   padding: 24px;
@@ -2187,7 +2236,7 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
   border-radius: 4px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
   pointer-events: none;
-  z-index: 1000;
+  z-index: 40;
 }
 .tt-bubble::after {
   content: "";

@@ -13,7 +13,7 @@ import { detectRuntimes } from "../src/runtimes.js";
 import { deliveryAffinityIndex } from "../src/runtime/driver.js";
 import { renderAcpProfileArgs, resolveAcpRuntimeProfile } from "../src/runtime/acp-profiles.js";
 import { renderProfileArgs, resolveRuntimeProfile } from "../src/runtime/profiles.js";
-import { parseIteamCommand } from "../src/integrations/lark.js";
+import { parseIteamCommand, stripLarkBotMention } from "../src/integrations/lark.js";
 
 const execFileAsync = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -71,12 +71,59 @@ try {
   if (larkBindCommand.kind !== "bind" || larkBindCommand.target !== "#all") {
     throw new Error("Lark /iteam bind command was not parsed");
   }
+  const larkMentionedBindCommand = parseIteamCommand("@iteam /iteam bind #all");
+  if (larkMentionedBindCommand.kind !== "bind" || larkMentionedBindCommand.target !== "#all") {
+    throw new Error("Lark bot-mentioned /iteam bind command was not parsed");
+  }
+  const strippedBotMention = stripLarkBotMention("@_user_1 /iteam bind #all", [
+    { key: "@_user_1", name: "iteam", mentioned_type: "bot" }
+  ]);
+  if (strippedBotMention !== "/iteam bind #all" || parseIteamCommand(strippedBotMention).kind !== "bind") {
+    throw new Error("Lark bot mention key was not stripped before bind parsing");
+  }
   const larkTaskCommand = parseIteamCommand("/task /all @codex 帮我看一下这个问题");
   if (larkTaskCommand.kind !== "task" || larkTaskCommand.target !== "#all" || larkTaskCommand.text !== "@codex 帮我看一下这个问题") {
     throw new Error("Lark /task route command was not parsed");
   }
+  const bareAgentCommand = parseIteamCommand("codex: 帮我分析一下");
+  if (bareAgentCommand.kind !== "message" || bareAgentCommand.target || bareAgentCommand.agentHandle !== "codex" || bareAgentCommand.text !== "帮我分析一下") {
+    throw new Error("bare `handle:` prefix was not parsed as agent selector");
+  }
+  const bareAgentNoSpace = parseIteamCommand("aiden:hi");
+  if (bareAgentNoSpace.kind !== "message" || bareAgentNoSpace.target || bareAgentNoSpace.agentHandle !== "aiden" || bareAgentNoSpace.text !== "hi") {
+    throw new Error("`handle:` without a space after the colon should still route to the agent");
+  }
+  const channelAgentCommand = parseIteamCommand("/ops codex: 复现下这个 bug");
+  if (channelAgentCommand.kind !== "message" || channelAgentCommand.target !== "#ops" || channelAgentCommand.agentHandle !== "codex" || channelAgentCommand.text !== "复现下这个 bug") {
+    throw new Error("`/channel handle:` combo was not parsed");
+  }
+  const taskWithAgent = parseIteamCommand("/task codex: 记个待办");
+  if (taskWithAgent.kind !== "task" || taskWithAgent.agentHandle !== "codex" || taskWithAgent.text !== "记个待办") {
+    throw new Error("`/task handle:` combo was not parsed");
+  }
+  const bindWithAgent = parseIteamCommand("/iteam bind #all codex");
+  if (bindWithAgent.kind !== "bind" || bindWithAgent.target !== "#all" || bindWithAgent.agentHandle !== "codex") {
+    throw new Error("/iteam bind #all codex was not parsed with agent");
+  }
+  const bindWithoutAgent = parseIteamCommand("/iteam bind #all");
+  if (bindWithoutAgent.kind !== "bind" || bindWithoutAgent.target !== "#all" || bindWithoutAgent.agentHandle) {
+    throw new Error("/iteam bind #all should not attach an agent when none is given");
+  }
+  const linkText = parseIteamCommand("https://example.com/foo");
+  if (linkText.kind !== "message" || linkText.agentHandle || linkText.text !== "https://example.com/foo") {
+    throw new Error("plain URLs must not be treated as agent selectors");
+  }
+  const mailtoText = parseIteamCommand("mailto:a@b.com");
+  if (mailtoText.kind !== "message" || mailtoText.agentHandle || mailtoText.text !== "mailto:a@b.com") {
+    throw new Error("mailto links must not be treated as agent selectors");
+  }
+  const gitSchemeText = parseIteamCommand("git://example.com/repo.git");
+  if (gitSchemeText.kind !== "message" || gitSchemeText.agentHandle || gitSchemeText.text !== "git://example.com/repo.git") {
+    throw new Error("scheme://... URLs must not be treated as agent selectors");
+  }
   const affinityA = deliveryAffinityIndex({
     id: "delivery_a",
+    spaceId: "space_default",
     target: "#all:msg_task",
     messageId: "msg_task",
     rootMessageId: "msg_task",
@@ -91,6 +138,7 @@ try {
   }, 3);
   const affinityB = deliveryAffinityIndex({
     id: "delivery_b",
+    spaceId: "space_default",
     target: "#all:msg_task",
     messageId: "msg_followup",
     rootMessageId: "msg_task",
@@ -106,6 +154,7 @@ try {
   if (affinityA !== affinityB) throw new Error("same task thread must keep runtime session affinity");
   const affinitySessionA = deliveryAffinityIndex({
     id: "delivery_session_a",
+    spaceId: "space_default",
     target: "#all",
     messageId: "msg_a",
     rootMessageId: "msg_a",
@@ -121,6 +170,7 @@ try {
   }, 3);
   const affinitySessionB = deliveryAffinityIndex({
     id: "delivery_session_b",
+    spaceId: "space_default",
     target: "#random",
     messageId: "msg_b",
     rootMessageId: "msg_b",
@@ -138,9 +188,10 @@ try {
   const customProfile = resolveRuntimeProfile("custom");
   if (!customProfile) throw new Error("runtime profile file was not loaded");
   const renderedArgs = renderProfileArgs(customProfile, {
-    agent: { id: "agent_test", name: "Profile Agent", handle: "profile", description: "", runtime: "opencode", model: null, computerId: "computer_test", status: "online", desiredStatus: "running", launchId: null, pid: null, workspacePath: "", createdAt: "", updatedAt: "" },
+    agent: { id: "agent_test", spaceId: "space_default", name: "Profile Agent", handle: "profile", description: "", runtime: "opencode", model: null, computerId: "computer_test", status: "online", desiredStatus: "running", launchId: null, pid: null, workspacePath: "", createdAt: "", updatedAt: "" },
     delivery: {
       id: "delivery_profile",
+      spaceId: "space_default",
       target: "#all",
       messageId: "msg_profile",
       rootMessageId: "msg_profile",
@@ -163,7 +214,7 @@ try {
   const acpProfile = resolveAcpRuntimeProfile("hermes_test");
   if (!acpProfile) throw new Error("ACP runtime profile file was not loaded");
   const renderedAcpArgs = renderAcpProfileArgs(acpProfile, {
-    agent: { id: "agent_test", name: "ACP Agent", handle: "acp", description: "", runtime: "hermes_test", model: "test-model", computerId: "computer_test", status: "online", desiredStatus: "running", launchId: null, pid: null, workspacePath: "", createdAt: "", updatedAt: "" },
+    agent: { id: "agent_test", spaceId: "space_default", name: "ACP Agent", handle: "acp", description: "", runtime: "hermes_test", model: "test-model", computerId: "computer_test", status: "online", desiredStatus: "running", launchId: null, pid: null, workspacePath: "", createdAt: "", updatedAt: "" },
     workspace: {
       dir: "/workspace/acp",
       internal: "/workspace/acp/.iteam",
@@ -871,6 +922,8 @@ try {
     throw new Error("late delivery result should not overwrite cancelled status");
   }
 
+  await verifySpaceIsolation(port);
+
   console.log("smoke ok");
 } finally {
   daemon.kill("SIGTERM");
@@ -888,9 +941,72 @@ async function waitForHealth(port: number): Promise<void> {
   throw new Error("server did not start");
 }
 
+async function verifySpaceIsolation(port: number): Promise<void> {
+  const before = await get(port, "/api/spaces");
+  if (!Array.isArray(before) || !before.some((space: any) => space.id === "space_default")) {
+    throw new Error("default space is missing from GET /api/spaces");
+  }
+  const alpha = await post(port, "/api/spaces", { name: "Space Alpha" });
+  if (!alpha.id || alpha.slug !== "space-alpha") throw new Error("space alpha was not created");
+  const beta = await post(port, "/api/spaces", { name: "Space Beta" });
+  if (!beta.id || beta.slug !== "space-beta") throw new Error("space beta was not created");
+
+  // Legacy SQL schemas still enforce UNIQUE(target). Use distinct targets per
+  // space until the schema migrates to (space_id, target) uniqueness.
+  const alphaChannel = await post(port, "/api/channels", { name: "sales-alpha", spaceId: alpha.id });
+  const betaChannel = await post(port, "/api/channels", { name: "sales-beta", spaceId: beta.id });
+  if (alphaChannel.spaceId !== alpha.id || betaChannel.spaceId !== beta.id) {
+    throw new Error("channel spaceId not persisted");
+  }
+
+  const alphaAllChannels = await getWithSpace(port, "/api/channels", alpha.id);
+  const betaAllChannels = await getWithSpace(port, "/api/channels", beta.id);
+  if (alphaAllChannels.some((channel: any) => channel.id === betaChannel.id)) {
+    throw new Error("beta channel leaked into alpha listing");
+  }
+  if (betaAllChannels.some((channel: any) => channel.id === alphaChannel.id)) {
+    throw new Error("alpha channel leaked into beta listing");
+  }
+
+  const alphaMessage = await post(port, "/api/messages", {
+    spaceId: alpha.id,
+    target: alphaChannel.target,
+    text: "hello from alpha",
+    authorId: "human-local"
+  });
+  if (alphaMessage.spaceId !== alpha.id) throw new Error("message spaceId not stamped");
+  const betaMessages = await getWithSpace(port, `/api/messages?target=${encodeURIComponent(alphaChannel.target)}&limit=50`, beta.id);
+  if (betaMessages.some((message: any) => message.id === alphaMessage.id)) {
+    throw new Error("alpha message leaked into beta space");
+  }
+
+  const alphaState = await getWithSpace(port, "/api/state", alpha.id);
+  if (!alphaState.channels.some((channel: any) => channel.id === alphaChannel.id)) {
+    throw new Error("alpha /api/state missing alpha channel");
+  }
+  if (alphaState.channels.some((channel: any) => channel.spaceId === beta.id)) {
+    throw new Error("alpha /api/state leaked beta channels");
+  }
+  if (!Array.isArray(alphaState.spaces) || alphaState.spaces.length < 3) {
+    throw new Error("alpha /api/state must include the global spaces list");
+  }
+
+  const badChannel = await postStatus(port, "/api/channels", { name: "junk", spaceId: "space_missing" });
+  if (badChannel < 400) throw new Error("unknown spaceId must reject with 4xx");
+}
+
+async function getWithSpace(port: number, path: string, spaceId: string): Promise<any> {
+  const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+    headers: { "X-Iteam-Space": spaceId }
+  });
+  if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`);
+  return res.json();
+}
+
 async function verifyAcpDriverWithFakeRuntime(home: string, runtime = "fake_acp"): Promise<void> {
   const agent: Agent = {
     id: `agent_${runtime}`,
+    spaceId: "space_default",
     name: "Fake ACP",
     handle: "fake-acp",
     description: "",

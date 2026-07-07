@@ -85,12 +85,13 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
   {
     name: "iteam_channels",
     ddl: `CREATE TABLE IF NOT EXISTS iteam_channels (
-      id          VARCHAR(64)  NOT NULL PRIMARY KEY,
-      name        VARCHAR(255) NOT NULL,
-      target      VARCHAR(255) NOT NULL,
-      kind        VARCHAR(32)  NOT NULL,
-      description TEXT,
-      created_at  VARCHAR(40)  NOT NULL,
+      id                VARCHAR(64)  NOT NULL PRIMARY KEY,
+      name              VARCHAR(255) NOT NULL,
+      target            VARCHAR(255) NOT NULL,
+      kind              VARCHAR(32)  NOT NULL,
+      description       TEXT,
+      default_agent_id  VARCHAR(64)  DEFAULT NULL,
+      created_at        VARCHAR(40)  NOT NULL,
       UNIQUE KEY uniq_target (target)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
   },

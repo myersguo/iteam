@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -63,6 +64,7 @@ interface Channel {
   kind?: string;
   description?: string;
   memberIds?: string[];
+  defaultAgentId?: string | null;
   messageCount?: number;
 }
 
@@ -154,6 +156,13 @@ interface ExternalBotBinding {
   status: string;
 }
 
+interface Space {
+  id: string;
+  name: string;
+  slug: string;
+  description?: string;
+}
+
 interface AppState {
   humans: Human[];
   agents: Agent[];
@@ -165,6 +174,7 @@ interface AppState {
   externalBotConfigs: ExternalBotConfig[];
   externalBotBindings: ExternalBotBinding[];
   events: unknown[];
+  spaces: Space[];
 }
 
 interface ConnectInvite {
@@ -203,37 +213,49 @@ const api = {
     if (filter.createdBy) params.set("createdBy", filter.createdBy);
     if (filter.q) params.set("q", filter.q);
     const qs = params.toString();
-    return fetch(`/api/tasks${qs ? `?${qs}` : ""}`).then(r => r.json());
+    return apiFetch(`/api/tasks${qs ? `?${qs}` : ""}`).then(r => r.json());
   },
   async fetchMessages(channelTarget: string, before?: string, limit = 10): Promise<Message[]> {
     const selectedChannel = resolveChannel(
-      await fetch("/api/channels").then(r => r.json()),
+      await apiFetch("/api/channels").then(r => r.json()),
       channelTarget
     );
     if (!selectedChannel) return [];
     const params = new URLSearchParams({ limit: String(limit) });
     if (before) params.set("before", before);
-    return fetch(`/api/messages/channel/${encodeURIComponent(selectedChannel.id)}?${params}`).then(r => r.json());
+    return apiFetch(`/api/messages/channel/${encodeURIComponent(selectedChannel.id)}?${params}`).then(r => r.json());
   },
   async getState(channelTarget = "#all"): Promise<AppState> {
+    // If the currently-active space is unknown to the backend (typical when a
+    // shared URL references a space that has since been deleted), fall back
+    // to the default space instead of surfacing a page-wide error.
+    const spaces = await apiFetch("/api/spaces").then(r => r.json()).catch(() => [] as Space[]);
+    const currentSpaceId = getActiveSpaceId();
+    const known = (spaces as Space[]).find(space => space.id === currentSpaceId || space.slug === currentSpaceId);
+    if (!known && currentSpaceId !== "space_default") {
+      setActiveSpaceId("space_default");
+    } else if (known && known.id !== currentSpaceId) {
+      setActiveSpaceId(known.id);
+    }
+
     const [humans, agents, channels, tasks, scheduledTasks, computers, externalBotConfigs, externalBotBindings] = await Promise.all([
-      fetch("/api/humans").then(r => r.json()),
-      fetch("/api/agents").then(r => r.json()),
-      fetch("/api/channels").then(r => r.json()),
+      apiFetch("/api/humans").then(r => r.json()),
+      apiFetch("/api/agents").then(r => r.json()),
+      apiFetch("/api/channels").then(r => r.json()),
       api.fetchTasks(),
-      fetch("/api/scheduled-tasks").then(r => r.json()),
-      fetch("/api/computers").then(r => r.json()),
-      fetch("/api/external/bot-configs").then(r => r.json()),
-      fetch("/api/external/bot-bindings").then(r => r.json())
+      apiFetch("/api/scheduled-tasks").then(r => r.json()),
+      apiFetch("/api/computers").then(r => r.json()),
+      apiFetch("/api/external/bot-configs").then(r => r.json()),
+      apiFetch("/api/external/bot-bindings").then(r => r.json())
     ]);
     const selectedChannel = resolveChannel(channels, channelTarget);
     const messages = selectedChannel
-      ? await fetch(`/api/messages/channel/${encodeURIComponent(selectedChannel.id)}?limit=10`).then(r => r.json())
+      ? await apiFetch(`/api/messages/channel/${encodeURIComponent(selectedChannel.id)}?limit=10`).then(r => r.json())
       : [];
-    return { humans, agents, channels, messages, tasks, scheduledTasks, computers, externalBotConfigs, externalBotBindings, events: [] };
+    return { humans, agents, channels, messages, tasks, scheduledTasks, computers, externalBotConfigs, externalBotBindings, events: [], spaces };
   },
   async post<T = any>(path: string, body: Record<string, unknown> = {}): Promise<T> {
-    const res = await fetch(path, {
+    const res = await apiFetch(path, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body)
@@ -242,7 +264,7 @@ const api = {
     return res.json();
   },
   async patch<T = any>(path: string, body: Record<string, unknown> = {}): Promise<T> {
-    const res = await fetch(path, {
+    const res = await apiFetch(path, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body)
@@ -251,17 +273,208 @@ const api = {
     return res.json();
   },
   async del<T = any>(path: string): Promise<T> {
-    const res = await fetch(path, { method: "DELETE" });
+    const res = await apiFetch(path, { method: "DELETE" });
     if (!res.ok) throw new Error((await res.json()).error);
     return res.json();
   }
 };
 
+/**
+ * Space-aware fetch. Injects the currently selected space as `X-Iteam-Space`
+ * so every server call is naturally scoped without threading spaceId through
+ * every component.
+ */
+export function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const spaceId = getActiveSpaceId();
+  const headers = new Headers(init?.headers);
+  if (spaceId && !headers.has("X-Iteam-Space")) headers.set("X-Iteam-Space", spaceId);
+  return fetch(input, { ...init, headers });
+}
+
+export function getActiveSpaceId(): string {
+  try {
+    return localStorage.getItem("iteam.spaceId") || "space_default";
+  } catch {
+    return "space_default";
+  }
+}
+
+export function setActiveSpaceId(spaceId: string): void {
+  try { localStorage.setItem("iteam.spaceId", spaceId || "space_default"); } catch {}
+}
+
+/**
+ * Read the active space id at page load. URL wins over localStorage so a
+ * shared link like `/growth/channel/all` lands on the right space even on a
+ * fresh browser. Slugs unknown at this point (before the spaces list loads)
+ * are kept as-is so we can resolve them later once the state arrives.
+ */
+function resolveInitialSpaceId(slug: string | null | undefined): string {
+  const value = String(slug || "").trim();
+  if (!value) return getActiveSpaceId();
+  // The URL slug may be either a space slug (`growth`) or a raw id
+  // (`space_abc`). We store the raw string here; the effect that watches the
+  // loaded spaces list resolves it to the canonical id.
+  return value;
+}
+
 // ---------- root ----------
+
+function SpaceSwitcher({
+  spaces,
+  currentSpaceId,
+  onSelect,
+  onCreated
+}: {
+  spaces: Space[];
+  currentSpaceId: string;
+  onSelect: (spaceId: string) => void;
+  onCreated: (space: Space) => void;
+}) {
+  const [createOpen, setCreateOpen] = useState(false);
+  const items = spaces.length ? spaces : [{ id: "space_default", name: "Default", slug: "default" }];
+  const currentSpace = items.find(space => space.id === currentSpaceId) || items[0];
+
+  function handleSelect(spaceId: string) {
+    if (spaceId === "__new__") {
+      setCreateOpen(true);
+      return;
+    }
+    if (spaceId === "__divider__") return;
+    onSelect(spaceId);
+  }
+
+  async function handleCreate(name: string, description: string) {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    try {
+      const space = await api.post<Space>("/api/spaces", { name: trimmed, description: description.trim() });
+      setCreateOpen(false);
+      onCreated(space);
+    } catch (error) {
+      window.alert(`Failed to create space: ${(error as Error).message}`);
+    }
+  }
+
+  return (
+    <>
+      <div className="space-switcher">
+        <span className="eyebrow space-switcher-label">Space</span>
+        <div className="space-switcher-select">
+          <select
+            id="iteam-space-select"
+            value={currentSpace?.id || "space_default"}
+            onChange={event => handleSelect(event.target.value)}
+            aria-label="Active space"
+            title={currentSpace?.description || currentSpace?.name}
+          >
+            {items.map(space => (
+              <option key={space.id} value={space.id}>{space.name}</option>
+            ))}
+            <option disabled value="__divider__">──────────</option>
+            <option value="__new__">+ New space…</option>
+          </select>
+          <ChevronDown size={14} className="space-switcher-caret" aria-hidden />
+        </div>
+      </div>
+      {createOpen && (
+        <CreateSpaceModal
+          onCancel={() => setCreateOpen(false)}
+          onSubmit={handleCreate}
+        />
+      )}
+    </>
+  );
+}
+
+function CreateSpaceModal({
+  onCancel,
+  onSubmit
+}: {
+  onCancel: () => void;
+  onSubmit: (name: string, description: string) => void | Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    function handleKey(event: KeyboardEvent) {
+      if (event.key === "Escape") onCancel();
+    }
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [onCancel]);
+
+  async function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!name.trim() || submitting) return;
+    setSubmitting(true);
+    try {
+      await onSubmit(name, description);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return createPortal(
+    <div className="modal-backdrop" onMouseDown={event => event.target === event.currentTarget && onCancel()}>
+      <form className="modal" onSubmit={handleSubmit}>
+        <button
+          type="button"
+          className="modal-close"
+          onClick={onCancel}
+          aria-label="Close"
+        >
+          <X size={16} />
+        </button>
+        <p className="eyebrow">Workspace · Space</p>
+        <h1>Create a new space</h1>
+        <p className="modal-lede">
+          Spaces isolate channels, agents, computers, schedules, and bot bindings so different
+          teams or businesses can share one iTeam without leaking context.
+        </p>
+        <label className="field">
+          <span>Name<em>required</em></span>
+          <input
+            ref={inputRef}
+            value={name}
+            placeholder="e.g. Growth, Platform, Fizzo"
+            onChange={event => setName(event.target.value)}
+            maxLength={80}
+          />
+        </label>
+        <label className="field">
+          <span>Description<small>optional</small></span>
+          <textarea
+            value={description}
+            placeholder="What lives in this space?"
+            onChange={event => setDescription(event.target.value)}
+            maxLength={240}
+          />
+        </label>
+        <div className="modal-actions">
+          <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={submitting}>
+            Cancel
+          </button>
+          <button type="submit" className="btn btn-primary" disabled={!name.trim() || submitting}>
+            {submitting ? "Creating…" : "Create space"}
+          </button>
+        </div>
+      </form>
+    </div>,
+    document.body
+  );
+}
 
 function App() {
   const [state, setState] = useState<AppState | null>(null);
   const initialRoute = useMemo(() => parseLocation(window.location), []);
+  const [activeSpaceId, setActiveSpaceIdState] = useState<string>(() =>
+    resolveInitialSpaceId(initialRoute.spaceSlug)
+  );
   const [section, setSection] = useState<SectionId>(initialRoute.section);
   const [channel, setChannel] = useState(initialRoute.channel);
   const [chatTab, setChatTab] = useState<"chat" | "tasks">(initialRoute.chatTab);
@@ -326,17 +539,40 @@ function App() {
   // ---- URL routing ----
   const setThreadRootId = (id: string | null) => setThreadRootIdState(id);
 
+  // Persist active space to localStorage so `apiFetch` (which reads it
+  // synchronously via getActiveSpaceId) always sends the current header.
+  useEffect(() => {
+    setActiveSpaceId(activeSpaceId);
+  }, [activeSpaceId]);
+
+  // Once spaces load, resolve any pending slug/id from the URL to the canonical
+  // space id. If the URL points at a space that doesn't exist any more, fall
+  // back to the default space instead of leaving the user with a permanent
+  // "space not found" backend error.
+  useEffect(() => {
+    if (!state) return;
+    const spaces = state.spaces || [];
+    if (!spaces.length) return;
+    const known = spaces.find(space => space.id === activeSpaceId || space.slug === activeSpaceId);
+    if (!known) {
+      setActiveSpaceIdState("space_default");
+      return;
+    }
+    if (known.id !== activeSpaceId) setActiveSpaceIdState(known.id);
+  }, [state?.spaces, activeSpaceId]);
+
   // sync state -> URL
   useEffect(() => {
     if (!state) return;
+    const spaceSlug = spaceIdToSlug(activeSpaceId, state.spaces || []);
     const next = buildPath(
-      { section, channel, chatTab, agentId: selectedAgentId, computerId: selectedComputerId, threadId: threadRootId },
+      { section, channel, chatTab, agentId: selectedAgentId, computerId: selectedComputerId, threadId: threadRootId, spaceSlug },
       state
     );
     if (next !== window.location.pathname + window.location.search) {
       window.history.replaceState(null, "", next);
     }
-  }, [section, channel, chatTab, selectedAgentId, selectedComputerId, threadRootId, state]);
+  }, [section, channel, chatTab, selectedAgentId, selectedComputerId, threadRootId, state, activeSpaceId]);
 
   // sync URL -> state on popstate (back/forward)
   useEffect(() => {
@@ -348,10 +584,36 @@ function App() {
       if (route.agentId) setSelectedAgentId(route.agentId);
       if (route.computerId) setSelectedComputerId(route.computerId);
       setThreadRootIdState(route.threadId);
+      if (route.spaceSlug) setActiveSpaceIdState(route.spaceSlug);
     }
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
+
+  /**
+   * Change the active space and pull a fresh snapshot for it. Optionally
+   * navigate back to `#all` when we know cross-space links wouldn't resolve
+   * (e.g. right after creating a new empty space).
+   */
+  async function switchSpace(spaceId: string, options: { navigateHome?: boolean; spaces?: Space[] } = {}) {
+    setActiveSpaceIdState(spaceId);
+    setActiveSpaceId(spaceId);
+    if (options.navigateHome) {
+      setSection("chat");
+      setChannel("#all");
+      setChatTab("chat");
+      setSelectedAgentId(null);
+      setSelectedComputerId(null);
+      setThreadRootIdState(null);
+    }
+    // Optimistically merge any known spaces (e.g. the one just created) into
+    // the current state so the sidebar and URL update before the refetch
+    // returns.
+    if (options.spaces && state) {
+      setState({ ...state, spaces: options.spaces });
+    }
+    await refresh(options.navigateHome ? "#all" : channel);
+  }
 
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -434,7 +696,7 @@ function App() {
   }
 
   async function loadThreadMessages(target: string) {
-    const messages = await fetch(`/api/messages?target=${encodeURIComponent(target)}&limit=50`).then(r => r.json());
+    const messages = await apiFetch(`/api/messages?target=${encodeURIComponent(target)}&limit=50`).then(r => r.json());
     setThreadMessages(messages);
   }
 
@@ -449,7 +711,7 @@ function App() {
       return;
     }
     let alive = true;
-    fetch(`/api/messages?target=${encodeURIComponent(threadTarget)}&limit=50`)
+    apiFetch(`/api/messages?target=${encodeURIComponent(threadTarget)}&limit=50`)
       .then(r => r.json())
       .then(messages => {
         if (alive) setThreadMessages(messages);
@@ -559,6 +821,16 @@ function App() {
     refresh();
   }
 
+  async function deleteAgent(agent: Agent) {
+    if (!window.confirm(`Delete ${agent.name}? This stops the runtime and removes its direct message channel.`)) return;
+    const nextChannel = channel === `dm:${agent.id}` ? "#all" : channel;
+    await api.del(`/api/agents/${encodeURIComponent(agent.id)}`);
+    if (selectedAgentId === agent.id) setSelectedAgentId(null);
+    if (scheduledAgentId === agent.id) setScheduledAgentId("");
+    if (nextChannel !== channel) setChannel(nextChannel);
+    refresh(nextChannel);
+  }
+
   async function updateAgent(agentId: string, patch: { name?: string; description?: string; model?: string | null }) {
     await api.patch(`/api/agents/${agentId}`, patch);
     refresh();
@@ -570,7 +842,7 @@ function App() {
     refresh();
   }
 
-  async function createChannel(body: { name: string; description?: string }) {
+  async function createChannel(body: { name: string; description?: string; defaultAgentId?: string | null }) {
     const created = await api.post<Channel>("/api/channels", body);
     setChannel(created.target);
     setSection("chat");
@@ -578,7 +850,7 @@ function App() {
     refresh(created.target);
   }
 
-  async function updateChannel(channelId: string, body: { name?: string; description?: string }) {
+  async function updateChannel(channelId: string, body: { name?: string; description?: string; defaultAgentId?: string | null }) {
     const updated = await api.patch<Channel>(`/api/channels/${encodeURIComponent(channelId)}`, body);
     setChannel(updated.target);
     setRenameChannel(null);
@@ -667,6 +939,12 @@ function App() {
         <header className="sidebar-head">
           <p className="eyebrow">Workspace</p>
           <h2>{titleFor(section)}</h2>
+          <SpaceSwitcher
+            spaces={state.spaces || []}
+            currentSpaceId={activeSpaceId}
+            onSelect={switchSpace}
+            onCreated={space => switchSpace(space.id, { navigateHome: true, spaces: [...(state.spaces || []), space] })}
+          />
         </header>
         {(section === "chat" || section === "tasks") && (
           <ChatSidebar
@@ -764,6 +1042,7 @@ function App() {
             openCreateAgent={() => setCreateAgentOpen(true)}
             openAgentDm={openAgentDm}
             updateAgent={updateAgent}
+            deleteAgent={deleteAgent}
             refresh={refresh}
           />
         )}
@@ -821,6 +1100,7 @@ function App() {
       )}
       {createChannelOpen && (
         <CreateChannelModal
+          agents={state.agents || []}
           onCreate={createChannel}
           onClose={() => setCreateChannelOpen(false)}
         />
@@ -828,6 +1108,7 @@ function App() {
       {renameChannel && (
         <RenameChannelModal
           channel={renameChannel}
+          agents={state.agents || []}
           onRename={updateChannel}
           onClose={() => setRenameChannel(null)}
         />
@@ -2374,14 +2655,17 @@ function EditScheduledTaskModal({
 }
 
 function CreateChannelModal({
+  agents,
   onCreate,
   onClose
 }: {
-  onCreate: (body: { name: string; description?: string }) => Promise<void> | void;
+  agents: Agent[];
+  onCreate: (body: { name: string; description?: string; defaultAgentId?: string | null }) => Promise<void> | void;
   onClose: () => void;
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [defaultAgentId, setDefaultAgentId] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const valid = !!name.trim();
@@ -2391,7 +2675,7 @@ function CreateChannelModal({
     setBusy(true);
     setError("");
     try {
-      await onCreate({ name, description });
+      await onCreate({ name, description, defaultAgentId: defaultAgentId || null });
     } catch (err) {
       setError((err as Error).message || "Failed to create channel");
       setBusy(false);
@@ -2438,6 +2722,17 @@ function CreateChannelModal({
             placeholder="Optional context for this channel..."
           />
         </label>
+        <label className="field">
+          <span>
+            Default agent <small>optional — handles untagged messages</small>
+          </span>
+          <select value={defaultAgentId} onChange={e => setDefaultAgentId(e.target.value)}>
+            <option value="">— none —</option>
+            {agents.map(agent => (
+              <option key={agent.id} value={agent.id}>{agent.name} @{agent.handle}</option>
+            ))}
+          </select>
+        </label>
         <footer className="modal-actions">
           <button className="btn btn-ghost" onClick={onClose}>
             Cancel
@@ -2459,6 +2754,7 @@ function MembersView({
   openCreateAgent,
   openAgentDm,
   updateAgent,
+  deleteAgent,
   refresh
 }: {
   state: AppState;
@@ -2466,6 +2762,7 @@ function MembersView({
   openCreateAgent: () => void;
   openAgentDm: (agent: Agent) => void;
   updateAgent: (agentId: string, patch: { name?: string; description?: string; model?: string | null }) => Promise<void>;
+  deleteAgent: (agent: Agent) => Promise<void>;
   refresh: () => void;
 }) {
   const [renameValue, setRenameValue] = useState("");
@@ -2650,6 +2947,9 @@ function MembersView({
                 <button className="btn btn-secondary-on-dark" onClick={() => toggle(selectedAgent)}>
                   {isAgentStopped(selectedAgent) ? <Play size={14} /> : <Square size={14} />}
                   {isAgentStopped(selectedAgent) ? " Start agent" : " Stop agent"}
+                </button>
+                <button className="btn btn-danger-on-dark" onClick={() => deleteAgent(selectedAgent)}>
+                  <Trash2 size={14} /> Delete
                 </button>
               </div>
             </>
@@ -3147,25 +3447,35 @@ function CreateAgentModal({
 
 function RenameChannelModal({
   channel,
+  agents,
   onRename,
   onClose
 }: {
   channel: Channel;
-  onRename: (channelId: string, body: { name?: string; description?: string }) => Promise<void> | void;
+  agents: Agent[];
+  onRename: (channelId: string, body: { name?: string; description?: string; defaultAgentId?: string | null }) => Promise<void> | void;
   onClose: () => void;
 }) {
   const [name, setName] = useState(channel.name);
   const [description, setDescription] = useState(channel.description || "");
+  const [defaultAgentId, setDefaultAgentId] = useState<string>(channel.defaultAgentId || "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const valid = !!name.trim();
+  const isDm = channel.kind === "dm";
 
   async function submit() {
     if (!valid || busy) return;
     setBusy(true);
     setError("");
     try {
-      await onRename(channel.id, { name, description });
+      await onRename(channel.id, {
+        name,
+        description,
+        // Persist the user's choice: empty select = clear (null); otherwise the
+        // selected agent id.
+        ...(isDm ? {} : { defaultAgentId: defaultAgentId || null })
+      });
     } catch (err) {
       setError((err as Error).message || "Failed to rename channel");
       setBusy(false);
@@ -3207,6 +3517,19 @@ function RenameChannelModal({
           <span>Description</span>
           <textarea value={description} onChange={e => setDescription(e.target.value)} />
         </label>
+        {!isDm && (
+          <label className="field">
+            <span>
+              Default agent <small>optional — handles untagged messages</small>
+            </span>
+            <select value={defaultAgentId} onChange={e => setDefaultAgentId(e.target.value)}>
+              <option value="">— none —</option>
+              {agents.map(agent => (
+                <option key={agent.id} value={agent.id}>{agent.name} @{agent.handle}</option>
+              ))}
+            </select>
+          </label>
+        )}
         <footer className="modal-actions">
           <button className="btn btn-ghost" onClick={onClose}>
             Cancel
@@ -3574,6 +3897,7 @@ interface RouteState {
   agentId: string | null;
   computerId: string | null;
   threadId: string | null;
+  spaceSlug: string | null;
 }
 
 function parseLocation(loc: Location | { pathname: string; search: string }): RouteState {
@@ -3586,10 +3910,21 @@ function parseLocation(loc: Location | { pathname: string; search: string }): Ro
     chatTab: "chat",
     agentId: null,
     computerId: null,
-    threadId: threadId || null
+    threadId: threadId || null,
+    spaceSlug: null
   };
   if (segments.length === 0) return route;
-  const [head, ...rest] = segments;
+  let head = segments[0];
+  let rest = segments.slice(1);
+  // Allow an optional leading space slug: /:space/<section>/... . If the first
+  // segment matches a known section keyword we treat it as legacy (default
+  // space) so old bookmarks keep working; otherwise it is a space slug.
+  if (!isSectionSegment(head)) {
+    route.spaceSlug = head;
+    head = rest[0] || "";
+    rest = rest.slice(1);
+    if (!head) return route;
+  }
   switch (head) {
     case "channel": {
       route.section = "chat";
@@ -3639,11 +3974,27 @@ function parseLocation(loc: Location | { pathname: string; search: string }): Ro
   }
 }
 
+const SECTION_SEGMENTS = new Set([
+  "channel", "dm", "tasks", "task", "agents", "agent",
+  "computers", "computer", "scheduled", "bots", "integrations"
+]);
+function isSectionSegment(value: string): boolean {
+  return SECTION_SEGMENTS.has(value);
+}
+
 function buildPath(
-  route: { section: SectionId; channel: string; chatTab: "chat" | "tasks"; agentId: string | null; computerId: string | null; threadId: string | null },
+  route: {
+    section: SectionId;
+    channel: string;
+    chatTab: "chat" | "tasks";
+    agentId: string | null;
+    computerId: string | null;
+    threadId: string | null;
+    spaceSlug?: string | null;
+  },
   state: AppState
 ): string {
-  let path = "/";
+  let path = "";
   if (route.section === "tasks") {
     path = "/tasks";
   } else if (route.section === "chat") {
@@ -3668,10 +4019,32 @@ function buildPath(
   } else if (route.section === "integrations") {
     path = "/bots";
   }
+  const slug = normalizeSpaceSlugForPath(route.spaceSlug);
+  if (slug) path = `/${encodeURIComponent(slug)}${path || "/"}`;
+  else if (!path) path = "/";
   const params = new URLSearchParams();
   if (route.threadId) params.set("thread", route.threadId);
   const qs = params.toString();
   return qs ? `${path}?${qs}` : path;
+}
+
+/**
+ * Return the slug that should appear in the URL. The default space is
+ * omitted so `/channel/all` continues to point to it. Other slugs are used
+ * as-is; if a caller only knows the space id and we can't map it back to a
+ * slug, we still prepend the id so the URL round-trips.
+ */
+function normalizeSpaceSlugForPath(slug: string | null | undefined): string | null {
+  const value = String(slug || "").trim();
+  if (!value) return null;
+  if (value === "default" || value === "space_default") return null;
+  return value;
+}
+
+function spaceIdToSlug(spaceId: string, spaces: Space[]): string | null {
+  if (!spaceId || spaceId === "space_default") return null;
+  const match = spaces.find(space => space.id === spaceId);
+  return match ? match.slug : spaceId;
 }
 
 

@@ -38,8 +38,18 @@ export interface Human {
   role?: string;
 }
 
+export interface Space {
+  id: string;
+  name: string;
+  slug: string;
+  description?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Agent {
   id: string;
+  spaceId: string;
   name: string;
   handle: string;
   description: string;
@@ -61,6 +71,7 @@ export interface Agent {
 
 export interface Computer {
   id: string;
+  spaceId: string;
   name: string;
   fingerprint: Fingerprint;
   status: string;
@@ -84,6 +95,7 @@ export interface Computer {
 
 export interface PendingComputerConnection {
   id: string;
+  spaceId: string;
   token: string;
   status: "waiting" | "connected" | string;
   createdAt: string;
@@ -94,11 +106,17 @@ export interface PendingComputerConnection {
 
 export interface Channel {
   id: string;
+  spaceId: string;
   name: string;
   target: string;
   kind: string;
   description: string;
   memberIds: string[];
+  /**
+   * Agent that fields messages when no explicit handle/mention is provided.
+   * Falls through to space-level heuristics when null.
+   */
+  defaultAgentId?: string | null;
   createdAt: string;
 }
 
@@ -113,6 +131,7 @@ export type MessageType = "human" | "agent" | "task" | "system" | string;
 
 export interface Message {
   id: string;
+  spaceId: string;
   target: string;
   authorId: string;
   type: MessageType;
@@ -142,6 +161,7 @@ export interface DeliveryLifecycleRecord {
 
 export interface Task {
   id: string;
+  spaceId: string;
   number: number;
   target: string;
   title: string;
@@ -159,6 +179,7 @@ export type ScheduledTaskStatus = "active" | "paused" | string;
 
 export interface ScheduledTask {
   id: string;
+  spaceId: string;
   target: string;
   agentId: string;
   prompt: string;
@@ -178,6 +199,7 @@ export interface ScheduledTask {
 
 export interface Delivery {
   id: string;
+  spaceId: string;
   messageId: string;
   rootMessageId: string;
   parentDeliveryId: string | null;
@@ -197,6 +219,7 @@ export interface Delivery {
 
 export interface ExternalIngressPairing {
   id: string;
+  spaceId: string;
   pairCode: string;
   target: string;
   agentId: string;
@@ -211,6 +234,7 @@ export interface ExternalIngressPairing {
 
 export interface ExternalIngressPolicy {
   id: string;
+  spaceId: string;
   token: string;
   source: string;
   target: string;
@@ -223,6 +247,7 @@ export interface ExternalIngressPolicy {
 
 export interface ExternalBotBinding {
   id: string;
+  spaceId: string;
   provider: string;
   tenantKey: string;
   chatId: string;
@@ -235,6 +260,7 @@ export interface ExternalBotBinding {
 }
 
 export interface ExternalBotConfig {
+  spaceId: string;
   provider: string;
   alias?: string | null;
   appId: string;
@@ -250,6 +276,7 @@ export interface ExternalBotConfig {
 
 export interface ExternalMessageLink {
   id: string;
+  spaceId: string;
   provider: string;
   externalConversationId: string;
   externalMessageId?: string | null;
@@ -274,6 +301,7 @@ export interface StoreMeta {
 
 export interface State {
   meta: StoreMeta;
+  spaces: Space[];
   computers: Computer[];
   pendingComputerConnections: PendingComputerConnection[];
   humans: Human[];

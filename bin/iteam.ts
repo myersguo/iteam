@@ -27,6 +27,7 @@ Usage:
   iteam agent list
   iteam agent start <agent-id>
   iteam agent stop <agent-id>
+  iteam agent delete <agent-id>
   iteam channel list
   iteam message send <#channel> <message...>
   iteam message read <#channel>
@@ -151,6 +152,13 @@ async function main(): Promise<void> {
     const id = rest[0];
     if (!id) throw new Error("agent id is required");
     console.log(JSON.stringify(await requestJson(`${baseUrl}/api/agents/${id}/${action}`, { method: "POST" }), null, 2));
+    return;
+  }
+
+  if (area === "agent" && action === "delete") {
+    const id = rest[0];
+    if (!id) throw new Error("agent id is required");
+    console.log(JSON.stringify(await requestJson(`${baseUrl}/api/agents/${id}`, { method: "DELETE" }), null, 2));
     return;
   }
 
