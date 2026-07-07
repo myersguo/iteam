@@ -4,6 +4,7 @@ import type { Agent, ExternalBotConfig, State, StoreEvent } from "../types.js";
 
 export interface LarkBotConfig {
   provider: string;
+  spaceId: string;
   alias?: string | null;
   appId: string;
   appSecret: string;
@@ -67,10 +68,10 @@ export class LarkBotIntegration {
     });
     try {
       await this.wsClient.start({ eventDispatcher: dispatcher });
-      this.core.updateExternalBotStatus(this.config.provider, "connected", null);
-      console.log("[lark] long-connection event client started");
+      this.core.updateExternalBotStatus(this.config.provider, "connected", null, this.config.spaceId);
+      console.log(`[lark] long-connection event client started (${this.config.provider}@${this.config.spaceId})`);
     } catch (error) {
-      this.core.updateExternalBotStatus(this.config.provider, "error", (error as Error).message);
+      this.core.updateExternalBotStatus(this.config.provider, "error", (error as Error).message, this.config.spaceId);
       throw error;
     }
   }
@@ -124,6 +125,7 @@ export class LarkBotIntegration {
       }
       const binding = this.core.upsertExternalBotBinding({
         provider: this.config.provider,
+        spaceId: this.config.spaceId,
         tenantKey,
         chatId,
         chatType: message.chat_type || null,
@@ -131,14 +133,14 @@ export class LarkBotIntegration {
         ...(defaultAgentId !== undefined ? { defaultAgentId } : {})
       });
       const agentLabel = binding.defaultAgentId
-        ? `，默认 agent \`${this.core.listAgents().find(a => a.id === binding.defaultAgentId)?.handle || binding.defaultAgentId}\``
+        ? `，默认 agent \`${this.core.listAgents(this.config.spaceId).find(a => a.id === binding.defaultAgentId)?.handle || binding.defaultAgentId}\``
         : "";
       await this.sendText(chatId, `已绑定当前飞书会话到 iTeam ${binding.defaultTarget}${agentLabel}。之后无需前缀直接发消息即可，或用 \`codex: ...\` 指定 agent。`);
       return;
     }
 
     if (parsed.kind === "current") {
-      const binding = this.core.listExternalBotBindings().find(item =>
+      const binding = this.core.listExternalBotBindings(this.config.spaceId).find(item =>
         item.provider === this.config.provider && item.tenantKey === tenantKey && item.chatId === chatId && item.status === "active"
       );
       await this.sendText(chatId, binding?.defaultTarget
@@ -160,6 +162,7 @@ export class LarkBotIntegration {
 
     const result = this.core.createExternalRoutedMessage({
       provider: this.config.provider,
+      spaceId: this.config.spaceId,
       tenantKey,
       chatId,
       chatType: message.chat_type || null,
@@ -176,13 +179,14 @@ export class LarkBotIntegration {
   }
 
   /**
-   * Look up an agent id by its handle (case-insensitive). Uses the current
-   * store snapshot so handle changes don't need a bot restart.
+   * Look up an agent id by its handle (case-insensitive), scoped to this
+   * bot's space so bots in space A can't accidentally route to agents in
+   * space B just because the handles match.
    */
   private resolveAgentIdByHandle(handle: string): string | null {
     const needle = String(handle || "").trim().toLowerCase();
     if (!needle) return null;
-    const agents = this.core.listAgents();
+    const agents = this.core.listAgents(this.config.spaceId);
     const match = agents.find(agent =>
       String(agent.handle || "").toLowerCase() === needle ||
       String(agent.id || "").toLowerCase() === needle
@@ -193,7 +197,11 @@ export class LarkBotIntegration {
   private async flushOutboundReplies(): Promise<void> {
     const state = this.core.snapshot();
     const links = (state.externalMessageLinks || []).filter(link =>
-      link.provider === this.config.provider && link.direction === "out" && !link.externalMessageId && !this.sentLinkIds.has(link.id)
+      link.provider === this.config.provider &&
+      link.spaceId === this.config.spaceId &&
+      link.direction === "out" &&
+      !link.externalMessageId &&
+      !this.sentLinkIds.has(link.id)
     );
     for (const link of links) {
       const message = state.messages.find(item => item.id === link.messageId);
@@ -232,6 +240,7 @@ export function readLarkBotConfig(env: NodeJS.ProcessEnv = process.env, stored?:
   const enabled = Boolean(appId && appSecret && isLikelyLarkAppId(appId) && enabledByEnv && (stored?.enabled ?? true));
   return {
     provider: stored?.provider || providerKeyForLarkApp(appId),
+    spaceId: stored?.spaceId || "space_default",
     alias: stored?.alias || null,
     appId,
     appSecret,

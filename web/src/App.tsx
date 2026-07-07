@@ -397,7 +397,9 @@ function CreateSpaceModal({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const nameValid = SPACE_NAME_PATTERN.test(name.trim());
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -410,10 +412,13 @@ function CreateSpaceModal({
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
-    if (!name.trim() || submitting) return;
+    if (!nameValid || submitting) return;
     setSubmitting(true);
+    setError(null);
     try {
       await onSubmit(name, description);
+    } catch (err) {
+      setError((err as Error).message || "Failed to create space");
     } finally {
       setSubmitting(false);
     }
@@ -436,15 +441,21 @@ function CreateSpaceModal({
           Spaces isolate channels, agents, computers, schedules, and bot bindings so different
           teams or businesses can share one iTeam without leaking context.
         </p>
+        {error && <p className="form-error">{error}</p>}
         <label className="field">
           <span>Name<em>required</em></span>
           <input
             ref={inputRef}
             value={name}
-            placeholder="e.g. Growth, Platform, Fizzo"
+            placeholder="e.g. growth, platform, fizzo"
             onChange={event => setName(event.target.value)}
-            maxLength={80}
+            maxLength={40}
+            aria-invalid={name.length > 0 && !nameValid}
           />
+          <small className="field-hint">
+            ASCII letters, digits, space, `_` or `-` (max 40). Chinese and other unicode
+            aren't allowed so the URL stays clean.
+          </small>
         </label>
         <label className="field">
           <span>Description<small>optional</small></span>
@@ -459,7 +470,7 @@ function CreateSpaceModal({
           <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={submitting}>
             Cancel
           </button>
-          <button type="submit" className="btn btn-primary" disabled={!name.trim() || submitting}>
+          <button type="submit" className="btn btn-primary" disabled={!nameValid || submitting}>
             {submitting ? "Creating…" : "Create space"}
           </button>
         </div>
@@ -468,6 +479,8 @@ function CreateSpaceModal({
     document.body
   );
 }
+
+const SPACE_NAME_PATTERN = /^[A-Za-z0-9 _-]{1,40}$/;
 
 function App() {
   const [state, setState] = useState<AppState | null>(null);

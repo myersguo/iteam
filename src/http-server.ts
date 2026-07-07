@@ -63,8 +63,8 @@ export interface HttpServerOptions {
   /** Override the directory used to serve the web bundle. Default: <pkg>/dist. */
   webRoot?: string;
   externalBotRuntime?: {
-    sync(provider: string): void | Promise<void>;
-    remove(provider: string): void | Promise<void>;
+    sync(provider: string, spaceId: string): void | Promise<void>;
+    remove(provider: string, spaceId: string): void | Promise<void>;
   };
 }
 
@@ -442,8 +442,8 @@ async function route(
   if (req.method === "POST" && url.pathname === "/api/external/bot-configs") {
     const body = await parseJsonBody<any>(req);
     const saved = core.upsertExternalBotConfig({ ...body, spaceId: body?.spaceId || spaceId });
-    void Promise.resolve(staticConfig.externalBotRuntime?.sync(saved.provider)).catch(error => {
-      console.error(`[http] external bot runtime sync failed for ${saved.provider}: ${(error as Error).message}`);
+    void Promise.resolve(staticConfig.externalBotRuntime?.sync(saved.provider, saved.spaceId)).catch(error => {
+      console.error(`[http] external bot runtime sync failed for ${saved.provider}@${saved.spaceId}: ${(error as Error).message}`);
     });
     return sendJson(res, 201, { ...saved, appSecret: saved.appSecret ? "configured" : null });
   }
@@ -451,8 +451,8 @@ async function route(
   const externalBotConfigDelete = url.pathname.match(/^\/api\/external\/bot-configs\/([^/]+)$/);
   if (req.method === "DELETE" && externalBotConfigDelete) {
     const result = core.deleteExternalBotConfig(decodeURIComponent(externalBotConfigDelete[1]), spaceId);
-    void Promise.resolve(staticConfig.externalBotRuntime?.remove(result.provider)).catch(error => {
-      console.error(`[http] external bot runtime remove failed for ${result.provider}: ${(error as Error).message}`);
+    void Promise.resolve(staticConfig.externalBotRuntime?.remove(result.provider, result.spaceId)).catch(error => {
+      console.error(`[http] external bot runtime remove failed for ${result.provider}@${result.spaceId}: ${(error as Error).message}`);
     });
     return sendJson(res, 200, result);
   }

@@ -1907,6 +1907,27 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
   font-size: 13px;
   margin: 0 0 16px;
 }
+.field-hint {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.field-hint code {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--surface-soft);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+.field input[aria-invalid="true"],
+.field textarea[aria-invalid="true"] {
+  border-color: var(--error);
+  box-shadow: 0 0 0 3px rgba(198, 69, 69, 0.12);
+}
 .check-row {
   display: flex;
   align-items: center;

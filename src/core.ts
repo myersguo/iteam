@@ -441,8 +441,7 @@ export class IteamCore {
   }
 
   createSpace(input: { name: string; slug?: string; description?: string }): Space {
-    const rawName = String(input.name || "").trim();
-    if (!rawName) throw new HttpError(400, "name is required");
+    const rawName = validateSpaceName(input.name);
     const slug = slugSpaceName(input.slug || rawName);
     return this.store.mutate<Space>(s => {
       s.spaces ||= [];
@@ -583,11 +582,35 @@ export class IteamCore {
     }));
   }
 
+  /**
+   * Return every stored bot config across all spaces, with secrets intact.
+   * Used exclusively by the daemon's bot runtime to enumerate WS clients at
+   * boot; regular HTTP responses must go through `listExternalBotConfigs` so
+   * secrets stay masked and results stay space-scoped.
+   */
+  listAllExternalBotConfigsRaw(): ExternalBotConfig[] {
+    return (this.store.snapshot().externalBotConfigs || []).map(config => ({ ...config }));
+  }
+
   getExternalBotConfig(provider: string, spaceId?: string | null): ExternalBotConfig | null {
     const normalized = normalizeProvider(provider);
     const resolved = this.resolveSpaceId(spaceId);
     return (this.store.snapshot().externalBotConfigs || []).find(config =>
       config.provider === normalized && config.spaceId === resolved
+    ) || null;
+  }
+
+  /**
+   * Direct id-based lookup used by the bot runtime when it already knows a
+   * specific `(provider, spaceId)` tuple — bypasses space resolution so the
+   * runtime can operate across every space regardless of the daemon's "active
+   * space" for API reads.
+   */
+  getExternalBotConfigInSpace(provider: string, spaceId: string): ExternalBotConfig | null {
+    const normalized = normalizeProvider(provider);
+    const target = String(spaceId || "").trim() || DEFAULT_SPACE_ID;
+    return (this.store.snapshot().externalBotConfigs || []).find(config =>
+      config.provider === normalized && config.spaceId === target
     ) || null;
   }
 
@@ -2001,7 +2024,7 @@ export class IteamCore {
     });
   }
 
-  deleteExternalBotConfig(provider: string, spaceId?: string | null): { ok: true; provider: string; deletedBindings: number; deletedMessageLinks: number } {
+  deleteExternalBotConfig(provider: string, spaceId?: string | null): { ok: true; provider: string; spaceId: string; deletedBindings: number; deletedMessageLinks: number } {
     const normalized = normalizeProvider(provider);
     if (!normalized) throw new HttpError(400, "provider is required");
     const resolved = this.resolveSpaceId(spaceId);
@@ -2024,6 +2047,7 @@ export class IteamCore {
       return {
         ok: true,
         provider: normalized,
+        spaceId: resolved,
         deletedBindings: beforeBindings.length - s.externalBotBindings.length,
         deletedMessageLinks: beforeLinks.length - s.externalMessageLinks.length
       };
@@ -2965,13 +2989,34 @@ function slugChannelName(value: string): string {
     .replace(/^-+|-+$/g, "") || "channel";
 }
 
+/**
+ * Space name / slug policy: ASCII letters, digits, `_` and `-` only.
+ * Whitespace and unicode letters (including CJK) are rejected so URLs stay
+ * clean and slugs stay recognisable across systems.
+ */
+const SPACE_NAME_PATTERN = /^[A-Za-z0-9 _-]{1,40}$/;
+const SPACE_SLUG_PATTERN = /^[a-z0-9_-]{1,40}$/;
+
+function validateSpaceName(value: string): string {
+  const raw = String(value || "").trim();
+  if (!raw) throw new HttpError(400, "name is required");
+  if (!SPACE_NAME_PATTERN.test(raw)) {
+    throw new HttpError(400, "space name must be 1-40 ASCII letters, digits, space, underscore, or hyphen");
+  }
+  return raw;
+}
+
 function slugSpaceName(value: string): string {
-  return String(value || "")
+  const cleaned = String(value || "")
     .trim()
-    .normalize("NFKC")
     .toLowerCase()
-    .replace(/[^\p{Letter}\p{Number}_-]+/gu, "-")
-    .replace(/^-+|-+$/g, "") || "space";
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (!cleaned) throw new HttpError(400, "space slug is empty after normalization; use ASCII letters or digits");
+  if (!SPACE_SLUG_PATTERN.test(cleaned)) {
+    throw new HttpError(400, "space slug must be 1-40 ASCII lowercase letters, digits, underscore, or hyphen");
+  }
+  return cleaned;
 }
 
 /** Render a token as `<first6>…<last4>` for log diagnostics so we can compare
