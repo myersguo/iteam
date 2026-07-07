@@ -150,6 +150,11 @@ export function startHttpServer(options: HttpServerOptions): RunningHttpServer {
       unsubscribe();
       for (const client of sseClients) client.end();
       sseClients.clear();
+      // server.close() only stops accepting new connections; keep-alive sockets
+      // (e.g. SSE clients, iteam web/agent) can hold it open forever. Force
+      // existing sockets shut so shutdown actually completes.
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
       await new Promise<void>(resolveClose => server.close(() => resolveClose()));
     }
   };

@@ -116,11 +116,13 @@ export interface ChannelCreateInput extends SpaceContext {
   name: string;
   description?: string;
   private?: boolean;
+  defaultAgentId?: string | null;
 }
 
 export interface ChannelPatchInput {
   name?: string;
   description?: string;
+  defaultAgentId?: string | null;
 }
 
 export interface TaskCreateInput extends SpaceContext {
@@ -698,6 +700,10 @@ export class IteamCore {
       if (s.channels.some(channel => channel.spaceId === spaceId && channel.target === target)) {
         throw new HttpError(409, "channel already exists");
       }
+      const defaultAgentId = normalizeOptionalString(input.defaultAgentId);
+      if (defaultAgentId && !s.agents.some(agent => agent.id === defaultAgentId && agent.spaceId === spaceId)) {
+        throw new HttpError(404, "defaultAgentId does not exist in this space");
+      }
       const created = {
         id: this.newId("chan"),
         spaceId,
@@ -709,6 +715,7 @@ export class IteamCore {
           ...(s.humans || []).map(human => human.id),
           ...(s.agents || []).filter(agent => agent.spaceId === spaceId).map(agent => agent.id)
         ],
+        defaultAgentId: defaultAgentId || null,
         createdAt: now
       };
       s.channels.push(created);
@@ -746,6 +753,13 @@ export class IteamCore {
         migrateChannelTarget(s, oldTarget, target, this.clock);
       }
       if (input.description !== undefined) current.description = input.description.trim();
+      if (input.defaultAgentId !== undefined) {
+        const next = normalizeOptionalString(input.defaultAgentId);
+        if (next && !s.agents.some(agent => agent.id === next && agent.spaceId === current.spaceId)) {
+          throw new HttpError(404, "defaultAgentId does not exist in this space");
+        }
+        current.defaultAgentId = next || null;
+      }
       return current;
     });
   }
@@ -1117,7 +1131,8 @@ export class IteamCore {
         .filter(channel => !(channel.kind === "dm" && channel.target === `dm:${agentId}`))
         .map(channel => ({
           ...channel,
-          memberIds: (channel.memberIds || []).filter(id => id !== agentId)
+          memberIds: (channel.memberIds || []).filter(id => id !== agentId),
+          defaultAgentId: channel.defaultAgentId === agentId ? null : channel.defaultAgentId
         }));
       s.deliveries = (s.deliveries || []).filter(delivery => delivery.agentId !== agentId);
       for (const task of s.tasks || []) {
@@ -2097,23 +2112,32 @@ export class IteamCore {
       let defaultAgentId = normalizeOptionalString(input.defaultAgentId) || binding?.defaultAgentId || null;
 
       if (!routeTarget) {
-        if (mentionedAgents.length === 1) {
+        if (defaultAgentId) {
+          // Caller passed an explicit agent (e.g. `handle:` prefix). Route
+          // into the agent's DM channel so we don't need a channel binding.
+          routeTarget = this.ensureAgentDmChannelInState(s, defaultAgentId, now).target;
+        } else if (mentionedAgents.length === 1) {
           routeTarget = this.ensureAgentDmChannelInState(s, mentionedAgents[0].id, now).target;
         } else {
           return {
             ok: false,
             binding,
             replyText: mentionedAgents.length > 1
-              ? "请指定 iTeam 频道，例如 `/all @codex xxx`，或先执行 `/iteam bind #all`。"
-              : "请指定 iTeam 频道或 agent，例如 `/all @codex xxx`、`@codex xxx`，或先执行 `/iteam bind #all`。"
+              ? "请指定 iTeam 频道（例如 `/all ...`）或先执行 `/iteam bind #all`。"
+              : "请先绑定 iTeam 频道（`/iteam bind #all`），或用 `/all ...` 显式指定频道，或用 `codex: ...` 直接指定 agent。"
           };
         }
       }
 
       if (routeTarget.startsWith("dm:")) {
         defaultAgentId ||= routeTarget.slice(3);
-      } else if (!findChannel(s, routeTarget, spaceId)) {
-        return { ok: false, binding, replyText: `iTeam channel not found: ${routeTarget}` };
+      } else {
+        const channel = findChannel(s, routeTarget, spaceId);
+        if (!channel) return { ok: false, binding, replyText: `iTeam channel not found: ${routeTarget}` };
+        // If no explicit agent yet, fall back to the channel's default agent
+        // (settable via PATCH /api/channels/:id). This is the "接线员" that
+        // fields untagged messages in a channel-wide bind.
+        defaultAgentId ||= channel.defaultAgentId ?? null;
       }
 
       const createdBy = `ingress:${provider}`;
@@ -2401,12 +2425,17 @@ export class IteamCore {
   ): number {
     const channel = (state.channels || []).find(channel => channel.target === message.target);
     const channelMemberIds = new Set<string>(channel?.memberIds || []);
-    const selectedAgent = defaultAgentId ? state.agents.find(a => a.id === defaultAgentId) : null;
+    // Priority: caller-supplied agent > channel default agent > first running
+    // member. This is where "channel default agent" (settable via
+    // PATCH /api/channels/:id) makes an untagged message go to a specific
+    // agent instead of whichever running one happens to be first.
+    const preferredId = defaultAgentId || channel?.defaultAgentId || null;
+    const preferredAgent = preferredId ? state.agents.find(a => a.id === preferredId) : null;
     const fallbackAgent = state.agents.find(a =>
       a.desiredStatus === "running" &&
       (!channelMemberIds.size || channelMemberIds.has(a.id))
     );
-    const agent = selectedAgent?.desiredStatus === "running" ? selectedAgent : fallbackAgent;
+    const agent = preferredAgent?.desiredStatus === "running" ? preferredAgent : fallbackAgent;
     if (!agent) return 0;
 
     return this.enqueueSingleAgentDelivery(state, message, agent.id, {

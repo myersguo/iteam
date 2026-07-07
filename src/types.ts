@@ -112,6 +112,11 @@ export interface Channel {
   kind: string;
   description: string;
   memberIds: string[];
+  /**
+   * Agent that fields messages when no explicit handle/mention is provided.
+   * Falls through to space-level heuristics when null.
+   */
+  defaultAgentId?: string | null;
   createdAt: string;
 }
 

@@ -105,6 +105,7 @@ export class SqliteStore extends BaseStore {
     this.addColumnIfMissing("iteam_external_bot_configs", "status", "TEXT");
     this.addColumnIfMissing("iteam_external_bot_configs", "status_message", "TEXT");
     this.addColumnIfMissing("iteam_external_bot_configs", "last_connected_at", "TEXT");
+    this.addColumnIfMissing("iteam_channels", "default_agent_id", "TEXT");
     this.migrateAgentsModelNullable();
   }
 
@@ -259,6 +260,7 @@ export class SqliteStore extends BaseStore {
       target: string;
       kind: string;
       description: string | null;
+      default_agent_id: string | null;
       created_at: string;
     }>;
 
@@ -495,6 +497,7 @@ export class SqliteStore extends BaseStore {
       kind: row.kind,
       description: row.description || "",
       memberIds: channelMemberMap.get(row.id) || [],
+      defaultAgentId: row.default_agent_id || null,
       createdAt: row.created_at
     }));
 
@@ -757,7 +760,7 @@ export class SqliteStore extends BaseStore {
     this.db.exec("DELETE FROM iteam_channels");
     if (state.channels.length) {
       const channelStmt = this.db.prepare(
-        "INSERT INTO iteam_channels (id, name, target, kind, description, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+        "INSERT INTO iteam_channels (id, name, target, kind, description, default_agent_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
       );
       const memberStmt = this.db.prepare(
         "INSERT INTO iteam_channel_members (channel_id, member_id) VALUES (?, ?)"
@@ -769,6 +772,7 @@ export class SqliteStore extends BaseStore {
           channel.target,
           channel.kind,
           channel.description ?? null,
+          channel.defaultAgentId ?? null,
           channel.createdAt
         );
         for (const memberId of channel.memberIds || []) {

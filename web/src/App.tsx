@@ -64,6 +64,7 @@ interface Channel {
   kind?: string;
   description?: string;
   memberIds?: string[];
+  defaultAgentId?: string | null;
   messageCount?: number;
 }
 
@@ -841,7 +842,7 @@ function App() {
     refresh();
   }
 
-  async function createChannel(body: { name: string; description?: string }) {
+  async function createChannel(body: { name: string; description?: string; defaultAgentId?: string | null }) {
     const created = await api.post<Channel>("/api/channels", body);
     setChannel(created.target);
     setSection("chat");
@@ -849,7 +850,7 @@ function App() {
     refresh(created.target);
   }
 
-  async function updateChannel(channelId: string, body: { name?: string; description?: string }) {
+  async function updateChannel(channelId: string, body: { name?: string; description?: string; defaultAgentId?: string | null }) {
     const updated = await api.patch<Channel>(`/api/channels/${encodeURIComponent(channelId)}`, body);
     setChannel(updated.target);
     setRenameChannel(null);
@@ -1099,6 +1100,7 @@ function App() {
       )}
       {createChannelOpen && (
         <CreateChannelModal
+          agents={state.agents || []}
           onCreate={createChannel}
           onClose={() => setCreateChannelOpen(false)}
         />
@@ -1106,6 +1108,7 @@ function App() {
       {renameChannel && (
         <RenameChannelModal
           channel={renameChannel}
+          agents={state.agents || []}
           onRename={updateChannel}
           onClose={() => setRenameChannel(null)}
         />
@@ -2652,14 +2655,17 @@ function EditScheduledTaskModal({
 }
 
 function CreateChannelModal({
+  agents,
   onCreate,
   onClose
 }: {
-  onCreate: (body: { name: string; description?: string }) => Promise<void> | void;
+  agents: Agent[];
+  onCreate: (body: { name: string; description?: string; defaultAgentId?: string | null }) => Promise<void> | void;
   onClose: () => void;
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [defaultAgentId, setDefaultAgentId] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const valid = !!name.trim();
@@ -2669,7 +2675,7 @@ function CreateChannelModal({
     setBusy(true);
     setError("");
     try {
-      await onCreate({ name, description });
+      await onCreate({ name, description, defaultAgentId: defaultAgentId || null });
     } catch (err) {
       setError((err as Error).message || "Failed to create channel");
       setBusy(false);
@@ -2715,6 +2721,17 @@ function CreateChannelModal({
             onChange={e => setDescription(e.target.value)}
             placeholder="Optional context for this channel..."
           />
+        </label>
+        <label className="field">
+          <span>
+            Default agent <small>optional — handles untagged messages</small>
+          </span>
+          <select value={defaultAgentId} onChange={e => setDefaultAgentId(e.target.value)}>
+            <option value="">— none —</option>
+            {agents.map(agent => (
+              <option key={agent.id} value={agent.id}>{agent.name} @{agent.handle}</option>
+            ))}
+          </select>
         </label>
         <footer className="modal-actions">
           <button className="btn btn-ghost" onClick={onClose}>
@@ -3430,25 +3447,35 @@ function CreateAgentModal({
 
 function RenameChannelModal({
   channel,
+  agents,
   onRename,
   onClose
 }: {
   channel: Channel;
-  onRename: (channelId: string, body: { name?: string; description?: string }) => Promise<void> | void;
+  agents: Agent[];
+  onRename: (channelId: string, body: { name?: string; description?: string; defaultAgentId?: string | null }) => Promise<void> | void;
   onClose: () => void;
 }) {
   const [name, setName] = useState(channel.name);
   const [description, setDescription] = useState(channel.description || "");
+  const [defaultAgentId, setDefaultAgentId] = useState<string>(channel.defaultAgentId || "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const valid = !!name.trim();
+  const isDm = channel.kind === "dm";
 
   async function submit() {
     if (!valid || busy) return;
     setBusy(true);
     setError("");
     try {
-      await onRename(channel.id, { name, description });
+      await onRename(channel.id, {
+        name,
+        description,
+        // Persist the user's choice: empty select = clear (null); otherwise the
+        // selected agent id.
+        ...(isDm ? {} : { defaultAgentId: defaultAgentId || null })
+      });
     } catch (err) {
       setError((err as Error).message || "Failed to rename channel");
       setBusy(false);
@@ -3490,6 +3517,19 @@ function RenameChannelModal({
           <span>Description</span>
           <textarea value={description} onChange={e => setDescription(e.target.value)} />
         </label>
+        {!isDm && (
+          <label className="field">
+            <span>
+              Default agent <small>optional — handles untagged messages</small>
+            </span>
+            <select value={defaultAgentId} onChange={e => setDefaultAgentId(e.target.value)}>
+              <option value="">— none —</option>
+              {agents.map(agent => (
+                <option key={agent.id} value={agent.id}>{agent.name} @{agent.handle}</option>
+              ))}
+            </select>
+          </label>
+        )}
         <footer className="modal-actions">
           <button className="btn btn-ghost" onClick={onClose}>
             Cancel

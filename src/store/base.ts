@@ -64,6 +64,7 @@ export function initialState(): State {
       kind: "channel",
       description: "General channel for all members",
       memberIds: ["human-local"],
+      defaultAgentId: null,
       createdAt: now
     }],
     messages: [],
@@ -107,10 +108,14 @@ export function sanitizeState(state: State): State {
     ...(state.humans || []).map(human => human.id),
     ...state.agents.map(agent => agent.id)
   ]);
+  const validAgentIds = new Set(state.agents.map(agent => agent.id));
   state.channels = (state.channels || []).map((channel: Channel) => ({
     ...channel,
     spaceId: ensureSpaceId(channel.spaceId),
-    memberIds: (channel.memberIds || []).filter(id => validMemberIds.has(id))
+    memberIds: (channel.memberIds || []).filter(id => validMemberIds.has(id)),
+    defaultAgentId: channel.defaultAgentId && validAgentIds.has(channel.defaultAgentId)
+      ? channel.defaultAgentId
+      : null
   }));
   state.messages = (state.messages || []).filter((message: Message) => {
     const text = message.text || "";

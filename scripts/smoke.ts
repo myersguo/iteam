@@ -85,6 +85,42 @@ try {
   if (larkTaskCommand.kind !== "task" || larkTaskCommand.target !== "#all" || larkTaskCommand.text !== "@codex 帮我看一下这个问题") {
     throw new Error("Lark /task route command was not parsed");
   }
+  const bareAgentCommand = parseIteamCommand("codex: 帮我分析一下");
+  if (bareAgentCommand.kind !== "message" || bareAgentCommand.target || bareAgentCommand.agentHandle !== "codex" || bareAgentCommand.text !== "帮我分析一下") {
+    throw new Error("bare `handle:` prefix was not parsed as agent selector");
+  }
+  const bareAgentNoSpace = parseIteamCommand("aiden:hi");
+  if (bareAgentNoSpace.kind !== "message" || bareAgentNoSpace.target || bareAgentNoSpace.agentHandle !== "aiden" || bareAgentNoSpace.text !== "hi") {
+    throw new Error("`handle:` without a space after the colon should still route to the agent");
+  }
+  const channelAgentCommand = parseIteamCommand("/ops codex: 复现下这个 bug");
+  if (channelAgentCommand.kind !== "message" || channelAgentCommand.target !== "#ops" || channelAgentCommand.agentHandle !== "codex" || channelAgentCommand.text !== "复现下这个 bug") {
+    throw new Error("`/channel handle:` combo was not parsed");
+  }
+  const taskWithAgent = parseIteamCommand("/task codex: 记个待办");
+  if (taskWithAgent.kind !== "task" || taskWithAgent.agentHandle !== "codex" || taskWithAgent.text !== "记个待办") {
+    throw new Error("`/task handle:` combo was not parsed");
+  }
+  const bindWithAgent = parseIteamCommand("/iteam bind #all codex");
+  if (bindWithAgent.kind !== "bind" || bindWithAgent.target !== "#all" || bindWithAgent.agentHandle !== "codex") {
+    throw new Error("/iteam bind #all codex was not parsed with agent");
+  }
+  const bindWithoutAgent = parseIteamCommand("/iteam bind #all");
+  if (bindWithoutAgent.kind !== "bind" || bindWithoutAgent.target !== "#all" || bindWithoutAgent.agentHandle) {
+    throw new Error("/iteam bind #all should not attach an agent when none is given");
+  }
+  const linkText = parseIteamCommand("https://example.com/foo");
+  if (linkText.kind !== "message" || linkText.agentHandle || linkText.text !== "https://example.com/foo") {
+    throw new Error("plain URLs must not be treated as agent selectors");
+  }
+  const mailtoText = parseIteamCommand("mailto:a@b.com");
+  if (mailtoText.kind !== "message" || mailtoText.agentHandle || mailtoText.text !== "mailto:a@b.com") {
+    throw new Error("mailto links must not be treated as agent selectors");
+  }
+  const gitSchemeText = parseIteamCommand("git://example.com/repo.git");
+  if (gitSchemeText.kind !== "message" || gitSchemeText.agentHandle || gitSchemeText.text !== "git://example.com/repo.git") {
+    throw new Error("scheme://... URLs must not be treated as agent selectors");
+  }
   const affinityA = deliveryAffinityIndex({
     id: "delivery_a",
     spaceId: "space_default",

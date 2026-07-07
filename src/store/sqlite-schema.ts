@@ -65,12 +65,13 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
     last_runtime_status TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS iteam_channels (
-    id          TEXT NOT NULL PRIMARY KEY,
-    name        TEXT NOT NULL,
-    target      TEXT NOT NULL UNIQUE,
-    kind        TEXT NOT NULL,
-    description TEXT,
-    created_at  TEXT NOT NULL
+    id                TEXT NOT NULL PRIMARY KEY,
+    name              TEXT NOT NULL,
+    target            TEXT NOT NULL UNIQUE,
+    kind              TEXT NOT NULL,
+    description       TEXT,
+    default_agent_id  TEXT,
+    created_at        TEXT NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS iteam_channel_members (
     channel_id TEXT NOT NULL,

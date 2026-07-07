@@ -175,6 +175,11 @@ export class MysqlStore extends BaseStore {
       "last_connected_at",
       "VARCHAR(40) DEFAULT NULL"
     );
+    await this.addColumnIfMissing(
+      "iteam_channels",
+      "default_agent_id",
+      "VARCHAR(64) DEFAULT NULL"
+    );
     await this.migrateAgentsModelNullable();
   }
 
@@ -267,6 +272,7 @@ export class MysqlStore extends BaseStore {
       target: string;
       kind: string;
       description: string | null;
+      default_agent_id: string | null;
       created_at: string;
     }>>("SELECT * FROM iteam_channels");
 
@@ -489,6 +495,7 @@ export class MysqlStore extends BaseStore {
       kind: row.kind,
       description: row.description || "",
       memberIds: channelMemberMap.get(row.id) || [],
+      defaultAgentId: row.default_agent_id || null,
       createdAt: row.created_at
     }));
 
@@ -762,7 +769,7 @@ export class MysqlStore extends BaseStore {
       await conn.query("DELETE FROM iteam_channels");
       if (state.channels.length) {
         await conn.query(
-          "INSERT INTO iteam_channels (id, name, target, kind, description, created_at) VALUES ?",
+          "INSERT INTO iteam_channels (id, name, target, kind, description, default_agent_id, created_at) VALUES ?",
           [
             state.channels.map(c => [
               c.id,
@@ -770,6 +777,7 @@ export class MysqlStore extends BaseStore {
               c.target,
               c.kind,
               c.description ?? null,
+              c.defaultAgentId ?? null,
               c.createdAt
             ])
           ]

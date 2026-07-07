@@ -31,6 +31,7 @@ interface LarkMessageEvent {
 interface ParsedCommand {
   kind: "message" | "task" | "bind" | "current" | "help";
   target?: string | null;
+  agentHandle?: string | null;
   text?: string;
 }
 
@@ -95,11 +96,13 @@ export class LarkBotIntegration {
     if (parsed.kind === "help") {
       await this.sendText(chatId, [
         "iTeam 用法：",
-        "- `/all @codex 帮我看一下这个问题`：发送到 iTeam #all 并指定 agent。",
-        "- `/task /all @codex 帮我看一下这个问题`：在 #all 创建 task，并分配给 @codex。",
-        "- `/all 帮我看一下这个问题`：发送到 #all，由频道默认/可用 agent 处理。",
-        "- `/iteam bind #all`：把当前飞书会话默认绑定到 #all。",
-        "- `@codex 帮我看一下这个问题`：无默认频道时走 @codex 的 iTeam DM。"
+        "- `/iteam bind #all`：把当前飞书会话绑定到 iTeam 频道；绑定后直接说话即可，无需前缀。",
+        "- `/iteam bind #all codex`：绑定 channel 的同时指定默认 agent。",
+        "- `/all 帮我看一下这个问题`：显式指定 iTeam 频道，由该频道默认/可用 agent 处理。",
+        "- `codex: 帮我看一下这个问题`：显式指定 agent（不改变已绑定的频道）。",
+        "- `/all codex: 帮我看...`：同时指定频道和 agent。",
+        "- `/task /all codex: 帮我看...`：创建 iTeam task，可组合频道 / agent。",
+        "- `/iteam current`：查看当前绑定。"
       ].join("\n"));
       return;
     }
@@ -110,14 +113,27 @@ export class LarkBotIntegration {
         await this.sendText(chatId, "请指定要绑定的 iTeam channel，例如 `/iteam bind #all`。");
         return;
       }
+      let defaultAgentId: string | undefined;
+      if (parsed.agentHandle) {
+        const resolved = this.resolveAgentIdByHandle(parsed.agentHandle);
+        if (!resolved) {
+          await this.sendText(chatId, `找不到 iTeam agent \`${parsed.agentHandle}\`，绑定未生效。`);
+          return;
+        }
+        defaultAgentId = resolved;
+      }
       const binding = this.core.upsertExternalBotBinding({
         provider: this.config.provider,
         tenantKey,
         chatId,
         chatType: message.chat_type || null,
-        defaultTarget: target
+        defaultTarget: target,
+        ...(defaultAgentId !== undefined ? { defaultAgentId } : {})
       });
-      await this.sendText(chatId, `已绑定当前飞书会话到 iTeam ${binding.defaultTarget}。`);
+      const agentLabel = binding.defaultAgentId
+        ? `，默认 agent \`${this.core.listAgents().find(a => a.id === binding.defaultAgentId)?.handle || binding.defaultAgentId}\``
+        : "";
+      await this.sendText(chatId, `已绑定当前飞书会话到 iTeam ${binding.defaultTarget}${agentLabel}。之后无需前缀直接发消息即可，或用 \`codex: ...\` 指定 agent。`);
       return;
     }
 
@@ -132,6 +148,16 @@ export class LarkBotIntegration {
       return;
     }
 
+    let resolvedAgentId: string | null = null;
+    if (parsed.agentHandle) {
+      const resolved = this.resolveAgentIdByHandle(parsed.agentHandle);
+      if (!resolved) {
+        await this.sendText(chatId, `找不到 iTeam agent \`${parsed.agentHandle}\`。可通过 \`/iteam current\` 查看当前绑定，或访问 iTeam 面板查看在线 agent。`);
+        return;
+      }
+      resolvedAgentId = resolved;
+    }
+
     const result = this.core.createExternalRoutedMessage({
       provider: this.config.provider,
       tenantKey,
@@ -140,12 +166,28 @@ export class LarkBotIntegration {
       senderId,
       externalMessageId: message.message_id,
       target: parsed.target || null,
+      defaultAgentId: resolvedAgentId,
       text: parsed.text || text,
       asTask: parsed.kind === "task"
     });
     if (!result.ok && result.replyText) {
       await this.sendText(chatId, result.replyText);
     }
+  }
+
+  /**
+   * Look up an agent id by its handle (case-insensitive). Uses the current
+   * store snapshot so handle changes don't need a bot restart.
+   */
+  private resolveAgentIdByHandle(handle: string): string | null {
+    const needle = String(handle || "").trim().toLowerCase();
+    if (!needle) return null;
+    const agents = this.core.listAgents();
+    const match = agents.find(agent =>
+      String(agent.handle || "").toLowerCase() === needle ||
+      String(agent.id || "").toLowerCase() === needle
+    );
+    return match?.id || null;
   }
 
   private async flushOutboundReplies(): Promise<void> {
@@ -215,16 +257,68 @@ export function parseIteamCommand(input: string): ParsedCommand {
   const task = text.match(/^\/(?:task|todo)\s+([\s\S]+)$/i);
   if (task) {
     const routed = parseIteamCommand(task[1]);
-    return { kind: "task", target: routed.target, text: routed.text || task[1].trim() };
+    return {
+      kind: "task",
+      target: routed.target,
+      agentHandle: routed.agentHandle,
+      text: routed.text || task[1].trim()
+    };
   }
-  const bind = text.match(/^\/iteam\s+bind\s+([^\s]+)\s*$/i) || text.match(/^\/iteam\s+use\s+([^\s]+)\s*$/i);
-  if (bind) return { kind: "bind", target: normalizeChannelSelector(bind[1]) };
+  const bind = text.match(/^\/iteam\s+(?:bind|use)\s+([^\s]+)(?:\s+([A-Za-z0-9_-]{1,40}))?\s*$/i);
+  if (bind) {
+    return {
+      kind: "bind",
+      target: normalizeChannelSelector(bind[1]),
+      agentHandle: bind[2] ? bind[2].toLowerCase() : null
+    };
+  }
   if (/^\/iteam\s+current\s*$/i.test(text)) return { kind: "current" };
   const route = text.match(/^(?:\/|#)([A-Za-z0-9_-]+)\s+([\s\S]+)$/);
   if (route && route[1].toLowerCase() !== "iteam") {
-    return { kind: "message", target: `#${route[1]}`, text: route[2].trim() };
+    const rest = route[2].trim();
+    const withAgent = matchAgentHandlePrefix(rest);
+    if (withAgent) {
+      return { kind: "message", target: `#${route[1]}`, agentHandle: withAgent.handle, text: withAgent.text };
+    }
+    return { kind: "message", target: `#${route[1]}`, text: rest };
+  }
+  // Bare `<handle>: <text>` — no channel prefix, keep target null so the
+  // caller can fall back to the bound default channel.
+  const bareAgent = matchAgentHandlePrefix(text);
+  if (bareAgent) {
+    return { kind: "message", agentHandle: bareAgent.handle, text: bareAgent.text };
   }
   return { kind: "message", text };
+}
+
+/**
+ * Match a leading `<handle>:<text>` router. `<handle>` follows the iTeam
+ * agent handle format (letters/digits/`_-`, 1-40 chars). The colon may be
+ * followed by whitespace or plain text (`aiden:hi` is valid, matching
+ *飞书用户习惯). URL-like schemes (`http`, `https`, `mailto`, ...) are
+ * excluded so `https://example.com` and `mailto:a@b` aren't misparsed as
+ * agent selectors.
+ */
+function matchAgentHandlePrefix(input: string): { handle: string; text: string } | null {
+  const match = input.match(/^([A-Za-z0-9_-]{1,40}):\s*([\s\S]+)$/);
+  if (!match) return null;
+  const handle = match[1];
+  const rest = match[2].trim();
+  if (!rest) return null;
+  if (isUrlLikeScheme(handle, rest)) return null;
+  return { handle: handle.toLowerCase(), text: rest };
+}
+
+const URL_LIKE_SCHEMES = new Set([
+  "http", "https", "ftp", "ftps", "sftp", "ws", "wss",
+  "mailto", "tel", "sms", "git", "ssh", "file",
+  "data", "javascript", "chrome", "about"
+]);
+
+function isUrlLikeScheme(handle: string, rest: string): boolean {
+  if (URL_LIKE_SCHEMES.has(handle.toLowerCase())) return true;
+  // `foo://bar` is almost always a URL, whatever the scheme name.
+  return rest.startsWith("//");
 }
 
 function normalizeChannelSelector(value: string): string {

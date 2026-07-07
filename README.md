@@ -199,14 +199,21 @@ ITEAM_LARK_APP_SECRET=xxx \
 iteam daemon start
 ```
 
-Supported bot message patterns:
+Supported bot message patterns (both in group chats after `@bot`, and in
+direct 1:1 chats where no `@` is needed):
 
 ```text
-@iTeamBot /all @codex 帮我看一下这个问题   # route to iTeam #all and mention @codex
-@iTeamBot /all 帮我看一下这个问题          # route to #all; iTeam picks the channel/default agent
-@iTeamBot /iteam bind #all                # bind this Lark/Feishu chat to iTeam #all
-@iTeamBot @codex 帮我看一下这个问题        # no channel/default: route to @codex's iTeam DM
+/iteam bind #all                             # bind this Lark/Feishu chat to iTeam #all
+帮我看一下这个问题                              # after bind, plain messages route to #all's default agent
+codex: 帮我看一下这个问题                       # send to codex directly (agent DM if no bind, else bound channel)
+/all 帮我看一下这个问题                         # explicit iTeam channel; channel default agent handles it
+/all codex: 帮我看一下这个问题                  # explicit channel AND agent
+/task /all codex: 记个待办                     # create an iTeam task, optionally scoped to channel/agent
+/iteam current                              # show the channel this chat is bound to
 ```
+
+`@` inside iTeam messages is no longer a routing signal — it is treated as
+regular text. Route agents with the `handle:` prefix, channels with `/channel`.
 
 The integration records inbound/outbound external message links so agent replies
 can be mirrored back to the originating Lark/Feishu chat.
