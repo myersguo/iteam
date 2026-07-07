@@ -19,7 +19,7 @@ import type {
   StoreEvent,
   Task
 } from "../types.js";
-import { BaseStore, initialState } from "./base.js";
+import { BaseStore, DEFAULT_SPACE_ID, initialState } from "./base.js";
 import { MYSQL_TABLES } from "./mysql-schema.js";
 
 const requireCjs = createRequire(import.meta.url);
@@ -427,6 +427,7 @@ export class MysqlStore extends BaseStore {
 
     const computers: Computer[] = computerRows.map(row => ({
       id: row.id,
+      spaceId: DEFAULT_SPACE_ID,
       name: row.name,
       fingerprint: {
         id: row.fingerprint_id,
@@ -447,6 +448,7 @@ export class MysqlStore extends BaseStore {
 
     const pendingComputerConnections: PendingComputerConnection[] = pendingRows.map(row => ({
       id: row.id,
+      spaceId: DEFAULT_SPACE_ID,
       token: row.token,
       status: row.status,
       createdAt: row.created_at,
@@ -457,6 +459,7 @@ export class MysqlStore extends BaseStore {
 
     const agents: Agent[] = agentRows.map(row => ({
       id: row.id,
+      spaceId: DEFAULT_SPACE_ID,
       name: row.name,
       handle: row.handle,
       description: row.description,
@@ -480,6 +483,7 @@ export class MysqlStore extends BaseStore {
 
     const channels: Channel[] = channelRows.map(row => ({
       id: row.id,
+      spaceId: DEFAULT_SPACE_ID,
       name: row.name,
       target: row.target,
       kind: row.kind,
@@ -490,6 +494,7 @@ export class MysqlStore extends BaseStore {
 
     const messages: Message[] = messageRows.map(row => ({
       id: row.id,
+      spaceId: DEFAULT_SPACE_ID,
       target: row.target,
       authorId: row.author_id,
       type: row.type,
@@ -502,6 +507,7 @@ export class MysqlStore extends BaseStore {
 
     const tasks: Task[] = taskRows.map(row => ({
       id: row.id,
+      spaceId: DEFAULT_SPACE_ID,
       number: row.number,
       target: row.target,
       title: row.title,
@@ -517,6 +523,7 @@ export class MysqlStore extends BaseStore {
 
     const deliveries: Delivery[] = deliveryRows.map(row => ({
       id: row.id,
+      spaceId: DEFAULT_SPACE_ID,
       messageId: row.message_id,
       rootMessageId: row.root_message_id,
       parentDeliveryId: row.parent_delivery_id,
@@ -536,6 +543,7 @@ export class MysqlStore extends BaseStore {
 
     const scheduledTasks: ScheduledTask[] = scheduledTaskRows.map(row => ({
       id: row.id,
+      spaceId: DEFAULT_SPACE_ID,
       target: row.target,
       agentId: row.agent_id,
       prompt: row.prompt,
@@ -555,6 +563,7 @@ export class MysqlStore extends BaseStore {
 
     const externalIngressPairings: ExternalIngressPairing[] = ingressPairingRows.map(row => ({
       id: row.id,
+      spaceId: DEFAULT_SPACE_ID,
       pairCode: row.pair_code,
       target: row.target,
       agentId: row.agent_id,
@@ -569,6 +578,7 @@ export class MysqlStore extends BaseStore {
 
     const externalIngressPolicies: ExternalIngressPolicy[] = ingressPolicyRows.map(row => ({
       id: row.id,
+      spaceId: DEFAULT_SPACE_ID,
       token: row.token,
       source: row.source,
       target: row.target,
@@ -580,6 +590,7 @@ export class MysqlStore extends BaseStore {
     }));
 
     const externalBotConfigs: ExternalBotConfig[] = externalBotConfigRows.map(row => ({
+      spaceId: DEFAULT_SPACE_ID,
       provider: row.provider,
       alias: row.alias,
       appId: row.app_id,
@@ -595,6 +606,7 @@ export class MysqlStore extends BaseStore {
 
     const externalBotBindings: ExternalBotBinding[] = externalBotBindingRows.map(row => ({
       id: row.id,
+      spaceId: DEFAULT_SPACE_ID,
       provider: row.provider,
       tenantKey: row.tenant_key,
       chatId: row.chat_id,
@@ -608,6 +620,7 @@ export class MysqlStore extends BaseStore {
 
     const externalMessageLinks: ExternalMessageLink[] = externalMessageLinkRows.map(row => ({
       id: row.id,
+      spaceId: DEFAULT_SPACE_ID,
       provider: row.provider,
       externalConversationId: row.external_conversation_id,
       externalMessageId: row.external_message_id,
@@ -627,6 +640,7 @@ export class MysqlStore extends BaseStore {
     // Fall back to seed defaults when the database is empty (first run).
     return {
       meta: seed.meta,
+      spaces: seed.spaces,
       computers,
       pendingComputerConnections,
       humans: humans.length ? humans : seed.humans,

@@ -159,6 +159,7 @@ iteam agent create <name> [--runtime codex|claude|gemini]
 iteam agent list
 iteam agent start <agent-id>
 iteam agent stop  <agent-id>
+iteam agent delete <agent-id>
 
 iteam channel list
 iteam message send  <#channel> <message...>
@@ -247,6 +248,7 @@ ITEAM_MYSQL_DATABASE=iteam
 | POST | `/api/computers/connect-command` | generate connect command |
 | POST | `/api/computers/connect` | remote computer heartbeat/connect |
 | POST | `/api/agents` | create agent |
+| DELETE | `/api/agents/:id` | delete agent |
 | POST | `/api/agents/:id/start` | start agent |
 | POST | `/api/agents/:id/stop` | stop agent |
 | POST | `/api/messages` | send message |

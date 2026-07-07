@@ -6,6 +6,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { readFileSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
+import { spawnSync } from "node:child_process";
 
 export interface LockInfo {
   pid: number;
@@ -85,8 +86,20 @@ function isProcessAlive(pid: number): boolean {
   try {
     // Signal 0 doesn't deliver a signal; it just probes for existence/permission.
     process.kill(pid, 0);
-    return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
+  // A zombie process still responds to signal 0 until its parent reaps it, so
+  // check the process state and treat 'Z' as dead — otherwise a stuck tsx/npm
+  // wrapper can leave the lock permanently held.
+  return !isZombie(pid);
+}
+
+function isZombie(pid: number): boolean {
+  if (process.platform === "win32") return false;
+  const result = spawnSync("ps", ["-o", "state=", "-p", String(pid)], {
+    encoding: "utf8"
+  });
+  if (result.status !== 0) return false;
+  return result.stdout.trim().toUpperCase().startsWith("Z");
 }

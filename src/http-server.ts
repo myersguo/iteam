@@ -169,6 +169,7 @@ async function route(
   staticConfig: StaticConfig
 ): Promise<void> {
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
+  const spaceId = resolveSpaceIdHeader(req, url);
 
   if (req.method === "GET" && url.pathname === "/api/health") {
     return sendJson(res, 200, core.health());
@@ -227,19 +228,31 @@ async function route(
     return;
   }
 
-  if (req.method === "GET" && url.pathname === "/api/state") return sendJson(res, 200, core.snapshot());
-  if (req.method === "GET" && url.pathname === "/api/channels") return sendJson(res, 200, core.listChannels());
-  if (req.method === "GET" && url.pathname === "/api/agents") return sendJson(res, 200, core.listAgents());
-  if (req.method === "GET" && url.pathname === "/api/computers") return sendJson(res, 200, core.listComputers());
+  if (req.method === "GET" && url.pathname === "/api/state") {
+    return sendJson(res, 200, core.snapshotForSpace(spaceId));
+  }
+  if (req.method === "GET" && url.pathname === "/api/spaces") return sendJson(res, 200, core.listSpaces());
+  if (req.method === "POST" && url.pathname === "/api/spaces") {
+    const body = await parseJsonBody<any>(req);
+    return sendJson(res, 201, core.createSpace(body));
+  }
+  const spaceDelete = url.pathname.match(/^\/api\/spaces\/([^/]+)$/);
+  if (req.method === "DELETE" && spaceDelete) {
+    core.deleteSpace(decodeURIComponent(spaceDelete[1]));
+    return sendJson(res, 200, { ok: true });
+  }
+  if (req.method === "GET" && url.pathname === "/api/channels") return sendJson(res, 200, core.listChannels(spaceId));
+  if (req.method === "GET" && url.pathname === "/api/agents") return sendJson(res, 200, core.listAgents(spaceId));
+  if (req.method === "GET" && url.pathname === "/api/computers") return sendJson(res, 200, core.listComputers(spaceId));
   if (req.method === "GET" && url.pathname === "/api/humans") return sendJson(res, 200, core.listHumans());
-  if (req.method === "GET" && url.pathname === "/api/deliveries") return sendJson(res, 200, core.listDeliveries());
-  if (req.method === "GET" && url.pathname === "/api/ingress/pairing-codes") return sendJson(res, 200, core.listIngressPairings());
-  if (req.method === "GET" && url.pathname === "/api/ingress/policies") return sendJson(res, 200, core.listIngressPolicies());
-  if (req.method === "GET" && url.pathname === "/api/external/bot-configs") return sendJson(res, 200, core.listExternalBotConfigs());
-  if (req.method === "GET" && url.pathname === "/api/external/bot-bindings") return sendJson(res, 200, core.listExternalBotBindings());
-  if (req.method === "GET" && url.pathname === "/api/external/message-links") return sendJson(res, 200, core.listExternalMessageLinks());
+  if (req.method === "GET" && url.pathname === "/api/deliveries") return sendJson(res, 200, core.listDeliveries(spaceId));
+  if (req.method === "GET" && url.pathname === "/api/ingress/pairing-codes") return sendJson(res, 200, core.listIngressPairings(spaceId));
+  if (req.method === "GET" && url.pathname === "/api/ingress/policies") return sendJson(res, 200, core.listIngressPolicies(spaceId));
+  if (req.method === "GET" && url.pathname === "/api/external/bot-configs") return sendJson(res, 200, core.listExternalBotConfigs(spaceId));
+  if (req.method === "GET" && url.pathname === "/api/external/bot-bindings") return sendJson(res, 200, core.listExternalBotBindings(spaceId));
+  if (req.method === "GET" && url.pathname === "/api/external/message-links") return sendJson(res, 200, core.listExternalMessageLinks(spaceId));
   if (req.method === "GET" && url.pathname === "/api/pending-connections") {
-    return sendJson(res, 200, core.listPendingConnections());
+    return sendJson(res, 200, core.listPendingConnections(spaceId));
   }
 
   if (req.method === "GET" && url.pathname === "/api/tasks") {
@@ -249,7 +262,8 @@ async function route(
       assigneeId: url.searchParams.get("assigneeId"),
       createdBy: url.searchParams.get("createdBy"),
       q: url.searchParams.get("q"),
-      includeDone: parseBooleanQuery(url.searchParams.get("includeDone"))
+      includeDone: parseBooleanQuery(url.searchParams.get("includeDone")),
+      spaceId
     }));
   }
 
@@ -257,7 +271,8 @@ async function route(
     return sendJson(res, 200, core.listScheduledTasks({
       target: url.searchParams.get("target"),
       status: url.searchParams.get("status"),
-      agentId: url.searchParams.get("agentId")
+      agentId: url.searchParams.get("agentId"),
+      spaceId
     }));
   }
 
@@ -266,7 +281,8 @@ async function route(
     return sendJson(res, 200, core.listMessagesByChannel({
       channelId,
       limit: url.searchParams.get("limit"),
-      before: url.searchParams.get("before")
+      before: url.searchParams.get("before"),
+      spaceId
     }));
   }
 
@@ -274,13 +290,14 @@ async function route(
     return sendJson(res, 200, core.listMessagesByTarget({
       target: url.searchParams.get("target") ?? undefined,
       limit: url.searchParams.get("limit"),
-      before: url.searchParams.get("before")
+      before: url.searchParams.get("before"),
+      spaceId
     }));
   }
 
   if (req.method === "POST" && url.pathname === "/api/channels") {
     const body = await parseJsonBody<any>(req);
-    return sendJson(res, 201, core.createChannel(body));
+    return sendJson(res, 201, core.createChannel({ ...body, spaceId: body?.spaceId || spaceId }));
   }
 
   const agentDm = url.pathname.match(/^\/api\/direct-messages\/agents\/([^/]+)$/);
@@ -298,7 +315,7 @@ async function route(
 
   if (req.method === "POST" && url.pathname === "/api/computers/connect-command") {
     const body = await parseJsonBody<any>(req);
-    return sendJson(res, 201, core.createConnectInvite(body, `http://${req.headers.host}`));
+    return sendJson(res, 201, core.createConnectInvite({ ...body, spaceId: body?.spaceId || spaceId }, `http://${req.headers.host}`));
   }
 
   if (req.method === "POST" && url.pathname === "/api/computers/connect") {
@@ -319,13 +336,17 @@ async function route(
 
   if (req.method === "POST" && url.pathname === "/api/agents") {
     const body = await parseJsonBody<any>(req);
-    return sendJson(res, 201, core.createAgent(body));
+    return sendJson(res, 201, core.createAgent({ ...body, spaceId: body?.spaceId || spaceId }));
   }
 
   const agentPatch = url.pathname.match(/^\/api\/agents\/([^/]+)$/);
   if (req.method === "PATCH" && agentPatch) {
     const body = await parseJsonBody<any>(req);
     return sendJson(res, 200, core.patchAgent(agentPatch[1], body));
+  }
+  if (req.method === "DELETE" && agentPatch) {
+    const agent = core.deleteAgent(decodeURIComponent(agentPatch[1]));
+    return sendJson(res, 200, { ok: true, agentId: agent.id });
   }
 
   const humanPatch = url.pathname.match(/^\/api\/humans\/([^/]+)$/);
@@ -357,7 +378,7 @@ async function route(
 
   if (req.method === "POST" && url.pathname === "/api/messages") {
     const body = await parseJsonBody<any>(req);
-    return sendJson(res, 201, core.createMessage(body));
+    return sendJson(res, 201, core.createMessage({ ...body, spaceId: body?.spaceId || spaceId }));
   }
 
   const deliveryResult = url.pathname.match(/^\/api\/deliveries\/([^/]+)\/result$/);
@@ -389,7 +410,7 @@ async function route(
 
   if (req.method === "POST" && url.pathname === "/api/ingress/pairing-codes") {
     const body = await parseJsonBody<any>(req);
-    return sendJson(res, 201, core.createIngressPairing(body));
+    return sendJson(res, 201, core.createIngressPairing({ ...body, spaceId: body?.spaceId || spaceId }));
   }
 
   if (req.method === "POST" && url.pathname === "/api/ingress/pair") {
@@ -410,12 +431,12 @@ async function route(
 
   if (req.method === "POST" && url.pathname === "/api/external/bot-bindings") {
     const body = await parseJsonBody<any>(req);
-    return sendJson(res, 201, core.upsertExternalBotBinding(body));
+    return sendJson(res, 201, core.upsertExternalBotBinding({ ...body, spaceId: body?.spaceId || spaceId }));
   }
 
   if (req.method === "POST" && url.pathname === "/api/external/bot-configs") {
     const body = await parseJsonBody<any>(req);
-    const saved = core.upsertExternalBotConfig(body);
+    const saved = core.upsertExternalBotConfig({ ...body, spaceId: body?.spaceId || spaceId });
     void Promise.resolve(staticConfig.externalBotRuntime?.sync(saved.provider)).catch(error => {
       console.error(`[http] external bot runtime sync failed for ${saved.provider}: ${(error as Error).message}`);
     });
@@ -424,7 +445,7 @@ async function route(
 
   const externalBotConfigDelete = url.pathname.match(/^\/api\/external\/bot-configs\/([^/]+)$/);
   if (req.method === "DELETE" && externalBotConfigDelete) {
-    const result = core.deleteExternalBotConfig(decodeURIComponent(externalBotConfigDelete[1]));
+    const result = core.deleteExternalBotConfig(decodeURIComponent(externalBotConfigDelete[1]), spaceId);
     void Promise.resolve(staticConfig.externalBotRuntime?.remove(result.provider)).catch(error => {
       console.error(`[http] external bot runtime remove failed for ${result.provider}: ${(error as Error).message}`);
     });
@@ -433,7 +454,7 @@ async function route(
 
   if (req.method === "POST" && url.pathname === "/api/external/routed-messages") {
     const body = await parseJsonBody<any>(req);
-    return sendJson(res, 201, core.createExternalRoutedMessage(body));
+    return sendJson(res, 201, core.createExternalRoutedMessage({ ...body, spaceId: body?.spaceId || spaceId }));
   }
 
   if (req.method === "POST" && url.pathname === "/api/external/message-links/backfill") {
@@ -443,7 +464,7 @@ async function route(
 
   if (req.method === "POST" && url.pathname === "/api/tasks") {
     const body = await parseJsonBody<any>(req);
-    return sendJson(res, 201, core.createTask(body));
+    return sendJson(res, 201, core.createTask({ ...body, spaceId: body?.spaceId || spaceId }));
   }
 
   const taskPatch = url.pathname.match(/^\/api\/tasks\/([^/]+)$/);
@@ -454,7 +475,7 @@ async function route(
 
   if (req.method === "POST" && url.pathname === "/api/scheduled-tasks") {
     const body = await parseJsonBody<any>(req);
-    return sendJson(res, 201, core.createScheduledTask(body));
+    return sendJson(res, 201, core.createScheduledTask({ ...body, spaceId: body?.spaceId || spaceId }));
   }
 
   const scheduledTask = url.pathname.match(/^\/api\/scheduled-tasks\/([^/]+)$/);
@@ -576,6 +597,19 @@ function readComputerCredentials(
 
 function parseBooleanQuery(value: string | null): boolean {
   return value === "1" || value === "true" || value === "yes";
+}
+
+/**
+ * Extract the caller's active space. Priority: `spaceId` query -> body
+ * (handled per-route) -> `X-Iteam-Space` header. Returns null when unset so
+ * the core defaults to `space_default`.
+ */
+function resolveSpaceIdHeader(req: IncomingMessage, url: URL): string | null {
+  const query = url.searchParams.get("spaceId");
+  if (query && query.trim()) return query.trim();
+  const header = req.headers["x-iteam-space"];
+  const raw = Array.isArray(header) ? header[0] : header;
+  return raw && String(raw).trim() ? String(raw).trim() : null;
 }
 
 function parseConnectionHeader(req: IncomingMessage): { computerId: string; token: string } {

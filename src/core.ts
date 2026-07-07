@@ -9,6 +9,7 @@
 import { CronExpressionParser } from "cron-parser";
 import { createId as defaultCreateId, nowIso as defaultNowIso, DAEMON_VERSION } from "./lib.js";
 import { createStore } from "./store/index.js";
+import { DEFAULT_SPACE_ID } from "./store/base.js";
 import { RuntimeManager } from "./runtime.js";
 import type { IStore, StateListener } from "./store/types.js";
 import type {
@@ -30,14 +31,38 @@ import type {
   PendingComputerConnection,
   RuntimeInfo,
   ScheduledTask,
+  Space,
   State,
   StoreEvent,
   Task,
   Human
 } from "./types.js";
 
+/**
+ * Resolves the active space for a request. Accepts either a space id
+ * (`space_abc`) or a slug (`growth`); missing/empty values fall back to the
+ * built-in default space so pre-space callers continue to work.
+ */
+export function resolveSpaceId(state: State, spaceId: string | null | undefined): string {
+  const raw = String(spaceId || "").trim();
+  if (!raw) return DEFAULT_SPACE_ID;
+  const spaces = state.spaces || [];
+  const byId = spaces.find(space => space.id === raw);
+  if (byId) return byId.id;
+  const bySlug = spaces.find(space => space.slug === raw);
+  if (bySlug) return bySlug.id;
+  throw new HttpError(404, `space not found: ${raw}`);
+}
+
+export { DEFAULT_SPACE_ID };
+
 const MAX_DELIVERY_DEPTH = 10;
 const DEFAULT_INGRESS_PAIRING_TTL_MS = 5 * 60 * 1000;
+
+/** Options every space-scoped mutation accepts. */
+export interface SpaceContext {
+  spaceId?: string | null;
+}
 
 /** A typed error so the HTTP layer can map domain failures to status codes. */
 export class HttpError extends Error {
@@ -54,7 +79,7 @@ export interface IteamCoreOptions {
   idGenerator?: (prefix: string) => string;
 }
 
-export interface MessageCreateInput {
+export interface MessageCreateInput extends SpaceContext {
   target: string;
   text: string;
   authorId?: string;
@@ -67,7 +92,7 @@ export interface MessageCreateInput {
   source?: string;
 }
 
-export interface AgentCreateInput {
+export interface AgentCreateInput extends SpaceContext {
   name: string;
   description?: string;
   runtime?: string;
@@ -87,7 +112,7 @@ export interface HumanPatchInput {
   name?: string;
 }
 
-export interface ChannelCreateInput {
+export interface ChannelCreateInput extends SpaceContext {
   name: string;
   description?: string;
   private?: boolean;
@@ -98,7 +123,7 @@ export interface ChannelPatchInput {
   description?: string;
 }
 
-export interface TaskCreateInput {
+export interface TaskCreateInput extends SpaceContext {
   target: string;
   title: string;
   description?: string;
@@ -114,7 +139,7 @@ export interface TaskPatchInput {
   description?: string;
 }
 
-export interface ScheduledTaskCreateInput {
+export interface ScheduledTaskCreateInput extends SpaceContext {
   target: string;
   agentId: string;
   prompt: string;
@@ -138,7 +163,7 @@ export interface ScheduledTaskPatchInput {
   nextRunAt?: string;
 }
 
-export interface ConnectInviteInput {
+export interface ConnectInviteInput extends SpaceContext {
   serverUrl?: string;
   label?: string;
 }
@@ -178,7 +203,7 @@ export interface DeliveryHelpNeededInput {
   reason?: string;
 }
 
-export interface IngressPairingCreateInput {
+export interface IngressPairingCreateInput extends SpaceContext {
   target: string;
   agentId: string;
   label?: string;
@@ -203,7 +228,7 @@ export interface IngressMessageInput {
   sessionKey?: string;
 }
 
-export interface ExternalBindingUpsertInput {
+export interface ExternalBindingUpsertInput extends SpaceContext {
   provider: string;
   tenantKey: string;
   chatId: string;
@@ -212,7 +237,7 @@ export interface ExternalBindingUpsertInput {
   defaultAgentId?: string | null;
 }
 
-export interface ExternalBotConfigUpsertInput {
+export interface ExternalBotConfigUpsertInput extends SpaceContext {
   provider?: string;
   alias?: string | null;
   appId: string;
@@ -221,7 +246,7 @@ export interface ExternalBotConfigUpsertInput {
   enabled?: boolean;
 }
 
-export interface ExternalRoutedMessageInput {
+export interface ExternalRoutedMessageInput extends SpaceContext {
   provider: string;
   tenantKey: string;
   chatId: string;
@@ -257,13 +282,13 @@ export interface RuntimeEventInput {
   createdAt?: string;
 }
 
-export interface MessageQuery {
+export interface MessageQuery extends SpaceContext {
   target?: string;
   limit?: number | string | null;
   before?: string | null;
 }
 
-export interface ChannelMessageQuery {
+export interface ChannelMessageQuery extends SpaceContext {
   channelId: string;
   limit?: number | string | null;
   before?: string | null;
@@ -377,6 +402,7 @@ export class IteamCore {
         const label = agent ? `@${agent.handle || slugHandle(agent.name)}` : delivery.agentId;
         s.messages.push({
           id: this.newId("msg"),
+          spaceId: delivery.spaceId,
           target: delivery.target,
           authorId: "system",
           type: "system",
@@ -405,21 +431,115 @@ export class IteamCore {
     return this.store.snapshot();
   }
 
-  listChannels() {
-    const snapshot = this.store.snapshot();
-    const messages = snapshot.messages || [];
-    return (snapshot.channels || []).map(channel => ({
+  // ---------------------------------------------------------------------------
+  // spaces
+
+  listSpaces(): Space[] {
+    return this.store.snapshot().spaces || [];
+  }
+
+  createSpace(input: { name: string; slug?: string; description?: string }): Space {
+    const rawName = String(input.name || "").trim();
+    if (!rawName) throw new HttpError(400, "name is required");
+    const slug = slugSpaceName(input.slug || rawName);
+    return this.store.mutate<Space>(s => {
+      s.spaces ||= [];
+      if (s.spaces.some(space => space.slug === slug)) {
+        throw new HttpError(409, "space slug already exists");
+      }
+      const now = this.clock();
+      const created: Space = {
+        id: this.newId("space"),
+        name: rawName,
+        slug,
+        description: String(input.description || "").trim() || undefined,
+        createdAt: now,
+        updatedAt: now
+      };
+      s.spaces.push(created);
+      // NOTE: cannot auto-provision an `#all` channel here yet — the legacy
+      // SQL schemas still enforce `UNIQUE(target)`. Once schemas migrate to
+      // `UNIQUE(space_id, target)` we can seed the `#all` channel per space
+      // like initialState() does for the default space.
+      return created;
+    });
+  }
+
+  deleteSpace(spaceId: string): void {
+    if (spaceId === DEFAULT_SPACE_ID) {
+      throw new HttpError(400, "cannot delete the default space");
+    }
+    this.store.mutate<void>(s => {
+      const exists = (s.spaces || []).some(space => space.id === spaceId);
+      if (!exists) throw new HttpError(404, "space not found");
+      s.spaces = (s.spaces || []).filter(space => space.id !== spaceId);
+      s.channels = (s.channels || []).filter(channel => channel.spaceId !== spaceId);
+      s.agents = (s.agents || []).filter(agent => agent.spaceId !== spaceId);
+      s.computers = (s.computers || []).filter(computer => computer.spaceId !== spaceId);
+      s.pendingComputerConnections = (s.pendingComputerConnections || []).filter(p => p.spaceId !== spaceId);
+      s.messages = (s.messages || []).filter(m => m.spaceId !== spaceId);
+      s.deliveries = (s.deliveries || []).filter(d => d.spaceId !== spaceId);
+      s.tasks = (s.tasks || []).filter(t => t.spaceId !== spaceId);
+      s.scheduledTasks = (s.scheduledTasks || []).filter(t => t.spaceId !== spaceId);
+      s.externalIngressPairings = (s.externalIngressPairings || []).filter(p => p.spaceId !== spaceId);
+      s.externalIngressPolicies = (s.externalIngressPolicies || []).filter(p => p.spaceId !== spaceId);
+      s.externalBotConfigs = (s.externalBotConfigs || []).filter(c => c.spaceId !== spaceId);
+      s.externalBotBindings = (s.externalBotBindings || []).filter(b => b.spaceId !== spaceId);
+      s.externalMessageLinks = (s.externalMessageLinks || []).filter(l => l.spaceId !== spaceId);
+    });
+  }
+
+  /**
+   * Snapshot pre-filtered to a single space; humans and the spaces list are
+   * global. Every space-owned collection is scoped to the resolved space id.
+   */
+  snapshotForSpace(spaceIdInput: string | null | undefined): State {
+    const raw = this.store.snapshot();
+    const spaceId = resolveSpaceId(raw, spaceIdInput);
+    return {
+      ...raw,
+      spaces: raw.spaces,
+      humans: raw.humans,
+      computers: (raw.computers || []).filter(item => item.spaceId === spaceId),
+      pendingComputerConnections: (raw.pendingComputerConnections || []).filter(item => item.spaceId === spaceId),
+      agents: (raw.agents || []).filter(item => item.spaceId === spaceId),
+      channels: (raw.channels || []).filter(item => item.spaceId === spaceId),
+      messages: (raw.messages || []).filter(item => item.spaceId === spaceId),
+      deliveries: (raw.deliveries || []).filter(item => item.spaceId === spaceId),
+      tasks: (raw.tasks || []).filter(item => item.spaceId === spaceId),
+      scheduledTasks: (raw.scheduledTasks || []).filter(item => item.spaceId === spaceId),
+      externalIngressPairings: (raw.externalIngressPairings || []).filter(item => item.spaceId === spaceId),
+      externalIngressPolicies: (raw.externalIngressPolicies || []).filter(item => item.spaceId === spaceId),
+      externalBotConfigs: (raw.externalBotConfigs || []).filter(item => item.spaceId === spaceId),
+      externalBotBindings: (raw.externalBotBindings || []).filter(item => item.spaceId === spaceId),
+      externalMessageLinks: (raw.externalMessageLinks || []).filter(item => item.spaceId === spaceId),
+      events: raw.events
+    };
+  }
+
+  /**
+   * Resolve a caller-provided space selector against the current store. Used
+   * by every mutation entry point that accepts a `SpaceContext`.
+   */
+  private resolveSpaceId(spaceId: string | null | undefined): string {
+    return resolveSpaceId(this.store.snapshot(), spaceId);
+  }
+
+  listChannels(spaceId?: string | null) {
+    const state = this.snapshotForSpace(spaceId);
+    const messages = state.messages || [];
+    return (state.channels || []).map(channel => ({
       ...channel,
       messageCount: messages.filter(message => parentTargetFromThread(message.target) === channel.target).length
     }));
   }
 
-  listAgents() {
-    return this.store.snapshot().agents || [];
+  listAgents(spaceId?: string | null) {
+    return this.snapshotForSpace(spaceId).agents || [];
   }
 
-  listComputers() {
-    return this.store.snapshot().computers || [];
+  listComputers(spaceId?: string | null) {
+    return this.snapshotForSpace(spaceId).computers || [];
   }
 
   listHumans() {
@@ -439,43 +559,46 @@ export class IteamCore {
     });
   }
 
-  listDeliveries() {
-    return this.store.snapshot().deliveries || [];
+  listDeliveries(spaceId?: string | null) {
+    return this.snapshotForSpace(spaceId).deliveries || [];
   }
 
-  listIngressPairings() {
-    return this.store.snapshot().externalIngressPairings || [];
+  listIngressPairings(spaceId?: string | null) {
+    return this.snapshotForSpace(spaceId).externalIngressPairings || [];
   }
 
-  listIngressPolicies() {
-    return (this.store.snapshot().externalIngressPolicies || []).map(policy => ({
+  listIngressPolicies(spaceId?: string | null) {
+    return (this.snapshotForSpace(spaceId).externalIngressPolicies || []).map(policy => ({
       ...policy,
       token: maskToken(policy.token)
     }));
   }
 
-  listExternalBotConfigs() {
-    return (this.store.snapshot().externalBotConfigs || []).map(config => ({
+  listExternalBotConfigs(spaceId?: string | null) {
+    return (this.snapshotForSpace(spaceId).externalBotConfigs || []).map(config => ({
       ...config,
       appSecret: maskToken(config.appSecret)
     }));
   }
 
-  getExternalBotConfig(provider: string): ExternalBotConfig | null {
+  getExternalBotConfig(provider: string, spaceId?: string | null): ExternalBotConfig | null {
     const normalized = normalizeProvider(provider);
-    return (this.store.snapshot().externalBotConfigs || []).find(config => config.provider === normalized) || null;
+    const resolved = this.resolveSpaceId(spaceId);
+    return (this.store.snapshot().externalBotConfigs || []).find(config =>
+      config.provider === normalized && config.spaceId === resolved
+    ) || null;
   }
 
-  listExternalBotBindings() {
-    return this.store.snapshot().externalBotBindings || [];
+  listExternalBotBindings(spaceId?: string | null) {
+    return this.snapshotForSpace(spaceId).externalBotBindings || [];
   }
 
-  listExternalMessageLinks() {
-    return this.store.snapshot().externalMessageLinks || [];
+  listExternalMessageLinks(spaceId?: string | null) {
+    return this.snapshotForSpace(spaceId).externalMessageLinks || [];
   }
 
-  listPendingConnections() {
-    return this.store.snapshot().pendingComputerConnections || [];
+  listPendingConnections(spaceId?: string | null) {
+    return this.snapshotForSpace(spaceId).pendingComputerConnections || [];
   }
 
   listTasks(filter: {
@@ -485,8 +608,10 @@ export class IteamCore {
     createdBy?: string | null;
     q?: string | null;
     includeDone?: boolean;
+    spaceId?: string | null;
   } = {}) {
     const snapshot = this.store.snapshot();
+    const spaceId = filter.spaceId !== undefined ? this.resolveSpaceId(filter.spaceId) : null;
     const replyCounts = new Map<string, number>();
     for (const message of snapshot.messages || []) {
       const threadId = threadRootFromTarget(message.target);
@@ -494,6 +619,7 @@ export class IteamCore {
       replyCounts.set(threadId, (replyCounts.get(threadId) || 0) + 1);
     }
     let tasks = snapshot.tasks || [];
+    if (spaceId) tasks = tasks.filter(task => task.spaceId === spaceId);
     if (filter.target) tasks = tasks.filter(task => task.target === filter.target);
     const status = normalizeOptionalString(filter.status);
     if (status && status !== "all") {
@@ -518,8 +644,12 @@ export class IteamCore {
     }));
   }
 
-  listScheduledTasks(filter: { target?: string | null; status?: string | null; agentId?: string | null } = {}) {
+  listScheduledTasks(filter: { target?: string | null; status?: string | null; agentId?: string | null; spaceId?: string | null } = {}) {
     let tasks = this.store.snapshot().scheduledTasks || [];
+    if (filter.spaceId !== undefined) {
+      const spaceId = this.resolveSpaceId(filter.spaceId);
+      tasks = tasks.filter(task => task.spaceId === spaceId);
+    }
     if (filter.target) tasks = tasks.filter(task => task.target === filter.target);
     if (filter.status) tasks = tasks.filter(task => task.status === filter.status);
     if (filter.agentId) tasks = tasks.filter(task => task.agentId === filter.agentId);
@@ -531,17 +661,25 @@ export class IteamCore {
       throw new HttpError(400, "target is required; use /api/messages/channel/:channelId for channel messages");
     }
     const snapshot = this.store.snapshot();
+    const spaceId = query.spaceId !== undefined ? this.resolveSpaceId(query.spaceId) : null;
     const limit = parseMessageLimit(query.limit);
-    const filtered = (snapshot.messages || []).filter(message => message.target === query.target);
+    const filtered = (snapshot.messages || []).filter(message =>
+      message.target === query.target && (!spaceId || message.spaceId === spaceId)
+    );
     return paginateMessages(filtered, { limit, before: query.before ?? null });
   }
 
   listMessagesByChannel(query: ChannelMessageQuery): Array<Message & { replyCount: number; depth?: number }> {
     const snapshot = this.store.snapshot();
-    const channel = findChannel(snapshot, query.channelId);
+    const spaceId = query.spaceId !== undefined ? this.resolveSpaceId(query.spaceId) : null;
+    const channel = findChannel(snapshot, query.channelId, spaceId);
     if (!channel) throw new HttpError(404, "channel not found");
     const limit = parseMessageLimit(query.limit);
-    const messages = (snapshot.messages || []).filter(message => message.target === channel.target && !message.threadId);
+    const messages = (snapshot.messages || []).filter(message =>
+      message.target === channel.target &&
+      !message.threadId &&
+      (!spaceId || message.spaceId === spaceId)
+    );
     const paginated = paginateMessages(messages, { limit, before: query.before ?? null });
     const withReplies = withReplyCounts(snapshot.messages || [], paginated);
     return withDeliveryDepth(snapshot.deliveries || [], withReplies);
@@ -552,28 +690,31 @@ export class IteamCore {
 
   createChannel(input: ChannelCreateInput) {
     if (!input.name?.trim()) throw new HttpError(400, "name is required");
+    const spaceId = this.resolveSpaceId(input.spaceId);
     return this.store.mutate(s => {
       const now = this.clock();
       const name = slugChannelName(input.name);
       const target = `#${name}`;
-      if (s.channels.some(channel => channel.target === target)) {
+      if (s.channels.some(channel => channel.spaceId === spaceId && channel.target === target)) {
         throw new HttpError(409, "channel already exists");
       }
       const created = {
         id: this.newId("chan"),
+        spaceId,
         name,
         target,
         kind: input.private ? "private" : "channel",
         description: input.description?.trim() || `Channel for ${name}`,
         memberIds: [
           ...(s.humans || []).map(human => human.id),
-          ...(s.agents || []).map(agent => agent.id)
+          ...(s.agents || []).filter(agent => agent.spaceId === spaceId).map(agent => agent.id)
         ],
         createdAt: now
       };
       s.channels.push(created);
       s.messages.push({
         id: this.newId("msg"),
+        spaceId,
         target,
         authorId: "system",
         type: "system",
@@ -595,7 +736,9 @@ export class IteamCore {
       if (input.name?.trim()) {
         const name = slugChannelName(input.name);
         const target = `#${name}`;
-        if (target !== oldTarget && s.channels.some(channel => channel.id !== current.id && channel.target === target)) {
+        if (target !== oldTarget && s.channels.some(channel =>
+          channel.id !== current.id && channel.spaceId === current.spaceId && channel.target === target
+        )) {
           throw new HttpError(409, "channel already exists");
         }
         current.name = name;
@@ -619,11 +762,13 @@ export class IteamCore {
 
   createConnectInvite(input: ConnectInviteInput, originFromHost: string): ConnectInviteResult {
     const origin = input.serverUrl || originFromHost;
+    const spaceId = this.resolveSpaceId(input.spaceId);
     const token = this.newId("connect");
     const invite = this.store.mutate<PendingComputerConnection>(s => {
       const now = this.clock();
       const created: PendingComputerConnection = {
         id: this.newId("computer_invite"),
+        spaceId,
         token,
         status: "waiting",
         createdAt: now,
@@ -686,6 +831,7 @@ export class IteamCore {
         // get two distinct computers.
         current = {
           id: `computer_${invite.id.replace(/^computer_invite_/, "").slice(0, 16)}`,
+          spaceId: invite.spaceId || DEFAULT_SPACE_ID,
           name: input.name || fingerprint.hostname,
           fingerprint,
           status: "online",
@@ -889,6 +1035,10 @@ export class IteamCore {
     const state = this.store.snapshot();
     const computer = state.computers.find(c => c.id === input.computerId);
     if (!computer) throw new HttpError(404, "computer not found");
+    const spaceId = this.resolveSpaceId(input.spaceId || computer.spaceId);
+    if (computer.spaceId && computer.spaceId !== spaceId) {
+      throw new HttpError(400, "computer belongs to a different space");
+    }
     const runtime = normalizeOptionalString(input.runtime) || defaultRuntimeForComputer(computer.runtimes || []);
     if (!runtime) throw new HttpError(400, "runtime is required");
     const agent = this.store.mutate<Agent>(s => {
@@ -896,6 +1046,7 @@ export class IteamCore {
       const agentId = this.newId("agent");
       const created: Agent = {
         id: agentId,
+        spaceId,
         name: input.name,
         handle: input.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-"),
         description: input.description || "Local AI teammate",
@@ -917,7 +1068,7 @@ export class IteamCore {
       if (linkedComputer && !linkedComputer.agentIds.includes(created.id)) {
         linkedComputer.agentIds.push(created.id);
       }
-      const all = s.channels.find(c => c.target === "#all");
+      const all = s.channels.find(c => c.spaceId === spaceId && c.target === "#all");
       if (all && !all.memberIds.includes(created.id)) all.memberIds.push(created.id);
       return created;
     });
@@ -936,7 +1087,11 @@ export class IteamCore {
         const name = input.name.trim();
         if (!name) throw new HttpError(400, "name is required");
         const handle = slugHandle(name);
-        const taken = s.agents.some(agent => agent.id !== current.id && agent.handle === handle);
+        const taken = s.agents.some(agent =>
+          agent.id !== current.id &&
+          agent.spaceId === current.spaceId &&
+          agent.handle === handle
+        );
         if (taken) throw new HttpError(409, "agent handle already exists");
         current.name = name;
         current.handle = handle;
@@ -946,6 +1101,49 @@ export class IteamCore {
       current.updatedAt = this.clock();
       return current;
     });
+  }
+
+  deleteAgent(agentId: string): Agent {
+    const removed = this.store.mutate<Agent>(s => {
+      const now = this.clock();
+      const current = (s.agents || []).find(agent => agent.id === agentId);
+      if (!current) throw new HttpError(404, "agent not found");
+      const removedAgent = { ...current };
+      s.agents = (s.agents || []).filter(agent => agent.id !== agentId);
+      for (const computer of s.computers || []) {
+        computer.agentIds = (computer.agentIds || []).filter(id => id !== agentId);
+      }
+      s.channels = (s.channels || [])
+        .filter(channel => !(channel.kind === "dm" && channel.target === `dm:${agentId}`))
+        .map(channel => ({
+          ...channel,
+          memberIds: (channel.memberIds || []).filter(id => id !== agentId)
+        }));
+      s.deliveries = (s.deliveries || []).filter(delivery => delivery.agentId !== agentId);
+      for (const task of s.tasks || []) {
+        if (task.assigneeId === agentId) {
+          task.assigneeId = null;
+          task.updatedAt = now;
+        }
+      }
+      for (const scheduled of s.scheduledTasks || []) {
+        if (scheduled.agentId === agentId) {
+          scheduled.status = "paused";
+          scheduled.updatedAt = now;
+        }
+      }
+      for (const binding of s.externalBotBindings || []) {
+        if (binding.defaultAgentId === agentId) binding.defaultAgentId = null;
+      }
+      return removedAgent;
+    });
+    if (removed.computerId) {
+      this.publishComputerPush(removed.computerId, {
+        type: "stop",
+        payload: { ...removed, desiredStatus: "stopped", status: "stopped" }
+      });
+    }
+    return removed;
   }
 
   reportRuntimeStatus(agentId: string, input: RuntimeStatusInput): Agent {
@@ -998,21 +1196,23 @@ export class IteamCore {
 
   createMessage(input: MessageCreateInput): Message {
     if (!input.target || !input.text) throw new HttpError(400, "target and text are required");
+    const spaceId = this.resolveSpaceId(input.spaceId);
     const createdIds: string[] = [];
     const message = this.store.mutate<Message>(s => {
       const now = this.clock();
       const authorId = input.authorId || "human-local";
-      const authorAgent = s.agents.find(agent => agent.id === authorId);
+      const authorAgent = s.agents.find(agent => agent.id === authorId && agent.spaceId === spaceId);
       const scheduleParse = authorAgent
         ? stripScheduleDirective(input.text)
         : { text: input.text, directive: null };
       const created: Message = {
         id: this.newId("msg"),
+        spaceId,
         target: input.target,
         authorId,
         type: input.type || (authorAgent ? "agent" : "human"),
         text: scheduleParse.text,
-        mentions: input.mentions || parseMentions(scheduleParse.text, s),
+        mentions: input.mentions || parseMentions(scheduleParse.text, s, spaceId),
         createdAt: input.createdAt || now,
         threadId: input.threadId !== undefined ? input.threadId : threadRootFromTarget(input.target)
       };
@@ -1022,6 +1222,7 @@ export class IteamCore {
       }
       if (authorAgent && scheduleParse.directive) {
         this.applyScheduleDirective(s, {
+          spaceId,
           target: created.target,
           agentId: authorAgent.id,
           createdBy: authorAgent.id,
@@ -1059,6 +1260,7 @@ export class IteamCore {
             .join(", ");
           s.messages.push({
             id: this.newId("msg"),
+            spaceId,
             target: created.target,
             authorId: "system",
             type: "system",
@@ -1118,11 +1320,12 @@ export class IteamCore {
           : (input.threadId || threadRootFromTarget(delivery.target));
         const created: Message = {
           id: this.newId("msg"),
+          spaceId: delivery.spaceId,
           target: replyTarget,
           authorId: delivery.agentId,
           type: "agent",
           text: replyText,
-          mentions: parseMentions(replyText, s),
+          mentions: parseMentions(replyText, s, delivery.spaceId),
           createdAt: now,
           threadId: replyThreadId
         };
@@ -1136,6 +1339,7 @@ export class IteamCore {
           const source = s.messages.find(message => message.id === delivery.messageId);
           if (source && (source.type || "human") === "human" && source.authorId !== "system") {
             this.applyScheduleDirective(s, {
+              spaceId: delivery.spaceId,
               target: delivery.target,
               agentId: delivery.agentId,
               createdBy: source.authorId,
@@ -1157,6 +1361,7 @@ export class IteamCore {
         const reason = input.error ? String(input.error).replace(/\s+/g, " ").slice(0, 600) : "unknown error";
         s.messages.push({
           id: this.newId("msg"),
+          spaceId: delivery.spaceId,
           target: delivery.target,
           authorId: "system",
           type: "system",
@@ -1190,6 +1395,7 @@ export class IteamCore {
       if (!text) throw new HttpError(400, "progress text is required");
       const message: Message = {
         id: this.newId("msg"),
+        spaceId: delivery.spaceId,
         target: task.threadTarget,
         authorId: delivery.agentId,
         type: "agent",
@@ -1227,6 +1433,7 @@ export class IteamCore {
       });
       const message: Message = {
         id: this.newId("msg"),
+        spaceId: delivery.spaceId,
         target: delivery.target,
         authorId: delivery.agentId,
         type: "agent",
@@ -1259,6 +1466,7 @@ export class IteamCore {
       });
       s.messages.push({
         id: this.newId("msg"),
+        spaceId: delivery.spaceId,
         target: delivery.target,
         authorId: "system",
         type: "system",
@@ -1276,12 +1484,14 @@ export class IteamCore {
 
   createTask(input: TaskCreateInput): Task {
     if (!input.target || !input.title) throw new HttpError(400, "target and title are required");
+    const spaceId = this.resolveSpaceId(input.spaceId);
     const task = this.store.mutate<Task>(s => {
       const now = this.clock();
       const messageId = this.newId("msg");
-      const taskNumber = nextTaskNumber(s, input.target);
+      const taskNumber = nextTaskNumber(s, input.target, spaceId);
       const created: Task = {
         id: this.newId("task"),
+        spaceId,
         number: taskNumber,
         target: input.target,
         title: input.title,
@@ -1297,6 +1507,7 @@ export class IteamCore {
       s.tasks.push(created);
       const message: Message = {
         id: messageId,
+        spaceId,
         target: input.target,
         authorId: created.createdBy,
         type: "task",
@@ -1340,6 +1551,7 @@ export class IteamCore {
       if (input.status && input.status !== previousStatus) {
         s.messages.push({
           id: this.newId("msg"),
+          spaceId: current.spaceId,
           target: current.threadTarget,
           authorId: "system",
           type: "system",
@@ -1360,9 +1572,10 @@ export class IteamCore {
     if (!input.target || !input.agentId || !input.prompt) {
       throw new HttpError(400, "target, agentId and prompt are required");
     }
+    const spaceId = this.resolveSpaceId(input.spaceId);
     const created = this.store.mutate<ScheduledTask>(s => {
       const now = this.clock();
-      const agent = s.agents.find(a => a.id === input.agentId);
+      const agent = s.agents.find(a => a.id === input.agentId && a.spaceId === spaceId);
       if (!agent) throw new HttpError(404, "agent not found");
       const id = this.newId("sched");
       const schedule = parseSchedule({
@@ -1374,6 +1587,7 @@ export class IteamCore {
       });
       const task: ScheduledTask = {
         id,
+        spaceId,
         target: input.target,
         agentId: input.agentId,
         prompt: input.prompt,
@@ -1456,11 +1670,11 @@ export class IteamCore {
 
   private applyScheduleDirective(
     state: State,
-    input: { target: string; agentId: string; createdBy: string; directive: ScheduleDirective; now: string }
+    input: { spaceId: string; target: string; agentId: string; createdBy: string; directive: ScheduleDirective; now: string }
   ): void {
-    const { target, agentId, createdBy, directive, now } = input;
+    const { spaceId, target, agentId, createdBy, directive, now } = input;
     if (!directive.create) return;
-    const agent = state.agents.find(a => a.id === agentId);
+    const agent = state.agents.find(a => a.id === agentId && a.spaceId === spaceId);
     if (!agent) return;
     try {
       const schedule = parseSchedule({
@@ -1474,6 +1688,7 @@ export class IteamCore {
       if (!prompt) throw new Error("prompt is required");
       const scheduled: ScheduledTask = {
         id: this.newId("sched"),
+        spaceId,
         target,
         agentId: agent.id,
         prompt,
@@ -1495,6 +1710,7 @@ export class IteamCore {
       state.scheduledTasks.push(scheduled);
       state.messages.push({
         id: this.newId("msg"),
+        spaceId,
         target,
         authorId: "system",
         type: "system",
@@ -1506,6 +1722,7 @@ export class IteamCore {
     } catch (error) {
       state.messages.push({
         id: this.newId("msg"),
+        spaceId,
         target,
         authorId: "system",
         type: "system",
@@ -1544,6 +1761,7 @@ export class IteamCore {
         const threadId = threadRootFromTarget(task.target);
         const message: Message = {
           id: this.newId("msg"),
+          spaceId: task.spaceId,
           target: task.target,
           authorId: "system",
           type: "system",
@@ -1563,6 +1781,7 @@ export class IteamCore {
         if (queued === 0) {
           s.messages.push({
             id: this.newId("msg"),
+            spaceId: task.spaceId,
             target: task.target,
             authorId: "system",
             type: "system",
@@ -1592,11 +1811,12 @@ export class IteamCore {
 
   createIngressPairing(input: IngressPairingCreateInput): ExternalIngressPairing & { connectUrl: string } {
     if (!input.target || !input.agentId) throw new HttpError(400, "target and agentId are required");
+    const spaceId = this.resolveSpaceId(input.spaceId);
     return this.store.mutate(s => {
       const now = this.clock();
-      const agent = s.agents.find(a => a.id === input.agentId);
+      const agent = s.agents.find(a => a.id === input.agentId && a.spaceId === spaceId);
       if (!agent) throw new HttpError(404, "agent not found");
-      if (!s.channels.some(channel => channel.target === input.target)) {
+      if (!s.channels.some(channel => channel.spaceId === spaceId && channel.target === input.target)) {
         throw new HttpError(404, "target channel not found");
       }
       const ttl = Number.isFinite(input.expiresInMs) && Number(input.expiresInMs) > 0
@@ -1605,6 +1825,7 @@ export class IteamCore {
       const pairCode = this.newId("pair");
       const created: ExternalIngressPairing = {
         id: this.newId("ingress_pair"),
+        spaceId,
         pairCode,
         target: input.target,
         agentId: agent.id,
@@ -1639,6 +1860,7 @@ export class IteamCore {
       }
       const policy: ExternalIngressPolicy = {
         id: this.newId("ingress_policy"),
+        spaceId: pairing.spaceId,
         token: this.newId("ingress_token"),
         source: String(input.source || pairing.label || "external").trim() || "external",
         target: pairing.target,
@@ -1676,6 +1898,7 @@ export class IteamCore {
       const source = String(input.source || policy.source || "external").trim() || "external";
       const created: Message = {
         id: this.newId("msg"),
+        spaceId: policy.spaceId,
         target,
         authorId: `ingress:${source}`,
         type: "human",
@@ -1704,12 +1927,16 @@ export class IteamCore {
     const appId = String(input.appId || "").trim();
     if (!provider) throw new HttpError(400, "provider is required");
     if (!appId) throw new HttpError(400, "appId is required");
+    const spaceId = this.resolveSpaceId(input.spaceId);
     return this.store.mutate<ExternalBotConfig>(s => {
       const now = this.clock();
       s.externalBotConfigs ||= [];
-      let config = s.externalBotConfigs.find(item => item.provider === provider);
+      let config = s.externalBotConfigs.find(item =>
+        item.provider === provider && item.spaceId === spaceId
+      );
       if (!config) {
         config = {
+          spaceId,
           provider,
           alias: normalizeOptionalString(input.alias),
           appId,
@@ -1741,11 +1968,14 @@ export class IteamCore {
     });
   }
 
-  updateExternalBotStatus(provider: string, status: string, message?: string | null): ExternalBotConfig | null {
+  updateExternalBotStatus(provider: string, status: string, message?: string | null, spaceId?: string | null): ExternalBotConfig | null {
     const normalized = normalizeProvider(provider);
     if (!normalized) return null;
+    const resolved = this.resolveSpaceId(spaceId);
     return this.store.mutate<ExternalBotConfig | null>(s => {
-      const config = (s.externalBotConfigs || []).find(item => item.provider === normalized);
+      const config = (s.externalBotConfigs || []).find(item =>
+        item.provider === normalized && item.spaceId === resolved
+      );
       if (!config) return null;
       const now = this.clock();
       config.status = status;
@@ -1756,19 +1986,26 @@ export class IteamCore {
     });
   }
 
-  deleteExternalBotConfig(provider: string): { ok: true; provider: string; deletedBindings: number; deletedMessageLinks: number } {
+  deleteExternalBotConfig(provider: string, spaceId?: string | null): { ok: true; provider: string; deletedBindings: number; deletedMessageLinks: number } {
     const normalized = normalizeProvider(provider);
     if (!normalized) throw new HttpError(400, "provider is required");
+    const resolved = this.resolveSpaceId(spaceId);
     return this.store.mutate(s => {
       const beforeConfigs = s.externalBotConfigs || [];
-      if (!beforeConfigs.some(config => config.provider === normalized)) {
+      if (!beforeConfigs.some(config => config.provider === normalized && config.spaceId === resolved)) {
         throw new HttpError(404, "bot config not found");
       }
       const beforeBindings = s.externalBotBindings || [];
       const beforeLinks = s.externalMessageLinks || [];
-      s.externalBotConfigs = beforeConfigs.filter(config => config.provider !== normalized);
-      s.externalBotBindings = beforeBindings.filter(binding => binding.provider !== normalized);
-      s.externalMessageLinks = beforeLinks.filter(link => link.provider !== normalized);
+      s.externalBotConfigs = beforeConfigs.filter(config =>
+        !(config.provider === normalized && config.spaceId === resolved)
+      );
+      s.externalBotBindings = beforeBindings.filter(binding =>
+        !(binding.provider === normalized && binding.spaceId === resolved)
+      );
+      s.externalMessageLinks = beforeLinks.filter(link =>
+        !(link.provider === normalized && link.spaceId === resolved)
+      );
       return {
         ok: true,
         provider: normalized,
@@ -1783,19 +2020,26 @@ export class IteamCore {
     const tenantKey = String(input.tenantKey || "").trim();
     const chatId = String(input.chatId || "").trim();
     if (!provider || !tenantKey || !chatId) throw new HttpError(400, "provider, tenantKey and chatId are required");
+    const spaceId = this.resolveSpaceId(input.spaceId);
     return this.store.mutate<ExternalBotBinding>(s => {
       const now = this.clock();
       const target = normalizeTarget(input.defaultTarget);
       const agentId = normalizeOptionalString(input.defaultAgentId);
-      if (target && !findChannel(s, target)) throw new HttpError(404, "target channel not found");
-      if (agentId && !s.agents.some(agent => agent.id === agentId)) throw new HttpError(404, "agent not found");
+      if (target && !findChannel(s, target, spaceId)) throw new HttpError(404, "target channel not found");
+      if (agentId && !s.agents.some(agent => agent.id === agentId && agent.spaceId === spaceId)) {
+        throw new HttpError(404, "agent not found");
+      }
       s.externalBotBindings ||= [];
       let binding = s.externalBotBindings.find(item =>
-        item.provider === provider && item.tenantKey === tenantKey && item.chatId === chatId
+        item.spaceId === spaceId &&
+        item.provider === provider &&
+        item.tenantKey === tenantKey &&
+        item.chatId === chatId
       );
       if (!binding) {
         binding = {
           id: this.newId("ext_bind"),
+          spaceId,
           provider,
           tenantKey,
           chatId,
@@ -1825,12 +2069,14 @@ export class IteamCore {
     const text = String(input.text || "").trim();
     if (!provider || !tenantKey || !chatId) throw new HttpError(400, "provider, tenantKey and chatId are required");
     if (!text) throw new HttpError(400, "text is required");
+    const spaceId = this.resolveSpaceId(input.spaceId);
     const conversationId = externalConversationId(provider, tenantKey, chatId);
     const createdIds: string[] = [];
     const result = this.store.mutate<ExternalRoutedMessageResult>(s => {
       const now = this.clock();
       const externalMessageId = normalizeOptionalString(input.externalMessageId);
       if (externalMessageId && (s.externalMessageLinks || []).some(link =>
+        link.spaceId === spaceId &&
         link.provider === provider &&
         link.externalConversationId === conversationId &&
         link.externalMessageId === externalMessageId &&
@@ -1839,13 +2085,14 @@ export class IteamCore {
         return { ok: true, replyText: "duplicate message ignored" };
       }
       const binding = (s.externalBotBindings || []).find(item =>
+        item.spaceId === spaceId &&
         item.provider === provider &&
         item.tenantKey === tenantKey &&
         item.chatId === chatId &&
         item.status === "active"
       ) || null;
       const target = normalizeTarget(input.target) || binding?.defaultTarget || null;
-      const mentionedAgents = parseMentions(text, s).filter(mention => mention.kind === "agent");
+      const mentionedAgents = parseMentions(text, s, spaceId).filter(mention => mention.kind === "agent");
       let routeTarget = target;
       let defaultAgentId = normalizeOptionalString(input.defaultAgentId) || binding?.defaultAgentId || null;
 
@@ -1865,7 +2112,7 @@ export class IteamCore {
 
       if (routeTarget.startsWith("dm:")) {
         defaultAgentId ||= routeTarget.slice(3);
-      } else if (!findChannel(s, routeTarget)) {
+      } else if (!findChannel(s, routeTarget, spaceId)) {
         return { ok: false, binding, replyText: `iTeam channel not found: ${routeTarget}` };
       }
 
@@ -1875,7 +2122,8 @@ export class IteamCore {
         const messageId = this.newId("msg");
         const task: Task = {
           id: this.newId("task"),
-          number: nextTaskNumber(s, routeTarget),
+          spaceId,
+          number: nextTaskNumber(s, routeTarget, spaceId),
           target: routeTarget,
           title: text,
           description: "",
@@ -1890,6 +2138,7 @@ export class IteamCore {
         s.tasks.push(task);
         const created: Message = {
           id: messageId,
+          spaceId,
           target: routeTarget,
           authorId: createdBy,
           type: "task",
@@ -1913,6 +2162,7 @@ export class IteamCore {
         s.externalMessageLinks ||= [];
         s.externalMessageLinks.push({
           id: this.newId("ext_msg"),
+          spaceId,
           provider,
           externalConversationId: conversationId,
           externalMessageId,
@@ -1926,11 +2176,12 @@ export class IteamCore {
 
       const created: Message = {
         id: this.newId("msg"),
+        spaceId,
         target: routeTarget,
         authorId: createdBy,
         type: "human",
         text,
-        mentions: parseMentions(text, s),
+        mentions: parseMentions(text, s, spaceId),
         createdAt: now,
         threadId: threadRootFromTarget(routeTarget)
       };
@@ -1956,6 +2207,7 @@ export class IteamCore {
       s.externalMessageLinks ||= [];
       s.externalMessageLinks.push({
         id: this.newId("ext_msg"),
+        spaceId,
         provider,
         externalConversationId: conversationId,
         externalMessageId,
@@ -2029,6 +2281,7 @@ export class IteamCore {
     const labels = dropped.map(m => `@${m.handle || slugHandle(m.name)}`).join(", ");
     s.messages.push({
       id: this.newId("msg"),
+      spaceId: created.spaceId,
       target: created.target,
       authorId: "system",
       type: "system",
@@ -2052,6 +2305,7 @@ export class IteamCore {
     }
     const created = {
       id: this.newId("dm"),
+      spaceId: agent.spaceId,
       name: agent.name,
       target,
       kind: "dm",
@@ -2073,6 +2327,7 @@ export class IteamCore {
     if (s.externalMessageLinks.some(link => link.direction === "out" && link.messageId === message.id)) return;
     s.externalMessageLinks.push({
       id: this.newId("ext_msg"),
+      spaceId: message.spaceId,
       provider: inbound.provider,
       externalConversationId: inbound.externalConversationId,
       externalMessageId: null,
@@ -2180,6 +2435,7 @@ export class IteamCore {
   ): number {
     const agent = state.agents.find(a => a.id === agentId);
     if (!agent || agent.desiredStatus !== "running") return 0;
+    if (agent.spaceId && agent.spaceId !== message.spaceId) return 0;
     state.deliveries ||= [];
     const now = this.clock();
     const id = this.newId("delivery");
@@ -2187,6 +2443,7 @@ export class IteamCore {
     const sessionKey = options.sessionKey ?? sessionKeyFromTarget(target);
     state.deliveries.push({
       id,
+      spaceId: message.spaceId,
       messageId: message.id,
       rootMessageId: options.rootMessageId || message.id,
       parentDeliveryId: options.parentDeliveryId || null,
@@ -2267,8 +2524,10 @@ function shellQuote(value: string): string {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
-function nextTaskNumber(state: State, target: string): number {
-  return (state.tasks || []).filter(task => task.target === target).length + 1;
+function nextTaskNumber(state: State, target: string, spaceId?: string | null): number {
+  return (state.tasks || []).filter(task =>
+    task.target === target && (!spaceId || task.spaceId === spaceId)
+  ).length + 1;
 }
 
 function findMember(state: State, id: string | undefined | null): MentionRef | null {
@@ -2479,19 +2738,25 @@ function pushDeliveryLifecycle(
   }
 }
 
-function parseMentions(text: string, state: State): MentionRef[] {
+function parseMentions(text: string, state: State, spaceId?: string | null): MentionRef[] {
   const handles = new Set<string>(
     Array.from(String(text || "").matchAll(/@([A-Za-z0-9_-]+)/g)).map(match => match[1].toLowerCase())
   );
+  const scopedAgents = spaceId
+    ? (state.agents || []).filter(agent => agent.spaceId === spaceId)
+    : (state.agents || []);
   const people: MentionRef[] = [
     ...(state.humans || []).map<MentionRef>(human => ({ id: human.id, kind: "human", name: human.name, handle: human.handle || slugHandle(human.name) })),
-    ...(state.agents || []).map<MentionRef>(agent => ({ id: agent.id, kind: "agent", name: agent.name, handle: agent.handle || slugHandle(agent.name) }))
+    ...scopedAgents.map<MentionRef>(agent => ({ id: agent.id, kind: "agent", name: agent.name, handle: agent.handle || slugHandle(agent.name) }))
   ];
   return people.filter(person => handles.has(person.handle.toLowerCase()) || handles.has(person.id.toLowerCase()));
 }
 
-function findChannel(state: State, channelIdOrTarget: string) {
-  return (state.channels || []).find(channel =>
+function findChannel(state: State, channelIdOrTarget: string, spaceId?: string | null) {
+  const scoped = spaceId
+    ? (state.channels || []).filter(channel => channel.spaceId === spaceId)
+    : (state.channels || []);
+  return scoped.find(channel =>
     channel.id === channelIdOrTarget ||
     channel.target === channelIdOrTarget ||
     channel.target === `#${channelIdOrTarget.replace(/^#/, "")}`
@@ -2669,6 +2934,15 @@ function slugChannelName(value: string): string {
     .toLowerCase()
     .replace(/[^\p{Letter}\p{Number}_-]+/gu, "-")
     .replace(/^-+|-+$/g, "") || "channel";
+}
+
+function slugSpaceName(value: string): string {
+  return String(value || "")
+    .trim()
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{Letter}\p{Number}_-]+/gu, "-")
+    .replace(/^-+|-+$/g, "") || "space";
 }
 
 /** Render a token as `<first6>…<last4>` for log diagnostics so we can compare

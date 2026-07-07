@@ -12,24 +12,41 @@ import type {
   ExternalIngressPolicy,
   ExternalMessageLink,
   Message,
+  PendingComputerConnection,
   ScheduledTask,
+  Space,
   State,
   StoreEvent,
   Task
 } from "../types.js";
 import type { IStore, StateListener, StateMutator } from "./types.js";
 
+export const DEFAULT_SPACE_ID = "space_default";
+
+function defaultSpace(now = nowIso()): Space {
+  return {
+    id: DEFAULT_SPACE_ID,
+    name: "Default",
+    slug: "default",
+    description: "Default iTeam space",
+    createdAt: now,
+    updatedAt: now
+  };
+}
+
 /**
  * Creates the seed/default state for a brand new iTeam home.
  * Includes the local human and the canonical #all channel.
  */
 export function initialState(): State {
+  const now = nowIso();
   return {
     meta: {
-      createdAt: nowIso(),
-      updatedAt: nowIso(),
+      createdAt: now,
+      updatedAt: now,
       schemaVersion: 1
     },
+    spaces: [defaultSpace(now)],
     computers: [],
     pendingComputerConnections: [],
     humans: [{
@@ -41,12 +58,13 @@ export function initialState(): State {
     agents: [],
     channels: [{
       id: "chan_all",
+      spaceId: DEFAULT_SPACE_ID,
       name: "all",
       target: "#all",
       kind: "channel",
       description: "General channel for all members",
       memberIds: ["human-local"],
-      createdAt: nowIso()
+      createdAt: now
     }],
     messages: [],
     deliveries: [],
@@ -66,34 +84,46 @@ export function initialState(): State {
  * backend right after loading.
  */
 export function sanitizeState(state: State): State {
+  state.spaces = normalizeSpaces(state.spaces);
+  const validSpaceIds = new Set(state.spaces.map(space => space.id));
+  const ensureSpaceId = (value: string | undefined | null) =>
+    value && validSpaceIds.has(value) ? value : DEFAULT_SPACE_ID;
   state.pendingComputerConnections ||= [];
   state.computers = (state.computers || [])
     .filter((computer: Computer) => computer.connectionId)
     .map((computer: Computer) => ({
       ...computer,
+      spaceId: ensureSpaceId(computer.spaceId),
       runtimes: (computer.runtimes || []).filter(runtime => runtime.id !== "mock")
     }));
   state.agents = (state.agents || []).filter((agent: Agent) =>
     (agent.runtime as string) !== "mock" && agent.desiredStatus
-  );
+  ).map((agent: Agent) => ({ ...agent, spaceId: ensureSpaceId(agent.spaceId) }));
+  state.pendingComputerConnections = state.pendingComputerConnections.map((pending: PendingComputerConnection) => ({
+    ...pending,
+    spaceId: ensureSpaceId(pending.spaceId)
+  }));
   const validMemberIds = new Set<string>([
     ...(state.humans || []).map(human => human.id),
     ...state.agents.map(agent => agent.id)
   ]);
   state.channels = (state.channels || []).map((channel: Channel) => ({
     ...channel,
+    spaceId: ensureSpaceId(channel.spaceId),
     memberIds: (channel.memberIds || []).filter(id => validMemberIds.has(id))
   }));
   state.messages = (state.messages || []).filter((message: Message) => {
     const text = message.text || "";
     return !text.includes("iTeam daemon initialized") && !text.includes("mock runtime");
-  });
+  }).map((message: Message) => ({ ...message, spaceId: ensureSpaceId(message.spaceId) }));
   state.tasks = (state.tasks || []).map((task: Task, index: number) => {
     const messageId = task.messageId || createId("msg");
     const status = task.status === "open" ? "todo" : (task.status || "todo");
     const target = task.target || "#all";
+    const spaceId = ensureSpaceId(task.spaceId);
     const normalized: Task = {
       ...task,
+      spaceId,
       number: task.number || index + 1,
       status,
       target,
@@ -105,6 +135,7 @@ export function sanitizeState(state: State): State {
     if (!state.messages.some(message => message.id === messageId)) {
       state.messages.push({
         id: messageId,
+        spaceId,
         target,
         authorId: normalized.createdBy || "human-local",
         type: "task",
@@ -119,6 +150,7 @@ export function sanitizeState(state: State): State {
   });
   state.scheduledTasks = (state.scheduledTasks || []).map((task: ScheduledTask) => ({
     ...task,
+    spaceId: ensureSpaceId(task.spaceId),
     sessionKey: task.sessionKey ?? null,
     intervalMs: task.cronExpression ? null : Number(task.intervalMs) || 10 * 60 * 1000,
     cronExpression: task.cronExpression || null,
@@ -133,6 +165,7 @@ export function sanitizeState(state: State): State {
   }));
   state.deliveries = (state.deliveries || []).map((delivery: Delivery) => ({
     ...delivery,
+    spaceId: ensureSpaceId(delivery.spaceId),
     rootMessageId: delivery.rootMessageId || delivery.messageId,
     parentDeliveryId: delivery.parentDeliveryId ?? null,
     depth: delivery.depth ?? 0,
@@ -144,6 +177,7 @@ export function sanitizeState(state: State): State {
   }));
   state.externalIngressPairings = (state.externalIngressPairings || []).map((pairing: ExternalIngressPairing) => ({
     ...pairing,
+    spaceId: ensureSpaceId(pairing.spaceId),
     status: pairing.status || "waiting",
     contextRules: normalizeContextRules(pairing.contextRules),
     consumedAt: pairing.consumedAt ?? null,
@@ -151,6 +185,7 @@ export function sanitizeState(state: State): State {
   }));
   state.externalIngressPolicies = (state.externalIngressPolicies || []).map((policy: ExternalIngressPolicy) => ({
     ...policy,
+    spaceId: ensureSpaceId(policy.spaceId),
     status: policy.status || "active",
     contextRules: normalizeContextRules(policy.contextRules),
     updatedAt: policy.updatedAt || policy.createdAt || nowIso()
@@ -162,6 +197,7 @@ export function sanitizeState(state: State): State {
     if (oldProvider && oldProvider !== provider) providerMigration.set(oldProvider, provider);
     return {
       ...config,
+      spaceId: ensureSpaceId(config.spaceId),
       provider,
       alias: config.alias ?? null,
       appSecret: config.appSecret ?? null,
@@ -175,6 +211,7 @@ export function sanitizeState(state: State): State {
   }).filter(config => config.provider && config.appId);
   state.externalBotBindings = (state.externalBotBindings || []).map((binding: ExternalBotBinding) => ({
     ...binding,
+    spaceId: ensureSpaceId(binding.spaceId),
     provider: providerMigration.get(String(binding.provider || "").toLowerCase()) || String(binding.provider || "").toLowerCase(),
     chatType: binding.chatType ?? null,
     defaultTarget: binding.defaultTarget ?? null,
@@ -184,12 +221,32 @@ export function sanitizeState(state: State): State {
   }));
   state.externalMessageLinks = (state.externalMessageLinks || []).map((link: ExternalMessageLink) => ({
     ...link,
+    spaceId: ensureSpaceId(link.spaceId),
     provider: providerMigration.get(String(link.provider || "").toLowerCase()) || String(link.provider || "").toLowerCase(),
     externalMessageId: link.externalMessageId ?? null,
     rootMessageId: link.rootMessageId ?? null
   }));
   state.events = (state.events || []).filter(event => !String(event.type || "").startsWith("agent:"));
   return state;
+}
+
+function normalizeSpaces(spaces: Space[] | undefined): Space[] {
+  const now = nowIso();
+  const byId = new Map<string, Space>();
+  for (const space of spaces || []) {
+    const id = String(space.id || "").trim();
+    if (!id) continue;
+    byId.set(id, {
+      id,
+      name: String(space.name || space.slug || id).trim(),
+      slug: String(space.slug || id).trim(),
+      description: space.description || "",
+      createdAt: space.createdAt || now,
+      updatedAt: space.updatedAt || space.createdAt || now
+    });
+  }
+  if (!byId.has(DEFAULT_SPACE_ID)) byId.set(DEFAULT_SPACE_ID, defaultSpace(now));
+  return [...byId.values()];
 }
 
 function normalizeExternalBotConfigProvider(provider: string, appId: string): string {
