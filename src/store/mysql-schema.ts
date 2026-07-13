@@ -11,6 +11,18 @@
  */
 export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
   {
+    name: "iteam_spaces",
+    ddl: `CREATE TABLE IF NOT EXISTS iteam_spaces (
+      id          VARCHAR(64)  NOT NULL PRIMARY KEY,
+      name        VARCHAR(255) NOT NULL,
+      slug        VARCHAR(64)  NOT NULL,
+      description TEXT,
+      created_at  VARCHAR(40)  NOT NULL,
+      updated_at  VARCHAR(40)  NOT NULL,
+      UNIQUE KEY uniq_slug (slug)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+  },
+  {
     name: "iteam_humans",
     ddl: `CREATE TABLE IF NOT EXISTS iteam_humans (
       id              VARCHAR(64)  NOT NULL PRIMARY KEY,

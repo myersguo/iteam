@@ -106,7 +106,52 @@ export class SqliteStore extends BaseStore {
     this.addColumnIfMissing("iteam_external_bot_configs", "status_message", "TEXT");
     this.addColumnIfMissing("iteam_external_bot_configs", "last_connected_at", "TEXT");
     this.addColumnIfMissing("iteam_channels", "default_agent_id", "TEXT");
+    this.addColumnIfMissing("iteam_channels", "space_id", "TEXT NOT NULL DEFAULT 'space_default'");
+    this.migrateChannelsUniqueSpaceTarget();
     this.migrateAgentsModelNullable();
+  }
+
+  // Legacy iteam_channels had UNIQUE(target). Multi-space channels need
+  // UNIQUE(space_id, target). Rebuild the table when the old constraint is
+  // still there.
+  private migrateChannelsUniqueSpaceTarget(): void {
+    const indexes = this.db
+      .prepare(`PRAGMA index_list(iteam_channels)`)
+      .all() as Array<{ name: string; unique: number; origin: string }>;
+    let hasLegacyUnique = false;
+    for (const idx of indexes) {
+      if (!idx.unique) continue;
+      const cols = this.db
+        .prepare(`PRAGMA index_info(${idx.name})`)
+        .all() as Array<{ name: string }>;
+      if (cols.length === 1 && cols[0].name === "target") {
+        hasLegacyUnique = true;
+        break;
+      }
+    }
+    if (!hasLegacyUnique) return;
+    console.log("[sqlite] migrating iteam_channels UNIQUE(target) → UNIQUE(space_id, target)...");
+    this.db.exec(`
+      CREATE TABLE iteam_channels_new (
+        id                TEXT NOT NULL PRIMARY KEY,
+        space_id          TEXT NOT NULL DEFAULT 'space_default',
+        name              TEXT NOT NULL,
+        target            TEXT NOT NULL,
+        kind              TEXT NOT NULL,
+        description       TEXT,
+        default_agent_id  TEXT,
+        created_at        TEXT NOT NULL,
+        UNIQUE(space_id, target)
+      )
+    `);
+    this.db.exec(`
+      INSERT INTO iteam_channels_new (id, space_id, name, target, kind, description, default_agent_id, created_at)
+      SELECT id, COALESCE(space_id, 'space_default'), name, target, kind, description, default_agent_id, created_at
+      FROM iteam_channels
+    `);
+    this.db.exec(`DROP TABLE iteam_channels`);
+    this.db.exec(`ALTER TABLE iteam_channels_new RENAME TO iteam_channels`);
+    console.log("[sqlite] iteam_channels unique-constraint migration complete");
   }
 
   // SQLite doesn't support ALTER COLUMN to drop NOT NULL; rebuild the table.
@@ -201,6 +246,17 @@ export class SqliteStore extends BaseStore {
   private loadFromTables(): State {
     const seed = initialState();
 
+    const spaceRows = this.db
+      .prepare("SELECT id, name, slug, description, created_at, updated_at FROM iteam_spaces")
+      .all() as Array<{
+        id: string;
+        name: string;
+        slug: string;
+        description: string | null;
+        created_at: string;
+        updated_at: string;
+      }>;
+
     const humanRows = this.db
       .prepare("SELECT id, name, handle, role FROM iteam_humans")
       .all() as Array<{ id: string; name: string; handle: string; role: string | null }>;
@@ -256,6 +312,7 @@ export class SqliteStore extends BaseStore {
 
     const channelRows = this.db.prepare("SELECT * FROM iteam_channels").all() as Array<{
       id: string;
+      space_id: string | null;
       name: string;
       target: string;
       kind: string;
@@ -491,7 +548,7 @@ export class SqliteStore extends BaseStore {
 
     const channels: Channel[] = channelRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       name: row.name,
       target: row.target,
       kind: row.kind,
@@ -646,9 +703,20 @@ export class SqliteStore extends BaseStore {
       createdAt: row.created_at
     }));
 
+    const spaces = spaceRows.length
+      ? spaceRows.map(row => ({
+          id: row.id,
+          name: row.name,
+          slug: row.slug,
+          description: row.description || "",
+          createdAt: row.created_at,
+          updatedAt: row.updated_at
+        }))
+      : seed.spaces;
+
     return {
       meta: seed.meta,
-      spaces: seed.spaces,
+      spaces,
       computers,
       pendingComputerConnections,
       humans: humans.length ? humans : seed.humans,
@@ -675,6 +743,16 @@ export class SqliteStore extends BaseStore {
   }
 
   private writeAllUnwrapped(state: State): void {
+    this.db.exec("DELETE FROM iteam_spaces");
+    if (state.spaces && state.spaces.length) {
+      const stmt = this.db.prepare(
+        "INSERT INTO iteam_spaces (id, name, slug, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
+      );
+      for (const sp of state.spaces) {
+        stmt.run(sp.id, sp.name, sp.slug, sp.description ?? null, sp.createdAt, sp.updatedAt);
+      }
+    }
+
     this.db.exec("DELETE FROM iteam_humans");
     if (state.humans.length) {
       const stmt = this.db.prepare(
@@ -760,7 +838,7 @@ export class SqliteStore extends BaseStore {
     this.db.exec("DELETE FROM iteam_channels");
     if (state.channels.length) {
       const channelStmt = this.db.prepare(
-        "INSERT INTO iteam_channels (id, name, target, kind, description, default_agent_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO iteam_channels (id, space_id, name, target, kind, description, default_agent_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
       );
       const memberStmt = this.db.prepare(
         "INSERT INTO iteam_channel_members (channel_id, member_id) VALUES (?, ?)"
@@ -768,6 +846,7 @@ export class SqliteStore extends BaseStore {
       for (const channel of state.channels) {
         channelStmt.run(
           channel.id,
+          channel.spaceId || DEFAULT_SPACE_ID,
           channel.name,
           channel.target,
           channel.kind,

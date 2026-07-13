@@ -12,6 +12,14 @@
  */
 
 export const SQLITE_TABLES: ReadonlyArray<string> = [
+  `CREATE TABLE IF NOT EXISTS iteam_spaces (
+    id          TEXT NOT NULL PRIMARY KEY,
+    name        TEXT NOT NULL,
+    slug        TEXT NOT NULL UNIQUE,
+    description TEXT,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS iteam_humans (
     id      TEXT NOT NULL PRIMARY KEY,
     name    TEXT NOT NULL,
@@ -66,12 +74,14 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
   )`,
   `CREATE TABLE IF NOT EXISTS iteam_channels (
     id                TEXT NOT NULL PRIMARY KEY,
+    space_id          TEXT NOT NULL DEFAULT 'space_default',
     name              TEXT NOT NULL,
-    target            TEXT NOT NULL UNIQUE,
+    target            TEXT NOT NULL,
     kind              TEXT NOT NULL,
     description       TEXT,
     default_agent_id  TEXT,
-    created_at        TEXT NOT NULL
+    created_at        TEXT NOT NULL,
+    UNIQUE(space_id, target)
   )`,
   `CREATE TABLE IF NOT EXISTS iteam_channel_members (
     channel_id TEXT NOT NULL,
