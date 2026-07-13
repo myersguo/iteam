@@ -8,6 +8,7 @@ import type { Agent, ConnectComputerResult, DeliveryWithContext } from "./types.
 
 const serverUrl = readArg("--server-url", process.env.ITEAM_SERVER_URL);
 const cliConnectToken = readArg("--connect-token", process.env.ITEAM_CONNECT_TOKEN);
+const expectedSpaceId = readArg("--space-id", process.env.ITEAM_SPACE_ID) || undefined;
 const name = readArg("--name", localComputerFingerprint().hostname) || localComputerFingerprint().hostname;
 const intervalMs = Number(readArg("--interval-ms", "5000"));
 const taskProgressIntervalMs = readPositiveMs(
@@ -72,6 +73,10 @@ let pendingTimer: NodeJS.Timeout | null = null;
 // connection. We re-print it after a heartbeat failure so the operator sees
 // when the daemon recovers, but otherwise stay quiet during steady state.
 let hasLoggedConnected = false;
+// Sanity-check bookkeeping for the optional --space-id argument. Logged once
+// per successful (re)connect to avoid spamming the log on every heartbeat.
+let hasLoggedSpaceJoin = false;
+let hasLoggedSpaceMismatch = false;
 
 async function heartbeat(): Promise<void> {
   const fingerprint = localComputerFingerprint();
@@ -93,6 +98,17 @@ async function heartbeat(): Promise<void> {
   if (!hasLoggedConnected) {
     console.log(`[${nowIso()}] connected ${computer.name} (${computer.id}) auth=${computer.id}:${maskToken(connectToken)}`);
     hasLoggedConnected = true;
+  }
+  if (!hasLoggedSpaceJoin) {
+    console.log(`[${nowIso()}] joining space ${computer.spaceId}`);
+    hasLoggedSpaceJoin = true;
+  }
+  if (expectedSpaceId && expectedSpaceId !== computer.spaceId && !hasLoggedSpaceMismatch) {
+    console.warn(
+      `[${nowIso()}] space-id mismatch: expected=${expectedSpaceId} actual=${computer.spaceId}. ` +
+      `Invite still wins; regenerate the connect command from the correct space if this is unintended.`
+    );
+    hasLoggedSpaceMismatch = true;
   }
   for (const agent of computer.launchAgents || []) {
     console.log(`[${nowIso()}] launch agent ${agent.id} (runtime=${agent.runtime}, model=${agent.model || "default"})`);
@@ -169,6 +185,8 @@ async function runHeartbeat(): Promise<void> {
       }
       consecutiveFailures++;
       hasLoggedConnected = false;
+      hasLoggedSpaceJoin = false;
+      hasLoggedSpaceMismatch = false;
       const delay = backoffDelayMs();
       console.error(
         `[${nowIso()}] heartbeat failed (#${consecutiveFailures}, retry in ${delay}ms): ${message}`
@@ -571,14 +589,18 @@ function printUsage(reason: string): void {
   console.error(`agent-daemon: ${reason}`);
   console.error("");
   console.error("Usage:");
-  console.error("  iteam agent-daemon --server-url <url> --connect-token <token> [--name <hostname>] [--interval-ms <ms>] [--task-progress-interval-ms <ms>]");
+  console.error("  iteam agent-daemon --server-url <url> --connect-token <token> [--space-id <id>] [--name <hostname>] [--interval-ms <ms>] [--task-progress-interval-ms <ms>]");
   console.error("");
-  console.error("Environment fallbacks: ITEAM_SERVER_URL, ITEAM_CONNECT_TOKEN, ITEAM_TASK_PROGRESS_INTERVAL_MS");
+  console.error("Environment fallbacks: ITEAM_SERVER_URL, ITEAM_CONNECT_TOKEN, ITEAM_SPACE_ID, ITEAM_TASK_PROGRESS_INTERVAL_MS");
   console.error("");
   console.error("--connect-token is the computer's permanent identity. The server issues");
   console.error("it once when you generate an invite, binds it to a brand-new computer on");
   console.error("first connect, and reuses it forever after. Pass the same token on every");
   console.error("launch.");
+  console.error("");
+  console.error("--space-id is optional. The invite already carries the space; this flag");
+  console.error("is only used to log the expected space id and warn on mismatch. It never");
+  console.error("overrides the server's answer.");
   console.error("");
   console.error("To obtain a token, ask the server for an invite:");
   console.error("  curl -X POST <server-url>/api/computers/connect-command \\");

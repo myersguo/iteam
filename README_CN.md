@@ -158,7 +158,7 @@ iteam message read '#all'
 
 ```
 iteam daemon start [--port 4318]
-iteam daemon connect --server-url <url> --connect-token <token> [--name <hostname>]
+iteam daemon connect --server-url <url> --connect-token <token> [--space-id <id>] [--name <hostname>]
 iteam daemon status
 iteam web
 

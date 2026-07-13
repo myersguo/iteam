@@ -458,10 +458,20 @@ export class IteamCore {
         updatedAt: now
       };
       s.spaces.push(created);
-      // NOTE: cannot auto-provision an `#all` channel here yet — the legacy
-      // SQL schemas still enforce `UNIQUE(target)`. Once schemas migrate to
-      // `UNIQUE(space_id, target)` we can seed the `#all` channel per space
-      // like initialState() does for the default space.
+      s.channels ||= [];
+      if (!s.channels.some(ch => ch.spaceId === created.id && ch.target === "#all")) {
+        s.channels.push({
+          id: this.newId("chan"),
+          spaceId: created.id,
+          name: "all",
+          target: "#all",
+          kind: "channel",
+          description: "General channel for all members",
+          memberIds: ["human-local"],
+          defaultAgentId: null,
+          createdAt: now
+        });
+      }
       return created;
     });
   }
@@ -825,7 +835,9 @@ export class IteamCore {
       "--server-url",
       shellQuote(origin),
       "--connect-token",
-      shellQuote(token)
+      shellQuote(token),
+      "--space-id",
+      shellQuote(spaceId)
     ].join(" ");
     return { ...invite, command, serverUrl: origin };
   }
