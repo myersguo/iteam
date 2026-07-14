@@ -95,6 +95,9 @@ export class SqliteStore extends BaseStore {
   // ---------------------------------------------------------------------------
   private runColumnMigrations(): void {
     this.addColumnIfMissing("iteam_computers", "connect_token", "TEXT");
+    this.addColumnIfMissing("iteam_computers", "space_id", "TEXT NOT NULL DEFAULT 'space_default'");
+    this.addColumnIfMissing("iteam_pending_connections", "space_id", "TEXT NOT NULL DEFAULT 'space_default'");
+    this.addColumnIfMissing("iteam_agents", "space_id", "TEXT NOT NULL DEFAULT 'space_default'");
     this.addColumnIfMissing("iteam_scheduled_tasks", "cron_expression", "TEXT");
     this.addColumnIfMissing("iteam_scheduled_tasks", "timezone", "TEXT");
     this.addColumnIfMissing("iteam_scheduled_tasks", "session_key", "TEXT");
@@ -165,6 +168,7 @@ export class SqliteStore extends BaseStore {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS iteam_agents_new (
         id                  TEXT NOT NULL PRIMARY KEY,
+        space_id            TEXT NOT NULL DEFAULT 'space_default',
         name                TEXT NOT NULL,
         handle              TEXT NOT NULL,
         description         TEXT NOT NULL,
@@ -186,7 +190,7 @@ export class SqliteStore extends BaseStore {
     `);
     this.db.exec(`
       INSERT INTO iteam_agents_new
-      SELECT id, name, handle, description, runtime, model, reasoning, computer_id,
+      SELECT id, COALESCE(space_id, 'space_default'), name, handle, description, runtime, model, reasoning, computer_id,
              status, desired_status, launch_id, pid, workspace_path, created_at,
              updated_at, env, last_started_at, last_runtime_status
       FROM iteam_agents
@@ -263,6 +267,7 @@ export class SqliteStore extends BaseStore {
 
     const computerRows = this.db.prepare("SELECT * FROM iteam_computers").all() as Array<{
       id: string;
+      space_id: string | null;
       name: string;
       fingerprint_id: string;
       fingerprint_hostname: string;
@@ -281,6 +286,7 @@ export class SqliteStore extends BaseStore {
 
     const pendingRows = this.db.prepare("SELECT * FROM iteam_pending_connections").all() as Array<{
       id: string;
+      space_id: string | null;
       token: string;
       status: string;
       created_at: string;
@@ -291,6 +297,7 @@ export class SqliteStore extends BaseStore {
 
     const agentRows = this.db.prepare("SELECT * FROM iteam_agents").all() as Array<{
       id: string;
+      space_id: string | null;
       name: string;
       handle: string;
       description: string;
@@ -492,7 +499,7 @@ export class SqliteStore extends BaseStore {
 
     const computers: Computer[] = computerRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       name: row.name,
       fingerprint: {
         id: row.fingerprint_id,
@@ -513,7 +520,7 @@ export class SqliteStore extends BaseStore {
 
     const pendingComputerConnections: PendingComputerConnection[] = pendingRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       token: row.token,
       status: row.status,
       createdAt: row.created_at,
@@ -524,7 +531,7 @@ export class SqliteStore extends BaseStore {
 
     const agents: Agent[] = agentRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       name: row.name,
       handle: row.handle,
       description: row.description,
@@ -764,11 +771,12 @@ export class SqliteStore extends BaseStore {
     this.db.exec("DELETE FROM iteam_computers");
     if (state.computers.length) {
       const stmt = this.db.prepare(
-        "INSERT INTO iteam_computers (id, name, fingerprint_id, fingerprint_hostname, fingerprint_os, fingerprint_arch, status, daemon_version, runtimes, agent_ids, connection_id, connect_token, created_at, first_connected_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO iteam_computers (id, space_id, name, fingerprint_id, fingerprint_hostname, fingerprint_os, fingerprint_arch, status, daemon_version, runtimes, agent_ids, connection_id, connect_token, created_at, first_connected_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       );
       for (const c of state.computers) {
         stmt.run(
           c.id,
+          c.spaceId || DEFAULT_SPACE_ID,
           c.name,
           c.fingerprint?.id ?? null,
           c.fingerprint?.hostname ?? null,
@@ -790,11 +798,12 @@ export class SqliteStore extends BaseStore {
     this.db.exec("DELETE FROM iteam_pending_connections");
     if (state.pendingComputerConnections.length) {
       const stmt = this.db.prepare(
-        "INSERT INTO iteam_pending_connections (id, token, status, created_at, connected_computer_id, label, connected_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO iteam_pending_connections (id, space_id, token, status, created_at, connected_computer_id, label, connected_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
       );
       for (const p of state.pendingComputerConnections) {
         stmt.run(
           p.id,
+          p.spaceId || DEFAULT_SPACE_ID,
           p.token,
           p.status,
           p.createdAt,
@@ -808,11 +817,12 @@ export class SqliteStore extends BaseStore {
     this.db.exec("DELETE FROM iteam_agents");
     if (state.agents.length) {
       const stmt = this.db.prepare(
-        "INSERT INTO iteam_agents (id, name, handle, description, runtime, model, reasoning, computer_id, status, desired_status, launch_id, pid, workspace_path, created_at, updated_at, env, last_started_at, last_runtime_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO iteam_agents (id, space_id, name, handle, description, runtime, model, reasoning, computer_id, status, desired_status, launch_id, pid, workspace_path, created_at, updated_at, env, last_started_at, last_runtime_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       );
       for (const a of state.agents) {
         stmt.run(
           a.id,
+          a.spaceId || DEFAULT_SPACE_ID,
           a.name,
           a.handle,
           a.description,

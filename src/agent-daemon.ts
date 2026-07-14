@@ -47,6 +47,7 @@ const launcher = new AgentLauncher({
   serverUrl: baseUrl,
   report: reportAgentStatus,
   reportDeliveryProgress: (deliveryId, text) => reportDeliveryProgress(deliveryId, text, 0),
+  reportDeliveryRuntimeState,
   getCredentials: () => ({ computerId, connectToken })
 });
 
@@ -280,6 +281,27 @@ async function reportDeliveryProgress(deliveryId: string, text: string, elapsedM
     headers: buildAuthHeader(),
     body: { text, elapsedMs }
   });
+}
+
+async function reportDeliveryRuntimeState(
+  deliveryId: string,
+  state: { phase: "queued" | "running"; queuePosition?: number; sessionKey?: string; processSlot?: number }
+): Promise<unknown> {
+  const delays = [0, 250, 1000, 3000, 8000];
+  let lastError: Error | null = null;
+  for (const delayMs of delays) {
+    if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
+    try {
+      return await requestJson(`${baseUrl}/api/deliveries/${deliveryId}/runtime-state`, {
+        method: "POST",
+        headers: buildAuthHeader(),
+        body: state
+      });
+    } catch (error) {
+      lastError = error as Error;
+    }
+  }
+  throw lastError || new Error(`delivery ${deliveryId} runtime-state report failed`);
 }
 
 function isTaskDelivery(delivery: DeliveryWithContext): boolean {

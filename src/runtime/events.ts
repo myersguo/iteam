@@ -10,6 +10,8 @@
 
 export type AgentEventType =
   | "session_started"
+  | "delivery_queued"
+  | "delivery_running"
   | "message_chunk"
   | "tool_call"
   | "tool_result"
@@ -36,6 +38,23 @@ export interface AgentEventBase {
 export interface SessionStartedEvent extends AgentEventBase {
   type: "session_started";
   sessionId: string;
+}
+
+export interface DeliveryQueuedEvent extends AgentEventBase {
+  type: "delivery_queued";
+  deliveryId: string;
+  target: string;
+  queuePosition: number;
+  sessionKey: string;
+  processSlot: number;
+}
+
+export interface DeliveryRunningEvent extends AgentEventBase {
+  type: "delivery_running";
+  deliveryId: string;
+  target: string;
+  sessionKey: string;
+  processSlot: number;
 }
 
 export interface MessageChunkEvent extends AgentEventBase {
@@ -99,6 +118,8 @@ export interface ExitedEvent extends AgentEventBase {
 
 export type AgentEvent =
   | SessionStartedEvent
+  | DeliveryQueuedEvent
+  | DeliveryRunningEvent
   | MessageChunkEvent
   | ToolCallEvent
   | ToolResultEvent

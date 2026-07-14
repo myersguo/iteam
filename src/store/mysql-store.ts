@@ -126,6 +126,21 @@ export class MysqlStore extends BaseStore {
       "VARCHAR(128) DEFAULT NULL"
     );
     await this.addColumnIfMissing(
+      "iteam_computers",
+      "space_id",
+      "VARCHAR(64) NOT NULL DEFAULT 'space_default'"
+    );
+    await this.addColumnIfMissing(
+      "iteam_pending_connections",
+      "space_id",
+      "VARCHAR(64) NOT NULL DEFAULT 'space_default'"
+    );
+    await this.addColumnIfMissing(
+      "iteam_agents",
+      "space_id",
+      "VARCHAR(64) NOT NULL DEFAULT 'space_default'"
+    );
+    await this.addColumnIfMissing(
       "iteam_scheduled_tasks",
       "cron_expression",
       "VARCHAR(255) DEFAULT NULL"
@@ -219,6 +234,7 @@ export class MysqlStore extends BaseStore {
 
     const [computerRows] = await this.pool.query<Array<{
       id: string;
+      space_id: string | null;
       name: string;
       fingerprint_id: string;
       fingerprint_hostname: string;
@@ -237,6 +253,7 @@ export class MysqlStore extends BaseStore {
 
     const [pendingRows] = await this.pool.query<Array<{
       id: string;
+      space_id: string | null;
       token: string;
       status: string;
       created_at: string;
@@ -247,6 +264,7 @@ export class MysqlStore extends BaseStore {
 
     const [agentRows] = await this.pool.query<Array<{
       id: string;
+      space_id: string | null;
       name: string;
       handle: string;
       description: string;
@@ -433,7 +451,7 @@ export class MysqlStore extends BaseStore {
 
     const computers: Computer[] = computerRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       name: row.name,
       fingerprint: {
         id: row.fingerprint_id,
@@ -454,7 +472,7 @@ export class MysqlStore extends BaseStore {
 
     const pendingComputerConnections: PendingComputerConnection[] = pendingRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       token: row.token,
       status: row.status,
       createdAt: row.created_at,
@@ -465,7 +483,7 @@ export class MysqlStore extends BaseStore {
 
     const agents: Agent[] = agentRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       name: row.name,
       handle: row.handle,
       description: row.description,
@@ -694,10 +712,11 @@ export class MysqlStore extends BaseStore {
       await conn.query("DELETE FROM iteam_computers");
       if (state.computers.length) {
         await conn.query(
-          "INSERT INTO iteam_computers (id, name, fingerprint_id, fingerprint_hostname, fingerprint_os, fingerprint_arch, status, daemon_version, runtimes, agent_ids, connection_id, connect_token, created_at, first_connected_at, last_seen_at) VALUES ?",
+          "INSERT INTO iteam_computers (id, space_id, name, fingerprint_id, fingerprint_hostname, fingerprint_os, fingerprint_arch, status, daemon_version, runtimes, agent_ids, connection_id, connect_token, created_at, first_connected_at, last_seen_at) VALUES ?",
           [
             state.computers.map(c => [
               c.id,
+              c.spaceId || DEFAULT_SPACE_ID,
               c.name,
               c.fingerprint.id,
               c.fingerprint.hostname,
@@ -720,10 +739,11 @@ export class MysqlStore extends BaseStore {
       await conn.query("DELETE FROM iteam_pending_connections");
       if (state.pendingComputerConnections.length) {
         await conn.query(
-          "INSERT INTO iteam_pending_connections (id, token, status, created_at, connected_computer_id, label, connected_at) VALUES ?",
+          "INSERT INTO iteam_pending_connections (id, space_id, token, status, created_at, connected_computer_id, label, connected_at) VALUES ?",
           [
             state.pendingComputerConnections.map(p => [
               p.id,
+              p.spaceId || DEFAULT_SPACE_ID,
               p.token,
               p.status,
               p.createdAt,
@@ -738,10 +758,11 @@ export class MysqlStore extends BaseStore {
       await conn.query("DELETE FROM iteam_agents");
       if (state.agents.length) {
         await conn.query(
-          "INSERT INTO iteam_agents (id, name, handle, description, runtime, model, reasoning, computer_id, status, desired_status, launch_id, pid, workspace_path, created_at, updated_at, env, last_started_at, last_runtime_status) VALUES ?",
+          "INSERT INTO iteam_agents (id, space_id, name, handle, description, runtime, model, reasoning, computer_id, status, desired_status, launch_id, pid, workspace_path, created_at, updated_at, env, last_started_at, last_runtime_status) VALUES ?",
           [
             state.agents.map(a => [
               a.id,
+              a.spaceId || DEFAULT_SPACE_ID,
               a.name,
               a.handle,
               a.description,

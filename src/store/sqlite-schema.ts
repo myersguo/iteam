@@ -28,6 +28,7 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
   )`,
   `CREATE TABLE IF NOT EXISTS iteam_computers (
     id                   TEXT NOT NULL PRIMARY KEY,
+    space_id             TEXT NOT NULL DEFAULT 'space_default',
     name                 TEXT NOT NULL,
     fingerprint_id       TEXT NOT NULL,
     fingerprint_hostname TEXT NOT NULL,
@@ -45,6 +46,7 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
   )`,
   `CREATE TABLE IF NOT EXISTS iteam_pending_connections (
     id                    TEXT NOT NULL PRIMARY KEY,
+    space_id              TEXT NOT NULL DEFAULT 'space_default',
     token                 TEXT NOT NULL UNIQUE,
     status                TEXT NOT NULL,
     created_at            TEXT NOT NULL,
@@ -54,6 +56,7 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
   )`,
   `CREATE TABLE IF NOT EXISTS iteam_agents (
     id                  TEXT NOT NULL PRIMARY KEY,
+    space_id            TEXT NOT NULL DEFAULT 'space_default',
     name                TEXT NOT NULL,
     handle              TEXT NOT NULL,
     description         TEXT NOT NULL,

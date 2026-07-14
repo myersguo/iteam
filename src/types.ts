@@ -147,6 +147,8 @@ export type TaskStatus = "todo" | "in_progress" | "in_review" | "done" | string;
 export type DeliveryLifecycleIntent =
   | "delivery.dispatch"
   | "delivery.ack"
+  | "delivery.queued"
+  | "delivery.running"
   | "delivery.progress"
   | "delivery.help_needed"
   | "delivery.result"
@@ -324,7 +326,18 @@ export interface DeliveryWithContext extends Delivery {
   message?: Message;
   author?: MentionRef | null;
   contextMessages?: ContextMessage[];
+  activeDeliveries?: ActiveDeliveryContext[];
   members?: MentionRef[];
+}
+
+export interface ActiveDeliveryContext {
+  id: string;
+  target: string;
+  phase: "pending" | "queued" | "running";
+  createdAt: string;
+  updatedAt: string;
+  queuePosition?: number;
+  messageText: string;
 }
 
 export interface ContextMessage {

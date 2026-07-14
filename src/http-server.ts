@@ -400,6 +400,13 @@ async function route(
     return sendJson(res, 201, core.applyDeliveryProgress(deliveryProgress[1], body));
   }
 
+  const deliveryRuntimeState = url.pathname.match(/^\/api\/deliveries\/([^/]+)\/runtime-state$/);
+  if (req.method === "POST" && deliveryRuntimeState) {
+    requireComputerAuth(core, req, deliveryRuntimeState[1], "delivery");
+    const body = await parseJsonBody<any>(req);
+    return sendJson(res, 200, core.applyDeliveryRuntimeState(deliveryRuntimeState[1], body));
+  }
+
   const deliveryHelpNeeded = url.pathname.match(/^\/api\/deliveries\/([^/]+)\/help-needed$/);
   if (req.method === "POST" && deliveryHelpNeeded) {
     requireComputerAuth(core, req, deliveryHelpNeeded[1], "delivery");

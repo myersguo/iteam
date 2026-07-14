@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import type { Agent } from "../src/types.js";
 import { formatTaskRuntimeProgress } from "../src/agent-launcher.js";
 import { AcpDriver } from "../src/runtime/acp-driver.js";
+import { SqliteStore } from "../src/store/sqlite-store.js";
 import { notificationBelongsToThread } from "../src/runtime/codex-driver.js";
 import { detectRuntimes } from "../src/runtimes.js";
 import { deliveryAffinityIndex } from "../src/runtime/driver.js";
@@ -46,6 +47,16 @@ writeFileSync(acpProfilesFile, JSON.stringify({
     command: process.execPath,
     args: [fakeAcpScript],
     poolSize: 1
+  },
+  fake_acp_parallel: {
+    command: process.execPath,
+    args: [fakeAcpScript],
+    poolSize: 50
+  },
+  fake_acp_queue: {
+    command: process.execPath,
+    args: [fakeAcpScript],
+    poolSize: 2
   }
 }, null, 2));
 process.env.ITEAM_RUNTIME_PROFILES = runtimeProfilesFile;
@@ -246,6 +257,9 @@ try {
   }
   await verifyAcpDriverWithFakeRuntime(home, "fake_acp");
   await verifyAcpDriverWithFakeRuntime(home, "generic_acp");
+  await verifyAcpDriverParallelism(home);
+  await verifyAcpQueuedPromotion(home);
+  verifySqliteSpacePersistence(home);
   const subagentStarted = formatTaskRuntimeProgress({
     type: "tool_call",
     agentId: "agent_test",
@@ -398,6 +412,59 @@ try {
     status: "online"
   }, { "x-iteam-connection": `${computerId}:${connectToken}` });
   const computerAuth = { "x-iteam-connection": `${computerId}:${connectToken}` };
+  const dmDelivery = heartbeat.deliveries.find((delivery: any) => delivery.messageId === dmMessage.id);
+  if (!dmDelivery) throw new Error("DM delivery was not claimed by the computer heartbeat");
+  await post(port, `/api/deliveries/${encodeURIComponent(dmDelivery.id)}/runtime-state`, {
+    phase: "queued",
+    queuePosition: 2,
+    sessionKey: dm.target,
+    processSlot: 1
+  }, computerAuth);
+  await post(port, `/api/deliveries/${encodeURIComponent(dmDelivery.id)}/runtime-state`, {
+    phase: "running",
+    sessionKey: dm.target,
+    processSlot: 1
+  }, computerAuth);
+  const secondDmMessage = await post(port, "/api/messages", {
+    target: dm.target,
+    text: "second direct message",
+    authorId: "human-local",
+    defaultAgentId: agent.id
+  });
+  const secondHeartbeat = await post(port, "/api/computers/connect", {
+    token: invite.token,
+    name: "smoke-computer",
+    fingerprint: { id: "SMOKE12345", hostname: "smoke-computer", os: "darwin", arch: "arm64" },
+    daemonVersion: "0.1.0",
+    runtimes: smokeRuntimes
+  });
+  const secondDmDelivery = secondHeartbeat.deliveries.find(
+    (delivery: any) => delivery.messageId === secondDmMessage.id
+  );
+  const activeDmDelivery = secondDmDelivery?.activeDeliveries?.find(
+    (delivery: any) => delivery.id === dmDelivery.id
+  );
+  if (
+    !secondDmDelivery ||
+    !activeDmDelivery ||
+    activeDmDelivery.phase !== "running" ||
+    activeDmDelivery.messageText !== "direct hello"
+  ) {
+    throw new Error("delivery payload did not include the other active delivery in the same chat");
+  }
+  const deliveriesWithRuntimeState = await get(port, "/api/deliveries");
+  const persistedRuntimeState = deliveriesWithRuntimeState.find((delivery: any) => delivery.id === dmDelivery.id);
+  const queuedLifecycle = persistedRuntimeState?.lifecycle?.find((item: any) => item.intent === "delivery.queued");
+  const runningLifecycle = persistedRuntimeState?.lifecycle?.find((item: any) => item.intent === "delivery.running");
+  if (
+    !queuedLifecycle ||
+    queuedLifecycle.details?.queuePosition !== 2 ||
+    queuedLifecycle.details?.processSlot !== 1 ||
+    !runningLifecycle ||
+    runningLifecycle.details?.sessionKey !== dm.target
+  ) {
+    throw new Error("delivery queued/running lifecycle was not persisted for the UI");
+  }
   const savedBotConfig = await post(port, "/api/external/bot-configs", {
     provider: "lark",
     alias: "Smoke Bot",
@@ -1036,10 +1103,26 @@ async function verifyAcpDriverWithFakeRuntime(home: string, runtime = "fake_acp"
   const firstSession = extractReplySession(first.text);
   const secondSession = extractReplySession(second.text);
   const thirdSession = extractReplySession(third.text);
+  const firstRunning = events.find(event =>
+    event.type === "delivery_running" && event.deliveryId === deliveryA.id
+  );
+  const secondRunning = events.find(event =>
+    event.type === "delivery_running" && event.deliveryId === "delivery_fake_b"
+  );
+  const thirdRunning = events.find(event =>
+    event.type === "delivery_running" && event.deliveryId === "delivery_fake_c"
+  );
   if (!firstSession || firstSession !== secondSession) {
     throw new Error("AcpDriver did not reuse the same ACP session for the same sessionKey");
   }
-  if (!thirdSession || thirdSession === firstSession) {
+  if (!firstRunning || !secondRunning || firstRunning.processSlot !== secondRunning.processSlot) {
+    throw new Error("AcpDriver did not preserve process affinity for the same sessionKey");
+  }
+  if (
+    !thirdSession ||
+    !thirdRunning ||
+    (thirdSession === firstSession && thirdRunning.processSlot === firstRunning.processSlot)
+  ) {
     throw new Error("AcpDriver did not create a distinct ACP session for a distinct sessionKey");
   }
 
@@ -1077,7 +1160,273 @@ async function verifyAcpDriverWithFakeRuntime(home: string, runtime = "fake_acp"
   await driver.stop(agent);
 }
 
-function fakeDelivery(id: string, sessionKey: string, target: string, agent: any): any {
+async function verifyAcpDriverParallelism(home: string): Promise<void> {
+  const runtime = "fake_acp_parallel";
+  const agent: Agent = {
+    id: "agent_fake_acp_parallel",
+    spaceId: "space_default",
+    name: "Fake ACP Parallel",
+    handle: "fake-acp-parallel",
+    description: "",
+    runtime,
+    model: null,
+    computerId: "computer_test",
+    status: "online",
+    desiredStatus: "running",
+    launchId: null,
+    pid: null,
+    workspacePath: join(home, "fake-acp-parallel-agent"),
+    createdAt: "",
+    updatedAt: ""
+  };
+  const driver = new AcpDriver(runtime, {
+    serverUrl: "http://127.0.0.1:0",
+    launchId: "launch_fake_acp_parallel"
+  });
+  const events: any[] = [];
+  driver.on(event => events.push(event));
+
+  const channelFirst = fakeDelivery("delivery_parallel_channel_1", "channel-root:#parallel:msg_root_1", "#parallel", agent);
+  const channelSecond = fakeDelivery("delivery_parallel_channel_2", "channel-root:#parallel:msg_root_2", "#parallel", agent);
+  const startedAt = Date.now();
+  const channelFirstPromise = driver.deliver(agent, channelFirst, "delay:350 channel-first");
+  await waitForEvent(events, event =>
+    event.type === "delivery_running" && event.deliveryId === channelFirst.id,
+    2_000
+  );
+  const channelSecondResult = await driver.deliver(agent, channelSecond, "delay:40 channel-second");
+  const channelSecondElapsedMs = Date.now() - startedAt;
+  if (channelSecondElapsedMs >= 300) {
+    throw new Error(`independent channel roots should run in parallel; second root took ${channelSecondElapsedMs}ms`);
+  }
+  await channelFirstPromise;
+
+  const runningEvents = events.filter(event => event.type === "delivery_running");
+  const channelFirstRunning = runningEvents.find(event => event.deliveryId === channelFirst.id);
+  const channelSecondRunning = runningEvents.find(event => event.deliveryId === channelSecond.id);
+  if (!channelFirstRunning || !channelSecondRunning) {
+    throw new Error("parallel ACP deliveries did not emit running lifecycle events");
+  }
+  if (channelFirstRunning.processSlot === channelSecondRunning.processSlot) {
+    throw new Error("independent channel roots were not spread across ACP process slots");
+  }
+  if (!channelSecondResult.text.includes("channel-second")) {
+    throw new Error("parallel channel root did not complete with the expected response");
+  }
+
+  const channelThird = fakeDelivery(
+    "delivery_parallel_channel_3",
+    "channel-root:#parallel:msg_root_3",
+    "#parallel",
+    agent
+  );
+  const channelFourth = fakeDelivery(
+    "delivery_parallel_channel_4",
+    "channel-root:#parallel:msg_root_4",
+    "#parallel",
+    agent
+  );
+  const channelFifth = fakeDelivery(
+    "delivery_parallel_channel_5",
+    "channel-root:#parallel:msg_root_5",
+    "#parallel",
+    agent
+  );
+  const firstAgain = driver.deliver(agent, channelFourth, "delay:250 first-again");
+  const secondAgain = driver.deliver(agent, channelFifth, "delay:250 second-again");
+  await waitForEvent(events, event =>
+    event.type === "delivery_running" && event.deliveryId === channelFourth.id,
+    2_000
+  );
+  await waitForEvent(events, event =>
+    event.type === "delivery_running" && event.deliveryId === channelFifth.id,
+    2_000
+  );
+  const thirdResult = await driver.deliver(agent, channelThird, "delay:20 channel-third");
+  const thirdRunning = events.find(event =>
+    event.type === "delivery_running" && event.deliveryId === channelThird.id
+  );
+  if (
+    !thirdRunning ||
+    thirdRunning.processSlot < 2 ||
+    !thirdResult.text.includes("channel-third")
+  ) {
+    throw new Error("ACP pool did not grow on demand for a third concurrent channel root");
+  }
+  await firstAgain;
+  await secondAgain;
+
+  const threadKey = "#parallel:msg_thread_root";
+  const threadFirst = fakeDelivery("delivery_parallel_thread_1", threadKey, threadKey, agent);
+  const threadSecond = fakeDelivery("delivery_parallel_thread_2", threadKey, threadKey, agent);
+  const threadFirstPromise = driver.deliver(agent, threadFirst, "delay:150 thread-first");
+  await waitForEvent(events, event =>
+    event.type === "delivery_running" && event.deliveryId === threadFirst.id,
+    2_000
+  );
+  const threadSecondPromise = driver.deliver(agent, threadSecond, "thread-second");
+  await waitForEvent(events, event =>
+    event.type === "delivery_queued" && event.deliveryId === threadSecond.id,
+    2_000
+  );
+  const queuedThreadSecond = events.find(event =>
+    event.type === "delivery_queued" && event.deliveryId === threadSecond.id
+  );
+  if (!queuedThreadSecond || queuedThreadSecond.queuePosition < 1) {
+    throw new Error("same-thread follow-up did not report a queue position");
+  }
+  await threadFirstPromise;
+  await threadSecondPromise;
+  const threadFirstRunning = events.find(event =>
+    event.type === "delivery_running" && event.deliveryId === threadFirst.id
+  );
+  const threadSecondRunning = events.find(event =>
+    event.type === "delivery_running" && event.deliveryId === threadSecond.id
+  );
+  if (
+    !threadFirstRunning ||
+    !threadSecondRunning ||
+    events.indexOf(threadSecondRunning) <= events.indexOf(threadFirstRunning)
+  ) {
+    throw new Error("same-thread deliveries did not preserve FIFO ordering");
+  }
+  await driver.stop(agent);
+}
+
+async function verifyAcpQueuedPromotion(home: string): Promise<void> {
+  const runtime = "fake_acp_queue";
+  const agent: Agent = {
+    id: "agent_fake_acp_queue",
+    spaceId: "space_default",
+    name: "Fake ACP Queue",
+    handle: "fake-acp-queue",
+    description: "",
+    runtime,
+    model: null,
+    computerId: "computer_test",
+    status: "online",
+    desiredStatus: "running",
+    launchId: null,
+    pid: null,
+    workspacePath: join(home, "fake-acp-queue-agent"),
+    createdAt: "",
+    updatedAt: ""
+  };
+  const driver = new AcpDriver(runtime, {
+    serverUrl: "http://127.0.0.1:0",
+    launchId: "launch_fake_acp_queue"
+  });
+  const events: any[] = [];
+  driver.on(event => events.push(event));
+  const first = fakeDelivery("delivery_queue_1", "channel-root:#queue:msg_1", "#queue", agent);
+  const second = fakeDelivery("delivery_queue_2", "channel-root:#queue:msg_2", "#queue", agent);
+  const third = fakeDelivery("delivery_queue_3", "channel-root:#queue:msg_3", "#queue", agent);
+  const firstPromise = driver.deliver(agent, first, "delay:180 first");
+  const secondPromise = driver.deliver(agent, second, "delay:320 second");
+  await waitForEvent(events, event =>
+    event.type === "delivery_running" && event.deliveryId === second.id,
+    2_000
+  );
+  const thirdPromise = driver.deliver(agent, third, "third");
+  await waitForEvent(events, event =>
+    event.type === "delivery_queued" && event.deliveryId === third.id,
+    2_000
+  );
+  const queued = events.find(event =>
+    event.type === "delivery_queued" && event.deliveryId === third.id
+  );
+  if (!queued || queued.queuePosition < 1) {
+    throw new Error("third delivery should be queued when the two-worker pool is full");
+  }
+  await firstPromise;
+  await waitForEvent(events, event =>
+    event.type === "delivery_running" && event.deliveryId === third.id,
+    2_000
+  );
+  await thirdPromise;
+  await secondPromise;
+  await driver.stop(agent);
+}
+
+function verifySqliteSpacePersistence(home: string): void {
+  const sqliteHome = join(home, "sqlite-space-persistence");
+  const sqliteFile = join(sqliteHome, "state.db");
+  mkdirSync(sqliteHome, { recursive: true });
+  const spaceId = "space_persisted";
+  const computerId = "computer_persisted";
+  const inviteId = "computer_invite_persisted";
+  const agentId = "agent_persisted";
+  const now = new Date().toISOString();
+  const first = new SqliteStore(sqliteHome, sqliteFile);
+  first.mutate(state => {
+    state.spaces.push({
+      id: spaceId,
+      name: "Persisted",
+      slug: "persisted",
+      description: "",
+      createdAt: now,
+      updatedAt: now
+    });
+    state.pendingComputerConnections.push({
+      id: inviteId,
+      spaceId,
+      token: "connect_persisted",
+      status: "connected",
+      createdAt: now,
+      connectedComputerId: computerId,
+      label: "Persisted computer",
+      connectedAt: now
+    });
+    state.computers.push({
+      id: computerId,
+      spaceId,
+      name: "persisted-computer",
+      fingerprint: { id: "PERSISTED", hostname: "persisted-computer", os: "linux", arch: "x64" },
+      status: "online",
+      daemonVersion: "test",
+      runtimes: [],
+      agentIds: [agentId],
+      connectionId: inviteId,
+      connectToken: "connect_persisted",
+      createdAt: now,
+      firstConnectedAt: now,
+      lastSeenAt: now
+    });
+    state.agents.push({
+      id: agentId,
+      spaceId,
+      name: "persisted-agent",
+      handle: "persisted-agent",
+      description: "",
+      runtime: "fake_acp",
+      model: null,
+      computerId,
+      status: "online",
+      desiredStatus: "running",
+      launchId: null,
+      pid: null,
+      workspacePath: join(sqliteHome, "agents", agentId),
+      createdAt: now,
+      updatedAt: now
+    });
+  });
+  first.close();
+
+  const reopened = new SqliteStore(sqliteHome, sqliteFile);
+  const state = reopened.snapshot();
+  if (state.computers.find(item => item.id === computerId)?.spaceId !== spaceId) {
+    throw new Error("SQLite computer spaceId was lost after reopen");
+  }
+  if (state.agents.find(item => item.id === agentId)?.spaceId !== spaceId) {
+    throw new Error("SQLite agent spaceId was lost after reopen");
+  }
+  if (state.pendingComputerConnections.find(item => item.id === inviteId)?.spaceId !== spaceId) {
+    throw new Error("SQLite invite spaceId was lost after reopen");
+  }
+  reopened.close();
+}
+
+function fakeDelivery(id: string, sessionKey: string | null, target: string, agent: any): any {
   return {
     id,
     target,

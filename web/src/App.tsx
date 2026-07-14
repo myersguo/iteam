@@ -5,6 +5,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Bot,
+  CircleGauge,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -163,6 +164,23 @@ interface Space {
   description?: string;
 }
 
+interface DeliveryLifecycleRecord {
+  intent: string;
+  at: string;
+  message?: string;
+  details?: Record<string, unknown>;
+}
+
+interface Delivery {
+  id: string;
+  agentId: string;
+  target: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  lifecycle?: DeliveryLifecycleRecord[];
+}
+
 interface AppState {
   humans: Human[];
   agents: Agent[];
@@ -173,6 +191,7 @@ interface AppState {
   computers: ComputerEntity[];
   externalBotConfigs: ExternalBotConfig[];
   externalBotBindings: ExternalBotBinding[];
+  deliveries: Delivery[];
   events: unknown[];
   spaces: Space[];
 }
@@ -194,6 +213,15 @@ interface MentionMatch {
   start: number;
   end: number;
   query: string;
+}
+
+interface DeliveryActivity {
+  active: number;
+  queued: number;
+  running: number;
+  dispatching: number;
+  oldestAt?: string;
+  maxQueuePosition?: number;
 }
 
 // ---------- api ----------
@@ -238,7 +266,7 @@ const api = {
       setActiveSpaceId(known.id);
     }
 
-    const [humans, agents, channels, tasks, scheduledTasks, computers, externalBotConfigs, externalBotBindings] = await Promise.all([
+    const [humans, agents, channels, tasks, scheduledTasks, computers, externalBotConfigs, externalBotBindings, deliveries] = await Promise.all([
       apiFetch("/api/humans").then(r => r.json()),
       apiFetch("/api/agents").then(r => r.json()),
       apiFetch("/api/channels").then(r => r.json()),
@@ -246,13 +274,14 @@ const api = {
       apiFetch("/api/scheduled-tasks").then(r => r.json()),
       apiFetch("/api/computers").then(r => r.json()),
       apiFetch("/api/external/bot-configs").then(r => r.json()),
-      apiFetch("/api/external/bot-bindings").then(r => r.json())
+      apiFetch("/api/external/bot-bindings").then(r => r.json()),
+      apiFetch("/api/deliveries").then(r => r.json())
     ]);
     const selectedChannel = resolveChannel(channels, channelTarget);
     const messages = selectedChannel
       ? await apiFetch(`/api/messages/channel/${encodeURIComponent(selectedChannel.id)}?limit=10`).then(r => r.json())
       : [];
-    return { humans, agents, channels, messages, tasks, scheduledTasks, computers, externalBotConfigs, externalBotBindings, events: [], spaces };
+    return { humans, agents, channels, messages, tasks, scheduledTasks, computers, externalBotConfigs, externalBotBindings, deliveries, events: [], spaces };
   },
   async post<T = any>(path: string, body: Record<string, unknown> = {}): Promise<T> {
     const res = await apiFetch(path, {
@@ -1193,6 +1222,90 @@ function titleFor(section: SectionId): string {
   return ({ chat: "Channels", tasks: "Channels", members: "Members", computers: "Computers", scheduled: "Scheduled", integrations: "Bots" } as const)[section];
 }
 
+function deliveryPhase(delivery: Delivery): "queued" | "running" | "dispatching" | null {
+  if (delivery.status !== "pending" && delivery.status !== "delivering") return null;
+  const lifecycle = delivery.lifecycle || [];
+  for (let index = lifecycle.length - 1; index >= 0; index -= 1) {
+    const intent = lifecycle[index].intent;
+    if (intent === "delivery.running" || intent === "delivery.progress") return "running";
+    if (intent === "delivery.queued") return "queued";
+  }
+  return "dispatching";
+}
+
+function summarizeDeliveryActivity(deliveries: Delivery[]): DeliveryActivity {
+  const activeDeliveries = deliveries.filter(delivery => deliveryPhase(delivery));
+  const activity: DeliveryActivity = {
+    active: activeDeliveries.length,
+    queued: 0,
+    running: 0,
+    dispatching: 0
+  };
+  for (const delivery of activeDeliveries) {
+    const phase = deliveryPhase(delivery);
+    if (phase) activity[phase] += 1;
+    const runtimeRecord = [...(delivery.lifecycle || [])]
+      .reverse()
+      .find(record => record.intent === "delivery.queued" || record.intent === "delivery.running");
+    const queuePosition = Number(runtimeRecord?.details?.queuePosition);
+    if (Number.isFinite(queuePosition)) {
+      activity.maxQueuePosition = Math.max(activity.maxQueuePosition || 0, queuePosition);
+    }
+  }
+  activity.oldestAt = activeDeliveries
+    .map(delivery => delivery.createdAt)
+    .sort()[0];
+  return activity;
+}
+
+function deliveryActivityForTarget(deliveries: Delivery[], target: string): DeliveryActivity {
+  return summarizeDeliveryActivity(deliveries.filter(delivery => delivery.target === target));
+}
+
+function deliveryActivityForAgent(deliveries: Delivery[], agentId: string): DeliveryActivity {
+  return summarizeDeliveryActivity(deliveries.filter(delivery => delivery.agentId === agentId));
+}
+
+function DeliveryCountBadge({ activity }: { activity: DeliveryActivity }) {
+  const label = activity.queued > 0
+    ? `${activity.queued} queued`
+    : activity.running > 0
+      ? `${activity.running} running`
+      : `${activity.dispatching} dispatching`;
+  return (
+    <span className={`delivery-count ${activity.queued > 0 ? "is-queued" : "is-running"}`} title={label}>
+      {activity.active}
+    </span>
+  );
+}
+
+function DeliveryActivityBar({ activity }: { activity: DeliveryActivity }) {
+  if (!activity.active) return null;
+  const waiting = activity.oldestAt ? compactElapsed(Date.now() - new Date(activity.oldestAt).getTime()) : null;
+  return (
+    <div className="delivery-activity" aria-live="polite">
+      <CircleGauge size={16} aria-hidden />
+      <strong>Agent activity</strong>
+      {!!activity.running && <span className="delivery-phase is-running">{activity.running} running</span>}
+      {!!activity.queued && (
+        <span className="delivery-phase is-queued">
+          {activity.queued} queued{activity.maxQueuePosition ? ` · up to #${activity.maxQueuePosition}` : ""}
+        </span>
+      )}
+      {!!activity.dispatching && <span className="delivery-phase">{activity.dispatching} dispatching</span>}
+      {waiting && <small>oldest {waiting}</small>}
+    </div>
+  );
+}
+
+function compactElapsed(milliseconds: number): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
 function ChatSidebar({
   state,
   section,
@@ -1252,6 +1365,7 @@ function ChatSidebar({
         <div className="side-collapsible">
           {publicChannels.map(c => {
             const protectedChannel = isProtectedChannel(c);
+            const activity = deliveryActivityForTarget(state.deliveries, c.target);
             return (
               <div
                 key={c.id}
@@ -1283,7 +1397,11 @@ function ChatSidebar({
                     <Pencil size={13} />
                   </button>
                 )}
-                <small>{channelMessageCount(state, c, channel)}</small>
+                {activity.active > 0 ? (
+                  <DeliveryCountBadge activity={activity} />
+                ) : (
+                  <small>{channelMessageCount(state, c, channel)}</small>
+                )}
               </div>
             );
           })}
@@ -1294,6 +1412,7 @@ function ChatSidebar({
         <div className="side-collapsible">
           {dmChannels.map(dm => {
             const agent = agentForDm(state, dm);
+            const activity = deliveryActivityForTarget(state.deliveries, dm.target);
             return (
               <button
                 key={dm.id}
@@ -1306,7 +1425,11 @@ function ChatSidebar({
               >
                 <Avatar name={agent?.name || dm.name} agent />
                 <span>{agent?.name || dm.name}</span>
-                <small>@{agent?.handle || slugHandle(dm.name)}</small>
+                {activity.active > 0 ? (
+                  <DeliveryCountBadge activity={activity} />
+                ) : (
+                  <small>@{agent?.handle || slugHandle(dm.name)}</small>
+                )}
               </button>
             );
           })}
@@ -1372,7 +1495,11 @@ function MembersSidebar({
             >
               <Avatar name={a.name} agent />
               <span>{a.name}</span>
-              <small>{a.status}</small>
+              {deliveryActivityForAgent(state.deliveries, a.id).active > 0 ? (
+                <DeliveryCountBadge activity={deliveryActivityForAgent(state.deliveries, a.id)} />
+              ) : (
+                <small>{a.status}</small>
+              )}
             </button>
           ))}
         </div>
@@ -1582,6 +1709,10 @@ function ChatView({
   const [loadingOlder, setLoadingOlder] = useState(false);
   const oldestIdRef = useRef<string | null>(null);
   const mentionMembers = useMemo(() => getMentionMembers(state, channel), [state, channel]);
+  const deliveryActivity = useMemo(
+    () => deliveryActivityForTarget(state.deliveries, channel),
+    [state.deliveries, channel]
+  );
   const mentionOptions = useMemo(() => {
     if (!mentionMatch) return [];
     const query = mentionMatch.query.toLowerCase();
@@ -1730,6 +1861,7 @@ function ChatView({
         eyebrow={channel.startsWith("dm:") ? "Direct message" : "Channel"}
         title={formatChatTitle(state, channel)}
         subtitle={resolveChatSubtitle(state, channel)}
+        extra={<DeliveryActivityBar activity={deliveryActivity} />}
       />
       <div className="pane-tabs">
         <button className={tab === "chat" ? "is-active" : ""} onClick={() => setTab("chat")}>
@@ -4486,11 +4618,13 @@ function ConnectComputerModal({
 function Topbar({
   eyebrow,
   title,
-  subtitle
+  subtitle,
+  extra
 }: {
   eyebrow?: string;
   title: string;
   subtitle?: string;
+  extra?: ReactNode;
 }) {
   return (
     <header className="topbar">
@@ -4498,6 +4632,7 @@ function Topbar({
         {eyebrow && <p className="eyebrow">{eyebrow}</p>}
         <h1>{title}</h1>
         {subtitle && <p className="topbar-sub">{subtitle}</p>}
+        {extra}
       </div>
     </header>
   );

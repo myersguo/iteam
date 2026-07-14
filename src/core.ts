@@ -13,6 +13,7 @@ import { DEFAULT_SPACE_ID } from "./store/base.js";
 import { RuntimeManager } from "./runtime.js";
 import type { IStore, StateListener } from "./store/types.js";
 import type {
+  ActiveDeliveryContext,
   Agent,
   ConnectComputerResult,
   ContextMessage,
@@ -198,6 +199,13 @@ export interface DeliveryResultInput {
 export interface DeliveryProgressInput {
   text?: string;
   elapsedMs?: number;
+}
+
+export interface DeliveryRuntimeStateInput {
+  phase?: "queued" | "running";
+  queuePosition?: number;
+  sessionKey?: string;
+  processSlot?: number;
 }
 
 export interface DeliveryHelpNeededInput {
@@ -951,6 +959,7 @@ export class IteamCore {
             message,
             author,
             contextMessages: buildConversationContext(s, message),
+            activeDeliveries: buildActiveDeliveryContext(s, delivery),
             members: listMembers(s)
           };
         })
@@ -1484,6 +1493,59 @@ export class IteamCore {
         task.updatedAt = now;
       }
       return message;
+    });
+  }
+
+  applyDeliveryRuntimeState(deliveryId: string, input: DeliveryRuntimeStateInput): Delivery {
+    return this.store.mutate<Delivery>(s => {
+      const now = this.clock();
+      const delivery = (s.deliveries || []).find(item => item.id === deliveryId);
+      if (!delivery) throw new HttpError(404, "delivery not found");
+      if (delivery.status !== "delivering") {
+        throw new HttpError(409, "delivery is not active");
+      }
+      const phase = input.phase === "running" ? "running" : input.phase === "queued" ? "queued" : null;
+      if (!phase) throw new HttpError(400, "phase must be queued or running");
+      const queuePosition = Number.isFinite(input.queuePosition)
+        ? Math.max(0, Math.floor(Number(input.queuePosition)))
+        : undefined;
+      const intent = phase === "queued" ? "delivery.queued" : "delivery.running";
+      const latestRuntimeState = [...(delivery.lifecycle || [])]
+        .reverse()
+        .find(item => item.intent === "delivery.queued" || item.intent === "delivery.running");
+      if (latestRuntimeState?.intent === "delivery.running" && intent === "delivery.queued") {
+        return delivery;
+      }
+      const processSlot = Number.isFinite(input.processSlot)
+        ? Math.floor(Number(input.processSlot))
+        : undefined;
+      if (
+        latestRuntimeState?.intent === intent &&
+        latestRuntimeState.details?.sessionKey === input.sessionKey &&
+        latestRuntimeState.details?.processSlot === processSlot &&
+        (
+          intent === "delivery.running" ||
+          latestRuntimeState.details?.queuePosition === queuePosition
+        )
+      ) {
+        return delivery;
+      }
+      delivery.updatedAt = now;
+      pushDeliveryLifecycle(
+        delivery,
+        intent,
+        now,
+        phase === "queued"
+          ? `Queued${queuePosition ? ` (#${queuePosition})` : ""}`
+          : "Runtime started",
+        {
+          phase,
+          ...(queuePosition !== undefined ? { queuePosition } : {}),
+          ...(input.sessionKey ? { sessionKey: input.sessionKey } : {}),
+          ...(processSlot !== undefined ? { processSlot } : {})
+        }
+      );
+      return delivery;
     });
   }
 
@@ -2524,7 +2586,7 @@ export class IteamCore {
     const now = this.clock();
     const id = this.newId("delivery");
     const target = options.target || message.target;
-    const sessionKey = options.sessionKey ?? sessionKeyFromTarget(target);
+    const sessionKey = options.sessionKey ?? sessionKeyFromMessage(target, message.id);
     state.deliveries.push({
       id,
       spaceId: message.spaceId,
@@ -2579,6 +2641,7 @@ export class IteamCore {
           message,
           author,
           contextMessages: buildConversationContext(s, message),
+          activeDeliveries: buildActiveDeliveryContext(s, delivery),
           members: listMembers(s),
           _hasListener: hasListener
         } as DeliveryWithContext & { _hasListener: boolean });
@@ -2655,6 +2718,39 @@ function buildConversationContext(state: State, message: Message | undefined, li
   }));
 }
 
+function buildActiveDeliveryContext(
+  state: State,
+  current: Delivery,
+  limit = 8
+): ActiveDeliveryContext[] {
+  return (state.deliveries || [])
+    .filter(delivery =>
+      delivery.id !== current.id &&
+      delivery.agentId === current.agentId &&
+      delivery.spaceId === current.spaceId &&
+      delivery.target === current.target &&
+      ["pending", "delivering"].includes(delivery.status)
+    )
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .slice(-limit)
+    .map(delivery => {
+      const lifecycle = delivery.lifecycle || [];
+      const running = [...lifecycle].reverse().find(item => item.intent === "delivery.running");
+      const queued = [...lifecycle].reverse().find(item => item.intent === "delivery.queued");
+      const queuePosition = Number(queued?.details?.queuePosition);
+      const message = (state.messages || []).find(item => item.id === delivery.messageId);
+      return {
+        id: delivery.id,
+        target: delivery.target,
+        phase: running ? "running" : queued ? "queued" : "pending",
+        createdAt: delivery.createdAt,
+        updatedAt: delivery.updatedAt,
+        ...(Number.isFinite(queuePosition) ? { queuePosition } : {}),
+        messageText: String(message?.text || "").replace(/\s+/g, " ").slice(0, 600)
+      };
+    });
+}
+
 function threadRootFromTarget(target: string): string | null {
   const text = String(target || "");
   const separator = text.lastIndexOf(":");
@@ -2717,8 +2813,12 @@ function defaultRuntimeForComputer(runtimes: RuntimeInfo[]): string | null {
   )?.id || null;
 }
 
-function sessionKeyFromTarget(target: string): string | null {
-  return threadRootFromTarget(target) ? target : null;
+function sessionKeyFromMessage(target: string, messageId: string): string | null {
+  const normalized = String(target || "").trim();
+  if (!normalized) return null;
+  if (normalized.startsWith("dm:") || threadRootFromTarget(normalized)) return normalized;
+  if (normalized.startsWith("#")) return `channel-root:${normalized}:${messageId}`;
+  return normalized;
 }
 
 function normalizeOptionalString(value: string | null | undefined): string | null {

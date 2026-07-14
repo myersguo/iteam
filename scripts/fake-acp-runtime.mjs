@@ -64,7 +64,13 @@ function handle(message) {
       pendingPrompts.set(sessionId, message.id);
       return;
     }
-    result(message.id, { stopReason: "stop" });
+    const delayMatch = promptText.match(/delay:(\d+)/);
+    const delayMs = delayMatch ? Number(delayMatch[1]) : 0;
+    if (delayMs > 0) {
+      setTimeout(() => result(message.id, { stopReason: "stop" }), delayMs);
+    } else {
+      result(message.id, { stopReason: "stop" });
+    }
     return;
   }
 

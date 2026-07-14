@@ -46,8 +46,7 @@ export function resolveAcpRuntimeProfile(runtime: string): ResolvedAcpRuntimePro
       name: runtime,
       command: runtime,
       args: ["acp", "serve"],
-      cwd: "{{workspaceDir}}",
-      poolSize: 1
+      cwd: "{{workspaceDir}}"
     };
   }
   return null;

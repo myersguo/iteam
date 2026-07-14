@@ -37,6 +37,10 @@ export interface AgentLauncherOptions {
   serverUrl: string;
   report: StatusReporter;
   reportDeliveryProgress?: (deliveryId: string, text: string) => Promise<unknown>;
+  reportDeliveryRuntimeState?: (
+    deliveryId: string,
+    state: { phase: "queued" | "running"; queuePosition?: number; sessionKey?: string; processSlot?: number }
+  ) => Promise<unknown>;
   /**
    * Lazy-resolved connect credentials. The daemon may not have a computer id
    * until the first heartbeat completes, so we read these on each launch.
@@ -48,19 +52,26 @@ export class AgentLauncher {
   serverUrl: string;
   report: StatusReporter;
   reportDeliveryProgress: (deliveryId: string, text: string) => Promise<unknown>;
+  reportDeliveryRuntimeState: (
+    deliveryId: string,
+    state: { phase: "queued" | "running"; queuePosition?: number; sessionKey?: string; processSlot?: number }
+  ) => Promise<unknown>;
   getCredentials: () => { computerId?: string; connectToken?: string };
   children: Map<string, ChildEntry>;
   drivers: Map<string, DriverEntry>;
   progressEventKeys: Map<string, number>;
+  runtimeStateReports: Map<string, Promise<unknown>>;
 
-  constructor({ serverUrl, report, reportDeliveryProgress, getCredentials }: AgentLauncherOptions) {
+  constructor({ serverUrl, report, reportDeliveryProgress, reportDeliveryRuntimeState, getCredentials }: AgentLauncherOptions) {
     this.serverUrl = serverUrl.replace(/\/$/, "");
     this.report = report;
     this.reportDeliveryProgress = reportDeliveryProgress || (async () => {});
+    this.reportDeliveryRuntimeState = reportDeliveryRuntimeState || (async () => {});
     this.getCredentials = getCredentials || (() => ({}));
     this.children = new Map();
     this.drivers = new Map();
     this.progressEventKeys = new Map();
+    this.runtimeStateReports = new Map();
   }
 
   has(agentId: string): boolean {
@@ -193,6 +204,21 @@ export class AgentLauncher {
         this.reportDeliveryProgress(event.deliveryId, progress).catch(() => {});
       }
       switch (event.type) {
+        case "delivery_queued":
+          this.queueRuntimeStateReport(event.deliveryId, {
+            phase: "queued",
+            queuePosition: event.queuePosition,
+            sessionKey: event.sessionKey,
+            processSlot: event.processSlot
+          });
+          return;
+        case "delivery_running":
+          this.queueRuntimeStateReport(event.deliveryId, {
+            phase: "running",
+            sessionKey: event.sessionKey,
+            processSlot: event.processSlot
+          });
+          return;
         case "session_started":
           this.report(agent.id, "output", {
             launchId,
@@ -220,6 +246,27 @@ export class AgentLauncher {
           return;
       }
     });
+  }
+
+  private queueRuntimeStateReport(
+    deliveryId: string,
+    state: { phase: "queued" | "running"; queuePosition?: number; sessionKey?: string; processSlot?: number }
+  ): void {
+    const previous = this.runtimeStateReports.get(deliveryId) || Promise.resolve();
+    const next = previous
+      .catch(() => {})
+      .then(() => this.reportDeliveryRuntimeState(deliveryId, state))
+      .catch(error => {
+        console.error(
+          `[${nowIso()}] report ${deliveryId} runtime-state=${state.phase} failed: ${(error as Error).message}`
+        );
+      })
+      .finally(() => {
+        if (this.runtimeStateReports.get(deliveryId) === next) {
+          this.runtimeStateReports.delete(deliveryId);
+        }
+      });
+    this.runtimeStateReports.set(deliveryId, next);
   }
 
   private async launchLegacy(agent: Agent): Promise<void> {
@@ -539,6 +586,7 @@ function formatDeliveryPrompt({ agent, message, delivery }: DeliveryPromptArgs):
     .map(member => `- ${member.name} (@${member.handle})`)
     .join("\n");
   const history = formatConversationHistory(delivery.contextMessages || [], message.id);
+  const activeDeliveries = formatActiveDeliveries(delivery.activeDeliveries || []);
   const taskMode = delivery.target.includes(":msg_") &&
     (message.type === "task" || (delivery.contextMessages || []).some(item => item.type === "task"));
   const taskInstructions = taskMode
@@ -576,6 +624,9 @@ ${members || "- No other members"}
 Conversation history:
 ${history}
 
+Other active deliveries for this agent in the same chat:
+${activeDeliveries}
+
 Current message text:
 ${message.text}
 `;
@@ -589,6 +640,14 @@ function formatConversationHistory(messages: ContextMessage[], currentMessageId:
     const handle = author.handle ? ` @${author.handle}` : "";
     const text = String(item.text || "").replace(/\s+/g, " ").slice(0, 1200);
     return `- [${item.createdAt || "unknown time"}] ${author.name || "Unknown"}${handle}: ${text}${marker}`;
+  }).join("\n");
+}
+
+function formatActiveDeliveries(deliveries: NonNullable<DeliveryWithContext["activeDeliveries"]>): string {
+  if (!deliveries.length) return "- None.";
+  return deliveries.map(delivery => {
+    const queue = delivery.queuePosition !== undefined ? ` queue=#${delivery.queuePosition}` : "";
+    return `- ${delivery.phase}${queue} since=${delivery.createdAt} request=${delivery.messageText}`;
   }).join("\n");
 }
 

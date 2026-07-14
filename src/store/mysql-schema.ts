@@ -36,6 +36,7 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
     name: "iteam_computers",
     ddl: `CREATE TABLE IF NOT EXISTS iteam_computers (
       id                   VARCHAR(64)  NOT NULL PRIMARY KEY,
+      space_id             VARCHAR(64)  NOT NULL DEFAULT 'space_default',
       name                 VARCHAR(255) NOT NULL,
       fingerprint_id       VARCHAR(64)  NOT NULL,
       fingerprint_hostname VARCHAR(255) NOT NULL,
@@ -58,6 +59,7 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
     name: "iteam_pending_connections",
     ddl: `CREATE TABLE IF NOT EXISTS iteam_pending_connections (
       id                    VARCHAR(64)  NOT NULL PRIMARY KEY,
+      space_id              VARCHAR(64)  NOT NULL DEFAULT 'space_default',
       token                 VARCHAR(128) NOT NULL,
       status                VARCHAR(32)  NOT NULL,
       created_at            VARCHAR(40)  NOT NULL,
@@ -72,6 +74,7 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
     name: "iteam_agents",
     ddl: `CREATE TABLE IF NOT EXISTS iteam_agents (
       id                  VARCHAR(64)  NOT NULL PRIMARY KEY,
+      space_id            VARCHAR(64)  NOT NULL DEFAULT 'space_default',
       name                VARCHAR(255) NOT NULL,
       handle              VARCHAR(64)  NOT NULL,
       description         TEXT         NOT NULL,

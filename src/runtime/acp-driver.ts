@@ -26,7 +26,12 @@ import {
 /** ACP protocol version this client speaks. Negotiated down on initialize. */
 const PROTOCOL_VERSION = 1;
 const TURN_IDLE_TIMEOUT_MS = readPositiveMs("ITEAM_AGENT_IDLE_TIMEOUT_MS", 6 * 60 * 60 * 1000);
-const DEFAULT_PROCESS_POOL_SIZE = readPositiveMs("ITEAM_ACP_PROCESS_POOL_SIZE", 3);
+const MAX_PROCESS_POOL_SIZE = 50;
+const DEFAULT_PROCESS_POOL_SIZE = Math.min(
+  MAX_PROCESS_POOL_SIZE,
+  readPositiveMs("ITEAM_ACP_PROCESS_POOL_SIZE", MAX_PROCESS_POOL_SIZE)
+);
+const INITIAL_PROCESS_POOL_SIZE = readPositiveMs("ITEAM_ACP_INITIAL_PROCESS_POOL_SIZE", 2);
 const DEFAULT_SESSION_KEY = "__default__";
 
 interface AcpRuntimeSpec {
@@ -44,11 +49,17 @@ export interface AcpDriverOptions {
 }
 
 interface ProcessState {
+  slot: number;
   child: ChildProcessWithoutNullStreams;
   rpc: JsonRpcStdioClient;
   defaultSessionId: string;
   workspace: AgentWorkspaceLayout;
   sessions: Map<string, AcpSessionState>;
+  inflight: Promise<unknown>;
+  queuedTurns: number;
+  activeTurns: number;
+  assignmentReservations: number;
+  sessionReservations: number;
 }
 
 interface AcpSessionState {
@@ -77,7 +88,10 @@ export class AcpDriver implements AgentDriver {
   
   private processes: ProcessState[] = [];
   private startPromises: Promise<void>[] = [];
+  private sessionPromises: Map<string, Promise<{ processState: ProcessState; sessionState: AcpSessionState }>> = new Map();
   private cancelledDeliveryIds: Set<string> = new Set();
+  private maxProcessPoolSize = DEFAULT_PROCESS_POOL_SIZE;
+  private nextProcessSlot = 0;
 
   constructor(runtime: string, opts: AcpDriverOptions) {
     this.runtime = runtime;
@@ -104,19 +118,46 @@ export class AcpDriver implements AgentDriver {
 
   async start(agent: Agent): Promise<void> {
     const profile = resolveAcpRuntimeProfile(agent.runtime);
-    const poolSize = Math.max(1, Math.floor(profile?.poolSize || DEFAULT_PROCESS_POOL_SIZE));
-    // Start up to the configured process pool size. Each process can host
-    // multiple ACP sessions, keyed by delivery.sessionKey.
-    while (this.processes.length + this.startPromises.length < poolSize) {
-      const processIndex = this.processes.length + this.startPromises.length;
-      const p = this.doStart(agent, processIndex).finally(() => {
-        this.startPromises = this.startPromises.filter(x => x !== p);
-      });
-      this.startPromises.push(p);
-    }
+    this.maxProcessPoolSize = Math.min(
+      MAX_PROCESS_POOL_SIZE,
+      Math.max(1, Math.floor(profile?.poolSize || DEFAULT_PROCESS_POOL_SIZE))
+    );
+    const initialSize = Math.min(
+      this.maxProcessPoolSize,
+      Math.max(1, Math.floor(INITIAL_PROCESS_POOL_SIZE))
+    );
+    this.ensureProcessCount(agent, initialSize);
     if (this.startPromises.length > 0) {
       await Promise.all(this.startPromises);
     }
+  }
+
+  private ensureProcessCount(agent: Agent, desiredSize: number): void {
+    const target = Math.min(this.maxProcessPoolSize, Math.max(1, desiredSize));
+    while (this.processes.length + this.startPromises.length < target) {
+      const processIndex = this.nextProcessSlot++;
+      const promise = this.doStart(agent, processIndex).finally(() => {
+        this.startPromises = this.startPromises.filter(item => item !== promise);
+      });
+      this.startPromises.push(promise);
+    }
+  }
+
+  private async ensureAvailableProcess(agent: Agent): Promise<void> {
+    const available = this.processes.some(processState =>
+      processState.child.exitCode === null &&
+      processState.child.signalCode === null &&
+      processState.activeTurns === 0 &&
+      processState.queuedTurns === 0 &&
+      processState.assignmentReservations === 0 &&
+      processState.sessionReservations === 0
+    );
+    if (available || this.processes.length + this.startPromises.length >= this.maxProcessPoolSize) {
+      return;
+    }
+    const target = this.processes.length + this.startPromises.length + 1;
+    this.ensureProcessCount(agent, target);
+    await Promise.all(this.startPromises);
   }
 
   private async doStart(agent: Agent, processIndex: number): Promise<void> {
@@ -169,6 +210,8 @@ export class AcpDriver implements AgentDriver {
     });
 
     child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+      this.processes = this.processes.filter(p => p !== processState);
+      if (this.processes.some(p => p.child.exitCode === null && p.child.signalCode === null)) return;
       this.emit({
         type: "exited",
         agentId: agent.id,
@@ -178,7 +221,6 @@ export class AcpDriver implements AgentDriver {
         code,
         signal
       });
-      this.processes = this.processes.filter(p => p !== processState);
     });
 
     const rpc = new JsonRpcStdioClient(child, {
@@ -208,11 +250,17 @@ export class AcpDriver implements AgentDriver {
       inflight: Promise.resolve()
     };
     processState = {
+      slot: processIndex,
       child,
       rpc,
       defaultSessionId: sessionResult.sessionId,
       workspace,
-      sessions: new Map([[DEFAULT_SESSION_KEY, defaultSession]])
+      sessions: new Map([[DEFAULT_SESSION_KEY, defaultSession]]),
+      inflight: Promise.resolve(),
+      queuedTurns: 0,
+      activeTurns: 0,
+      assignmentReservations: 0,
+      sessionReservations: 0
     };
     
     this.processes.push(processState);
@@ -237,12 +285,52 @@ export class AcpDriver implements AgentDriver {
       throw new Error(`delivery ${delivery.id} was cancelled`);
     }
 
-    const sessionKey = sessionKeyForDelivery(delivery);
-    const processState = this.processes[hashIndex(sessionKey, this.processes.length)];
-    const sessionState = await this.ensureSession(agent, processState, sessionKey);
+    const requestedSessionKey = sessionKeyForDelivery(delivery);
+    const resolved = isChannelRootDelivery(delivery)
+      ? await this.resolveChannelLane(agent, delivery.target)
+      : {
+          ...(await this.resolveSession(agent, requestedSessionKey)),
+          sessionKey: requestedSessionKey
+        };
+    const { processState, sessionState, sessionKey } = resolved;
+    const queuePosition = processState.activeTurns + processState.queuedTurns +
+      Math.max(0, processState.assignmentReservations - 1);
+    processState.queuedTurns += 1;
+    this.releaseProcessReservation(processState);
+    this.emit({
+      type: "delivery_queued",
+      agentId: agent.id,
+      launchId: this.launchId,
+      deliveryId: delivery.id,
+      target: delivery.target,
+      at: nowIso(),
+      queuePosition,
+      sessionKey,
+      processSlot: processState.slot
+    });
 
-    const turn = sessionState.inflight.then(() => this.runTurn(agent, processState, sessionState, delivery, prompt));
-    sessionState.inflight = turn.catch(() => {});
+    const turn = Promise.all([sessionState.inflight, processState.inflight]).then(async () => {
+      processState.queuedTurns = Math.max(0, processState.queuedTurns - 1);
+      processState.activeTurns += 1;
+      this.emit({
+        type: "delivery_running",
+        agentId: agent.id,
+        launchId: this.launchId,
+        deliveryId: delivery.id,
+        target: delivery.target,
+        at: nowIso(),
+        sessionKey,
+        processSlot: processState.slot
+      });
+      try {
+        return await this.runTurn(agent, processState, sessionState, delivery, prompt);
+      } finally {
+        processState.activeTurns = Math.max(0, processState.activeTurns - 1);
+      }
+    });
+    const settledTurn = turn.catch(() => {});
+    sessionState.inflight = settledTurn;
+    processState.inflight = settledTurn;
     return turn;
   }
 
@@ -258,14 +346,134 @@ export class AcpDriver implements AgentDriver {
     }
   }
 
-  private async ensureSession(agent: Agent, processState: ProcessState, sessionKey: string): Promise<AcpSessionState> {
-    const existing = processState.sessions.get(sessionKey);
-    if (existing) return existing;
+  private async resolveSession(
+    agent: Agent,
+    sessionKey: string
+  ): Promise<{ processState: ProcessState; sessionState: AcpSessionState }> {
+    for (const processState of this.processes) {
+      const existing = processState.sessions.get(sessionKey);
+      if (existing) {
+        this.reserveProcess(processState);
+        return { processState, sessionState: existing };
+      }
+    }
+    const pending = this.sessionPromises.get(sessionKey);
+    if (pending) {
+      const resolved = await pending;
+      this.reserveProcess(resolved.processState);
+      return resolved;
+    }
 
-    const sessionResult = await processState.rpc.request<{ sessionId: string }>("session/new", {
-      cwd: processState.workspace.dir,
-      mcpServers: buildMcpServers(processState.workspace)
+    await this.ensureAvailableProcess(agent);
+    const processState = this.selectAndReserveProcess();
+    const promise = this.createSession(agent, sessionKey, processState).catch(error => {
+      this.releaseProcessReservation(processState);
+      throw error;
+    }).finally(() => {
+      this.sessionPromises.delete(sessionKey);
     });
+    this.sessionPromises.set(sessionKey, promise);
+    return promise;
+  }
+
+  private async resolveChannelLane(
+    agent: Agent,
+    target: string
+  ): Promise<{ processState: ProcessState; sessionState: AcpSessionState; sessionKey: string }> {
+    const lanePrefix = `channel:${safeSessionKey(target)}:slot:`;
+    const existingLane = this.processes
+      .map(processState => ({
+        processState,
+        sessionKey: `${lanePrefix}${processState.slot}`,
+        sessionState: processState.sessions.get(`${lanePrefix}${processState.slot}`)
+      }))
+      .filter((lane): lane is { processState: ProcessState; sessionKey: string; sessionState: AcpSessionState } =>
+        Boolean(lane.sessionState)
+      )
+      .sort((left, right) => {
+        const leftLoad = left.processState.activeTurns + left.processState.queuedTurns + left.processState.assignmentReservations;
+        const rightLoad = right.processState.activeTurns + right.processState.queuedTurns + right.processState.assignmentReservations;
+        return leftLoad - rightLoad;
+      })[0];
+    const existingLaneLoad = existingLane
+      ? existingLane.processState.activeTurns +
+        existingLane.processState.queuedTurns +
+        existingLane.processState.assignmentReservations
+      : 0;
+    if (existingLane && existingLaneLoad === 0) {
+      this.reserveProcess(existingLane.processState);
+      return existingLane;
+    }
+    if (this.processes.length + this.startPromises.length < this.maxProcessPoolSize) {
+      await this.ensureAvailableProcess(agent);
+      const processState = this.selectAndReserveProcess();
+      const sessionKey = `${lanePrefix}${processState.slot}`;
+      const pending = this.sessionPromises.get(sessionKey);
+      if (pending) {
+        this.releaseProcessReservation(processState);
+        const resolved = await pending;
+        this.reserveProcess(resolved.processState);
+        return { ...resolved, sessionKey };
+      }
+      const promise = this.createSession(agent, sessionKey, processState).catch(error => {
+        this.releaseProcessReservation(processState);
+        throw error;
+      }).finally(() => {
+        this.sessionPromises.delete(sessionKey);
+      });
+      this.sessionPromises.set(sessionKey, promise);
+      const resolved = await promise;
+      return { ...resolved, sessionKey };
+    }
+    if (existingLane) {
+      this.reserveProcess(existingLane.processState);
+      return existingLane;
+    }
+    await this.ensureAvailableProcess(agent);
+    const processState = this.selectAndReserveProcess();
+    const sessionKey = `${lanePrefix}${processState.slot}`;
+    const existing = processState.sessions.get(sessionKey);
+    if (existing) return { processState, sessionState: existing, sessionKey };
+
+    const pending = this.sessionPromises.get(sessionKey);
+    if (pending) {
+      this.releaseProcessReservation(processState);
+      const resolved = await pending;
+      this.reserveProcess(resolved.processState);
+      return { ...resolved, sessionKey };
+    }
+    const promise = this.createSession(agent, sessionKey, processState).catch(error => {
+      this.releaseProcessReservation(processState);
+      throw error;
+    }).finally(() => {
+      this.sessionPromises.delete(sessionKey);
+    });
+    this.sessionPromises.set(sessionKey, promise);
+    const resolved = await promise;
+    return { ...resolved, sessionKey };
+  }
+
+  private async createSession(
+    agent: Agent,
+    sessionKey: string,
+    selectedProcess?: ProcessState
+  ): Promise<{ processState: ProcessState; sessionState: AcpSessionState }> {
+    const processState = selectedProcess || this.selectProcess();
+    if (sessionKey === DEFAULT_SESSION_KEY) {
+      const existing = processState.sessions.get(DEFAULT_SESSION_KEY);
+      if (existing) return { processState, sessionState: existing };
+    }
+
+    processState.sessionReservations += 1;
+    let sessionResult: { sessionId: string };
+    try {
+      sessionResult = await processState.rpc.request<{ sessionId: string }>("session/new", {
+        cwd: processState.workspace.dir,
+        mcpServers: buildMcpServers(processState.workspace)
+      });
+    } finally {
+      processState.sessionReservations = Math.max(0, processState.sessionReservations - 1);
+    }
     const sessionState: AcpSessionState = {
       key: sessionKey,
       sessionId: sessionResult.sessionId,
@@ -279,7 +487,43 @@ export class AcpDriver implements AgentDriver {
       sessionId: sessionState.sessionId,
       at: nowIso()
     });
-    return sessionState;
+    return { processState, sessionState };
+  }
+
+  private selectProcess(): ProcessState {
+    const healthy = this.processes.filter(
+      processState => processState.child.exitCode === null && processState.child.signalCode === null
+    );
+    if (!healthy.length) throw new Error("acp processes not initialized");
+    return healthy.reduce((best, current) => {
+      const bestLoad =
+        best.activeTurns * 1000 +
+        best.queuedTurns * 100 +
+        best.assignmentReservations * 10 +
+        best.sessionReservations * 10 +
+        best.sessions.size;
+      const currentLoad =
+        current.activeTurns * 1000 +
+        current.queuedTurns * 100 +
+        current.assignmentReservations * 10 +
+        current.sessionReservations * 10 +
+        current.sessions.size;
+      return currentLoad < bestLoad ? current : best;
+    });
+  }
+
+  private selectAndReserveProcess(): ProcessState {
+    const processState = this.selectProcess();
+    this.reserveProcess(processState);
+    return processState;
+  }
+
+  private reserveProcess(processState: ProcessState): void {
+    processState.assignmentReservations += 1;
+  }
+
+  private releaseProcessReservation(processState: ProcessState): void {
+    processState.assignmentReservations = Math.max(0, processState.assignmentReservations - 1);
   }
 
   private async runTurn(
@@ -572,8 +816,13 @@ function extractPlanEntries(value: unknown): Array<{ id: string; content: string
 function sessionKeyForDelivery(delivery: DeliveryWithContext): string {
   const explicit = delivery.sessionKey?.trim();
   if (explicit) return safeSessionKey(explicit);
-  if (delivery.target.includes(":msg_")) return safeSessionKey(delivery.target);
-  return DEFAULT_SESSION_KEY;
+  return safeSessionKey(delivery.target);
+}
+
+function isChannelRootDelivery(delivery: DeliveryWithContext): boolean {
+  return delivery.target.startsWith("#") &&
+    !delivery.target.includes(":msg_") &&
+    String(delivery.sessionKey || "").startsWith("channel-root:");
 }
 
 function safeSessionKey(value: string): string {
@@ -584,16 +833,6 @@ function safeSessionKey(value: string): string {
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "")
     .slice(0, 96) || DEFAULT_SESSION_KEY;
-}
-
-function hashIndex(key: string, poolSize: number): number {
-  if (poolSize <= 1) return 0;
-  let hash = 2166136261;
-  for (let i = 0; i < key.length; i += 1) {
-    hash ^= key.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0) % poolSize;
 }
 
 function withIdleTimeout<T>(
