@@ -153,6 +153,21 @@ export class AcpDriver implements AgentDriver {
 
     let processState: ProcessState | null = null;
 
+    // Turn spawn errors (ENOENT for missing binary, EACCES, ...) into agent
+    // events instead of unhandled 'error' events that would kill the daemon
+    // and take every other agent down with it.
+    child.on("error", (error: Error) => {
+      this.emit({
+        type: "error",
+        agentId: agent.id,
+        launchId: this.launchId,
+        sessionId: processState?.defaultSessionId,
+        at: nowIso(),
+        message: `${spec.command} spawn error: ${error.message}`
+      });
+      this.processes = this.processes.filter(p => p !== processState);
+    });
+
     child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
       this.emit({
         type: "exited",

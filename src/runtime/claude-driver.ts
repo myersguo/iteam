@@ -158,6 +158,27 @@ export class ClaudeDriver implements AgentDriver {
       toolBlocks: new Map()
     };
 
+    // Unhandled spawn errors (ENOENT when `claude` is missing from PATH,
+    // EACCES, ...) used to bubble up as an unhandled 'error' event and take
+    // down the whole daemon. Attach a synchronous handler so the failure is
+    // confined to this driver's start promise and other agents keep running.
+    child.on("error", (error: Error) => {
+      this.emit({
+        type: "error",
+        agentId: agent.id,
+        launchId: this.launchId,
+        sessionId: state.sessionId || undefined,
+        at: nowIso(),
+        message: `claude spawn error: ${error.message}`
+      });
+      if (state.pending) {
+        clearTimeout(state.pending.timer);
+        state.pending.reject(error);
+        state.pending = null;
+      }
+      this.processes = this.processes.filter(p => p !== state);
+    });
+
     child.stdout.on("data", (chunk: Buffer) => this.handleStdout(agent, state, chunk));
     child.stderr.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");

@@ -908,6 +908,25 @@ export class IteamCore {
       }
       current.lastSeenAt = now;
 
+      // Daemon reconnect (no live SSE listener) means any agent still marked
+      // online/starting is a ghost from the previous daemon process — the
+      // driver never emitted an `exited` event because the daemon crashed
+      // or was killed. Reset those agents so the launchAgents filter below
+      // picks them up and re-spawns them on this heartbeat.
+      if (!this.computerListeners.get(current.id)?.size) {
+        for (const agent of s.agents) {
+          if (
+            agent.computerId === current.id &&
+            agent.desiredStatus === "running" &&
+            ["online", "starting", "idle"].includes(agent.status)
+          ) {
+            agent.status = "registered";
+            agent.pid = null;
+            agent.updatedAt = now;
+          }
+        }
+      }
+
       const launchAgents = s.agents
         .filter(agent =>
           agent.computerId === current!.id &&
