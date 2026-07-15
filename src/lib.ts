@@ -1,6 +1,6 @@
 import { homedir, hostname, platform, arch } from "node:os";
 import { join } from "node:path";
-import { randomUUID, createHash } from "node:crypto";
+import { randomUUID, createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Fingerprint } from "./types.js";
 
@@ -16,6 +16,18 @@ export function nowIso(): string {
 
 export function createId(prefix: string): string {
   return `${prefix}_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
+}
+
+export function deriveAgentAuthToken(connectToken: string, agentId: string): string {
+  return createHmac("sha256", connectToken)
+    .update(`iteam-agent:${agentId}`)
+    .digest("hex");
+}
+
+export function safeTokenEqual(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
 export function localComputerFingerprint(): Fingerprint {

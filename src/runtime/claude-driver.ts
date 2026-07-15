@@ -15,8 +15,7 @@
 //    per-process inflight chain for in-flight queuing.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { join } from "node:path";
-import { nowIso, defaultHome } from "../lib.js";
+import { nowIso } from "../lib.js";
 import { agentEnv, prepareAgentWorkspace, type AgentWorkspaceLayout } from "../workspace.js";
 import type { Agent, DeliveryWithContext } from "../types.js";
 import { deliveryAffinityIndex, type AgentDriver, type AgentEventListener, type DeliverResult, type DeliveryMode, type DriverCapabilities } from "./driver.js";
@@ -110,21 +109,14 @@ export class ClaudeDriver implements AgentDriver {
   }
 
   private async doStart(agent: Agent, processIndex: number): Promise<void> {
-    const poolAgent = { ...agent };
-    const baseLocalDir = join(defaultHome(), "agents", agent.id);
-    const baseRequestedDir = agent.workspacePath || baseLocalDir;
-    poolAgent.workspacePath = `${baseRequestedDir}-pool-${processIndex}`;
-
     const workspace = prepareAgentWorkspace({
-      agent: poolAgent,
+      agent,
       serverUrl: this.serverUrl,
       launchId: this.launchId,
+      stateSuffix: `-pool-${processIndex}`,
       computerId: this.computerId,
       connectToken: this.connectToken
     });
-    workspace.bridgeArgs = workspace.bridgeArgs.map(arg =>
-      arg === poolAgent.id ? agent.id : arg
-    );
 
     const args = [
       "-p",
@@ -143,7 +135,7 @@ export class ClaudeDriver implements AgentDriver {
     if (agent.model) args.push("--model", agent.model);
 
     const child = spawn("claude", args, {
-      cwd: workspace.dir,
+      cwd: workspace.runtimeCwd,
       env: agentEnv({ agent, serverUrl: this.serverUrl, workspace }),
       stdio: ["pipe", "pipe", "pipe"]
     }) as ChildProcessWithoutNullStreams;

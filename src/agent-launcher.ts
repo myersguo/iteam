@@ -134,27 +134,6 @@ export class AgentLauncher {
     this.subscribeDriver(agent, driver, launchId);
     this.drivers.set(agent.id, { driver, launchId });
 
-    if (agent.runtime === "trae") {
-      // In process pool mode, the agent directory is split into subdirectories (-pool-0, -pool-1, etc.)
-      // But traecli registers MCP globally for the user's config (~/.config/trae.vim/...).
-      // We only need to register the MCP server for the base workspace, since all pool workers
-      // share the same MCP server configuration (they all use the same base agent ID for bridging).
-      const workspace = prepareAgentWorkspace({
-        agent,
-        serverUrl: this.serverUrl,
-        launchId,
-        computerId: credentials.computerId,
-        connectToken: credentials.connectToken
-      });
-      await registerTraeMcpServer({ agent, workspace }).catch(error => {
-        this.report(agent.id, "output", {
-          launchId,
-          stream: "stderr",
-          text: `[trae] failed to register MCP chat server: ${(error as Error).message}\n`
-        }).catch(() => {});
-      });
-    }
-
     await this.report(agent.id, "starting", {
       launchId,
       pid: null,
@@ -301,7 +280,7 @@ export class AgentLauncher {
         launchId,
         pid: null,
         command: `${agent.runtime} (deliver-on-demand)`,
-        workspacePath: workspace.dir
+        workspacePath: workspace.runtimeCwd
       });
       return;
     }
@@ -309,7 +288,7 @@ export class AgentLauncher {
     await this.report(agent.id, "starting", { launchId, pid: null, command: printableCommand(spec) });
 
     const child = spawn(spec.command, spec.args, {
-      cwd: workspace.dir,
+      cwd: workspace.runtimeCwd,
       env: agentEnv({ agent, serverUrl: this.serverUrl, workspace }),
       stdio: ["pipe", "pipe", "pipe"]
     }) as ChildProcessWithoutNullStreams;
@@ -327,7 +306,7 @@ export class AgentLauncher {
         launchId,
         pid: child.pid,
         command: printableCommand(spec),
-        workspacePath: workspace.dir
+        workspacePath: workspace.runtimeCwd
       }).catch(() => {});
     });
     child.on("error", (error: Error) => {
@@ -421,24 +400,6 @@ export class AgentLauncher {
       });
       this.subscribeDriver(agent, driver, launchId);
       this.drivers.set(agent.id, { driver, launchId });
-      
-      if (agent.runtime === "trae") {
-        const workspace = prepareAgentWorkspace({
-          agent,
-          serverUrl: this.serverUrl,
-          launchId,
-          computerId: credentials.computerId,
-          connectToken: credentials.connectToken
-        });
-        registerTraeMcpServer({ agent, workspace }).catch(error => {
-          this.report(agent.id, "output", {
-            launchId,
-            stream: "stderr",
-            text: `[trae] failed to register MCP chat server: ${(error as Error).message}\n`
-          }).catch(() => {});
-        });
-      }
-      
       return driver;
     }
     const descriptor = getRuntimeDescriptor(agent.runtime);
@@ -561,7 +522,7 @@ function buildRuntimeSpec({ agent, workspace }: BuildRuntimeSpecArgs): RuntimeSp
       command: "traecli",
       args: [
         "acp", "serve",
-        "--add-dir", workspace.dir,
+        "--add-dir", workspace.workspaceDir,
         "--yolo",
         "--disallowed-tool", "EnterPlanMode",
         "--disallowed-tool", "ExitPlanMode"
@@ -596,7 +557,10 @@ function formatDeliveryPrompt({ agent, message, delivery }: DeliveryPromptArgs):
 
 Reply to the current chat message in the indicated reply target. Use the conversation history for context, including what other agents have already said. Keep the reply concise and directly useful.
 When another agent is mentioned, address them with their @handle, not their internal id. Ask at most one clear follow-up question.
-Your persistent workspace contains MEMORY.md. If this message depends on older context not shown below, use the local CLI: iteam-agent message read/search/check.
+Your shell working directory is the runtime process cwd. It defaults to the shared agent workspace, while iTeam's internal worker state stays in a separate pool directory. Use a runtime tool when you need the exact current path.
+Treat prompt metadata as configuration rather than evidence. If the message asks for a current runtime fact that a tool can observe, use the appropriate tool and answer from its result; never imply that a command ran unless it actually did.
+If this message depends on older context not shown below, use the local CLI: iteam-agent message read/search/check.
+Return the primary reply to this delivery as your normal final response. Do not use iteam_message_send for that primary reply; reserve it for genuinely additional asynchronous updates while a longer task is still running.
 ${taskInstructions}
 
 **Scheduled tasks:**
@@ -653,37 +617,6 @@ function formatActiveDeliveries(deliveries: NonNullable<DeliveryWithContext["act
 
 function printableCommand(spec: RuntimeSpec): string {
   return [spec.command, ...spec.args.map(shellQuote)].join(" ");
-}
-
-interface RegisterTraeMcpArgs {
-  agent: Agent;
-  workspace: AgentWorkspaceLayout;
-}
-
-// Register the chat MCP bridge with the local Trae CLI (traecli) config so that
-// `traecli acp serve` can spawn it on demand. Idempotent: re-registering with the
-// same name overwrites the previous entry.
-// See: https://docs.trae.cn/cli/model-context-protocol
-async function registerTraeMcpServer({ agent, workspace }: RegisterTraeMcpArgs): Promise<void> {
-  const serverName = `iteam-chat-${agent.id}`;
-  const json = JSON.stringify({
-    command: workspace.bridgeCommand,
-    args: workspace.bridgeArgs
-  });
-  return new Promise<void>((resolvePromise, reject) => {
-    const child = spawn("traecli", ["mcp", "add-json", serverName, json], {
-      cwd: workspace.dir,
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    let stderr = "";
-    child.stderr?.on("data", (data: Buffer) => stderr += data.toString());
-    child.on("error", (error: Error) => reject(error));
-    child.on("exit", (code: number | null) => {
-      if (code === 0) resolvePromise();
-      else reject(new Error(stderr.trim() || `traecli mcp add-json exited with code ${code}`));
-    });
-  });
 }
 
 function shellQuote(value: string): string {

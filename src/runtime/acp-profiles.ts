@@ -45,8 +45,7 @@ export function resolveAcpRuntimeProfile(runtime: string): ResolvedAcpRuntimePro
     return {
       name: runtime,
       command: runtime,
-      args: ["acp", "serve"],
-      cwd: "{{workspaceDir}}"
+      args: ["acp", "serve"]
     };
   }
   return null;
@@ -96,7 +95,11 @@ function renderAcpProfileValue(
     switch (key) {
       case "workspaceDir":
       case "workspacePath":
+        return params.workspace.workspaceDir;
+      case "stateDir":
         return params.workspace.dir;
+      case "runtimeCwd":
+        return params.workspace.runtimeCwd;
       case "agentId":
         return params.agent.id;
       case "agentName":

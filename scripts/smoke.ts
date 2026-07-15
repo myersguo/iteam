@@ -1,20 +1,28 @@
 import { spawn } from "node:child_process";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Agent } from "../src/types.js";
+import { deriveAgentAuthToken } from "../src/lib.js";
 import { formatTaskRuntimeProgress } from "../src/agent-launcher.js";
 import { AcpDriver } from "../src/runtime/acp-driver.js";
 import { SqliteStore } from "../src/store/sqlite-store.js";
+import {
+  MYSQL_SPACE_BACKFILL_QUERIES,
+  planMysqlChannelUniqueMigration
+} from "../src/store/mysql-store.js";
+import { MYSQL_TABLES } from "../src/store/mysql-schema.js";
 import { notificationBelongsToThread } from "../src/runtime/codex-driver.js";
 import { detectRuntimes } from "../src/runtimes.js";
 import { deliveryAffinityIndex } from "../src/runtime/driver.js";
 import { renderAcpProfileArgs, resolveAcpRuntimeProfile } from "../src/runtime/acp-profiles.js";
 import { renderProfileArgs, resolveRuntimeProfile } from "../src/runtime/profiles.js";
 import { parseIteamCommand, stripLarkBotMention } from "../src/integrations/lark.js";
+import { legacyIteamMcpServerNames } from "../src/legacy-traex-mcp.js";
+import { agentEnv, prepareAgentWorkspace, shellSingleQuote } from "../src/workspace.js";
 
 const execFileAsync = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -23,9 +31,12 @@ const home = mkdtempSync(join(tmpdir(), "iteam-smoke-"));
 const runtimeProfilesFile = join(home, "runtime-profiles.json");
 const acpProfilesFile = join(home, "acp-runtimes.json");
 const fakeAcpScript = resolve(root, "scripts/fake-acp-runtime.mjs");
+const profileCwd = join(home, "profile-cwd");
 const binDir = join(home, "bin");
 const genericAcpBin = join(binDir, "generic_acp");
+delete process.env.ITEAM_RUNTIME_CWD;
 mkdirSync(binDir, { recursive: true });
+mkdirSync(profileCwd, { recursive: true });
 writeFileSync(genericAcpBin, `#!/usr/bin/env sh
 exec "${process.execPath}" "${fakeAcpScript}" "$@"
 `);
@@ -35,6 +46,14 @@ writeFileSync(runtimeProfilesFile, JSON.stringify({
   custom: {
     command: "echo",
     args: ["{{sessionKey}}", "{{safeSessionKey}}", "{{agentName}}", "{{prompt}}"]
+  },
+  custom_cwd: {
+    command: process.execPath,
+    args: [
+      "-e",
+      "console.log(JSON.stringify({cwd:process.cwd(),pwd:process.env.PWD,runtimeCwd:process.env.ITEAM_RUNTIME_CWD}))"
+    ],
+    cwd: profileCwd
   }
 }, null, 2));
 writeFileSync(acpProfilesFile, JSON.stringify({
@@ -46,6 +65,13 @@ writeFileSync(acpProfilesFile, JSON.stringify({
   fake_acp: {
     command: process.execPath,
     args: [fakeAcpScript],
+    poolSize: 1
+  },
+  fake_acp_cwd: {
+    command: process.execPath,
+    args: [fakeAcpScript, "--runtime-cwd-probe", "{{runtimeCwd}}"],
+    cwd: profileCwd,
+    env: { PROFILE_RUNTIME_CWD: "{{runtimeCwd}}" },
     poolSize: 1
   },
   fake_acp_parallel: {
@@ -227,8 +253,10 @@ try {
   const renderedAcpArgs = renderAcpProfileArgs(acpProfile, {
     agent: { id: "agent_test", spaceId: "space_default", name: "ACP Agent", handle: "acp", description: "", runtime: "hermes_test", model: "test-model", computerId: "computer_test", status: "online", desiredStatus: "running", launchId: null, pid: null, workspacePath: "", createdAt: "", updatedAt: "" },
     workspace: {
-      dir: "/workspace/acp",
-      internal: "/workspace/acp/.iteam",
+      workspaceDir: "/workspace/acp",
+      dir: "/workspace/acp-pool-0",
+      runtimeCwd: "/runtime/cwd",
+      internal: "/workspace/acp-pool-0/.iteam",
       memoryPath: "",
       systemPromptPath: "",
       claudeMcpConfigPath: "",
@@ -236,6 +264,7 @@ try {
       bridgePath: "",
       bridgeArgs: [],
       bridgeCommand: "node",
+      runtimeAuthEnv: {},
       wrapperPath: "",
       promptPath: ""
     },
@@ -243,6 +272,184 @@ try {
   });
   if (renderedAcpArgs.join(" ") !== "acp --workspace /workspace/acp -m test-model") {
     throw new Error("ACP runtime profile templates did not render workspace/model values");
+  }
+  const workspaceAgent: Agent = {
+    id: "agent_workspace",
+    spaceId: "space_workspace",
+    name: "Workspace Agent",
+    handle: "workspace-agent",
+    description: "",
+    runtime: "fake_acp",
+    model: null,
+    computerId: "computer_test",
+    status: "online",
+    desiredStatus: "running",
+    launchId: null,
+    pid: null,
+    workspacePath: join(home, "workspace-agent-state"),
+    createdAt: "",
+    updatedAt: ""
+  };
+  const preparedWorkspace = prepareAgentWorkspace({
+    agent: workspaceAgent,
+    serverUrl: "http://127.0.0.1:4318",
+    launchId: "launch_workspace",
+    stateSuffix: "-pool-0",
+    computerId: "computer_workspace",
+    connectToken: "connect_workspace"
+  });
+  if (
+    preparedWorkspace.workspaceDir !== workspaceAgent.workspacePath ||
+    preparedWorkspace.runtimeCwd !== workspaceAgent.workspacePath ||
+    preparedWorkspace.dir !== `${workspaceAgent.workspacePath}-pool-0` ||
+    preparedWorkspace.memoryPath !== join(workspaceAgent.workspacePath, "MEMORY.md") ||
+    !preparedWorkspace.bridgeArgs.includes("--space-id") ||
+    !preparedWorkspace.bridgeArgs.includes("space_workspace")
+  ) {
+    throw new Error("agent workspace did not separate shared workspace, worker state, or space id");
+  }
+  const workspacePrompt = readFileSync(preparedWorkspace.systemPromptPath, "utf8");
+  if (
+    !workspacePrompt.includes(`Working directory: ${workspaceAgent.workspacePath}`) ||
+    !workspacePrompt.includes(`iTeam state directory: ${workspaceAgent.workspacePath}-pool-0`) ||
+    !workspacePrompt.includes("When a question asks about a current value that a shell or runtime tool can observe")
+  ) {
+    throw new Error("agent system prompt did not distinguish runtime cwd or require observable fact verification");
+  }
+  const overriddenWorkspace = prepareAgentWorkspace({
+    agent: { ...workspaceAgent, env: { ITEAM_RUNTIME_CWD: home } },
+    serverUrl: "http://127.0.0.1:4318",
+    launchId: "launch_workspace_override",
+    stateSuffix: "-pool-1"
+  });
+  if (overriddenWorkspace.runtimeCwd !== workspaceAgent.workspacePath) {
+    throw new Error("server-provided agent env unexpectedly overrode the base workspace");
+  }
+  const preparedEnv = agentEnv({
+    agent: workspaceAgent,
+    serverUrl: "http://127.0.0.1:4318",
+    workspace: preparedWorkspace
+  });
+  if (
+    preparedEnv.PWD !== workspaceAgent.workspacePath ||
+    preparedEnv.ITEAM_AGENT_STATE_DIR !== `${workspaceAgent.workspacePath}-pool-0`
+  ) {
+    throw new Error("agent environment did not preserve logical workspace PWD and isolated worker state");
+  }
+  const expectedModes = [
+    [preparedWorkspace.dir, 0o700],
+    [preparedWorkspace.internal, 0o700],
+    [preparedWorkspace.memoryPath, 0o600],
+    [preparedWorkspace.systemPromptPath, 0o600],
+    [preparedWorkspace.claudeMcpConfigPath, 0o600],
+    [preparedWorkspace.traeMcpConfigPath, 0o600],
+    [preparedWorkspace.wrapperPath, 0o700]
+  ] as const;
+  for (const [path, expectedMode] of expectedModes) {
+    if ((statSync(path).mode & 0o777) !== expectedMode) {
+      throw new Error(`sensitive workspace path has incorrect mode: ${path}`);
+    }
+  }
+  const quoteProbe = `spaces and 'quotes'; echo unsafe`;
+  const quoteResult = await execFileText("/bin/sh", [
+    "-c",
+    `value=${shellSingleQuote(quoteProbe)}; printf '%s' "$value"`
+  ], {});
+  if (quoteResult !== quoteProbe) {
+    throw new Error("workspace shell escaping did not preserve a hostile-looking literal");
+  }
+  const workspaceWrapper = readFileSync(preparedWorkspace.wrapperPath, "utf8");
+  const credentialFiles = [
+    workspaceWrapper,
+    readFileSync(preparedWorkspace.claudeMcpConfigPath, "utf8"),
+    readFileSync(preparedWorkspace.traeMcpConfigPath, "utf8")
+  ];
+  if (credentialFiles.some(content => content.includes("connect_workspace"))) {
+    throw new Error("permanent computer credential was persisted in agent files");
+  }
+  if (
+    preparedWorkspace.runtimeAuthEnv.ITEAM_COMPUTER_ID !== "computer_workspace" ||
+    preparedWorkspace.runtimeAuthEnv.ITEAM_AGENT_AUTH_TOKEN !==
+      deriveAgentAuthToken("connect_workspace", workspaceAgent.id) ||
+    "ITEAM_CONNECT_TOKEN" in preparedWorkspace.runtimeAuthEnv
+  ) {
+    throw new Error("runtime authentication was not retained in memory");
+  }
+  let invalidRuntimeCwdRejected = false;
+  const previousRuntimeCwd = process.env.ITEAM_RUNTIME_CWD;
+  try {
+    process.env.ITEAM_RUNTIME_CWD = join(home, "missing-runtime-cwd");
+    prepareAgentWorkspace({
+      agent: workspaceAgent,
+      serverUrl: "http://127.0.0.1:4318",
+      launchId: "launch_workspace_invalid"
+    });
+  } catch (error) {
+    invalidRuntimeCwdRejected = String((error as Error).message).includes("must be an existing directory");
+  } finally {
+    if (previousRuntimeCwd === undefined) delete process.env.ITEAM_RUNTIME_CWD;
+    else process.env.ITEAM_RUNTIME_CWD = previousRuntimeCwd;
+  }
+  if (!invalidRuntimeCwdRejected) {
+    throw new Error("invalid ITEAM_RUNTIME_CWD did not fail fast");
+  }
+  const remoteWorkspace = join(home, "remote-readonly-workspace");
+  mkdirSync(join(remoteWorkspace, ".iteam"), { recursive: true });
+  mkdirSync(join(remoteWorkspace, "MEMORY.md"));
+  const fallbackAgent = {
+    ...workspaceAgent,
+    id: "agent_workspace_fallback",
+    workspacePath: remoteWorkspace
+  };
+  const localFallbackWorkspace = join(home, "fallback-home", "agents", fallbackAgent.id);
+  const previousHome = process.env.ITEAM_HOME;
+  process.env.ITEAM_HOME = join(home, "fallback-home");
+  let fallbackWorkspace;
+  try {
+    fallbackWorkspace = prepareAgentWorkspace({
+      agent: fallbackAgent,
+      serverUrl: "http://127.0.0.1:4318",
+      launchId: "launch_workspace_fallback",
+      stateSuffix: "-pool-0"
+    });
+  } finally {
+    if (previousHome === undefined) delete process.env.ITEAM_HOME;
+    else process.env.ITEAM_HOME = previousHome;
+  }
+  if (
+    fallbackWorkspace.workspaceDir !== localFallbackWorkspace ||
+    fallbackWorkspace.runtimeCwd !== localFallbackWorkspace
+  ) {
+    throw new Error("unwritable remote workspace did not fall back to the local agent workspace");
+  }
+  const legacyMcpNames = legacyIteamMcpServerNames([
+    {
+      name: "iteam-chat-agent_workspace",
+      transport: {
+        type: "stdio",
+        command: process.execPath,
+        args: ["/tmp/chat-bridge.mjs", "--agent-id", "agent_workspace"]
+      }
+    },
+    {
+      name: "iteam-chat-agent_unrelated",
+      transport: {
+        type: "stdio",
+        command: process.execPath,
+        args: ["/tmp/not-chat.mjs"]
+      }
+    },
+    {
+      name: "filesystem",
+      transport: {
+        type: "stdio",
+        command: process.execPath,
+        args: ["/tmp/chat-bridge.mjs"]
+      }
+    }
+  ]);
+  if (legacyMcpNames.join(",") !== "iteam-chat-agent_workspace") {
+    throw new Error("legacy Traex MCP cleanup filter matched the wrong servers");
   }
   const detectedRuntimeMap = new Map(detectRuntimes().map(runtime => [runtime.id, runtime]));
   if (!detectedRuntimeMap.get("custom")?.installed) {
@@ -257,9 +464,44 @@ try {
   }
   await verifyAcpDriverWithFakeRuntime(home, "fake_acp");
   await verifyAcpDriverWithFakeRuntime(home, "generic_acp");
+  await verifyAcpDriverWithFakeRuntime(home, "fake_acp_cwd", profileCwd);
+  await verifyOneShotProfileCwd(home, profileCwd);
   await verifyAcpDriverParallelism(home);
   await verifyAcpQueuedPromotion(home);
   verifySqliteSpacePersistence(home);
+  const mysqlSpaceBackfillSql = MYSQL_SPACE_BACKFILL_QUERIES.join("\n");
+  for (const table of ["iteam_channels", "iteam_deliveries", "iteam_messages", "iteam_tasks", "iteam_scheduled_tasks"]) {
+    if (!mysqlSpaceBackfillSql.includes(`UPDATE ${table}`)) {
+      throw new Error(`MySQL space migration is missing ${table}`);
+    }
+  }
+  const mysqlSchemaSql = MYSQL_TABLES.map(table => table.ddl).join("\n");
+  const mysqlStoreSource = readFileSync(resolve(root, "src/store/mysql-store.ts"), "utf8");
+  if (
+    !mysqlSchemaSql.includes("CREATE TABLE IF NOT EXISTS iteam_spaces") ||
+    !mysqlStoreSource.includes("FROM iteam_spaces") ||
+    !mysqlStoreSource.includes("INSERT INTO iteam_spaces") ||
+    !mysqlStoreSource.includes("UNION ALL SELECT space_id FROM iteam_channels")
+  ) {
+    throw new Error("MySQL spaces load/write symmetry is incomplete");
+  }
+  const legacyChannelPlan = planMysqlChannelUniqueMigration([
+    { INDEX_NAME: "PRIMARY", COLUMN_NAME: "id", SEQ_IN_INDEX: 1, NON_UNIQUE: 0 },
+    { INDEX_NAME: "uniq_target", COLUMN_NAME: "target", SEQ_IN_INDEX: 1, NON_UNIQUE: 0 }
+  ]);
+  if (
+    legacyChannelPlan.hasSpaceTarget ||
+    legacyChannelPlan.legacyIndexNames.join(",") !== "uniq_target"
+  ) {
+    throw new Error("MySQL legacy channel unique index migration was not planned correctly");
+  }
+  const currentChannelPlan = planMysqlChannelUniqueMigration([
+    { INDEX_NAME: "uniq_space_target", COLUMN_NAME: "target", SEQ_IN_INDEX: 2, NON_UNIQUE: 0 },
+    { INDEX_NAME: "uniq_space_target", COLUMN_NAME: "space_id", SEQ_IN_INDEX: 1, NON_UNIQUE: 0 }
+  ]);
+  if (!currentChannelPlan.hasSpaceTarget || currentChannelPlan.legacyIndexNames.length) {
+    throw new Error("MySQL current channel unique index was not recognized");
+  }
   const subagentStarted = formatTaskRuntimeProgress({
     type: "tool_call",
     agentId: "agent_test",
@@ -314,6 +556,36 @@ try {
   if (computers.length !== 0) throw new Error("state should not contain seeded computers");
   const invite = await post(port, "/api/computers/connect-command", { serverUrl: `http://127.0.0.1:${port}` });
   if (!invite.command.includes("daemon connect")) throw new Error("connect command was not generated");
+  const cliDaemon = spawn(tsxBin, [
+    resolve(root, "bin/iteam.ts"),
+    "daemon",
+    "connect",
+    "--server-url",
+    `http://127.0.0.1:${port}`,
+    "--connect-token",
+    "invalid-cli-forwarding-token",
+    "--space-id",
+    "space_default",
+    "--runtime-cwd",
+    home
+  ], {
+    env: { ...process.env, ITEAM_ACP_RUNTIMES: join(home, "missing-acp-runtimes.json") },
+    cwd: root,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  const daemonStartup = await waitForChildOutput(
+    cliDaemon,
+    output => output.includes(`agent runtime working directory ${home}; expected space space_default`),
+    4_000
+  );
+  if (!daemonStartup.includes(`agent runtime working directory ${home}; expected space space_default`)) {
+    throw new Error("iteam CLI did not forward --runtime-cwd and --space-id to agent-daemon");
+  }
+  await waitForChildExit(cliDaemon, 4_000);
+  if (cliDaemon.exitCode === null) {
+    cliDaemon.kill("SIGKILL");
+    throw new Error("agent-daemon CLI forwarding check did not exit after invalid token rejection");
+  }
   const firstConnect = await post(port, "/api/computers/connect", {
     token: invite.token,
     name: "smoke-computer",
@@ -337,6 +609,16 @@ try {
   });
   if (reAuth.connectToken !== connectToken) throw new Error("re-auth must return the same persistent token");
   if (reAuth.id !== computerId) throw new Error("re-auth must return the same computer id");
+  const secondInvite = await post(port, "/api/computers/connect-command", {
+    serverUrl: `http://127.0.0.1:${port}`
+  });
+  const secondComputer = await post(port, "/api/computers/connect", {
+    token: secondInvite.token,
+    name: "smoke-computer-two",
+    fingerprint: { id: "SMOKE67890", hostname: "smoke-computer-two", os: "linux", arch: "x64" },
+    daemonVersion: "0.1.0",
+    runtimes: smokeRuntimes
+  });
   const wrongTokenStatus = await postStatus(port, "/api/computers/connect", {
     token: "bogus",
     fingerprint: { id: "SMOKE12345", hostname: "smoke-computer", os: "darwin", arch: "arm64" }
@@ -376,6 +658,11 @@ try {
     computerId: computerId
   });
   if (defaultRuntimeAgent.runtime !== "fake_acp") throw new Error(`default runtime should prefer ACP, got ${defaultRuntimeAgent.runtime}`);
+  const siblingAgent = await post(port, "/api/agents", {
+    name: "sibling-agent",
+    runtime: "codex",
+    computerId: computerId
+  });
   const dm = await post(port, `/api/direct-messages/agents/${encodeURIComponent(agent.id)}`, {});
   if (dm.kind !== "dm" || dm.target !== `dm:${agent.id}` || !dm.memberIds.includes(agent.id)) {
     throw new Error("agent DM channel was not created");
@@ -412,6 +699,17 @@ try {
     status: "online"
   }, { "x-iteam-connection": `${computerId}:${connectToken}` });
   const computerAuth = { "x-iteam-connection": `${computerId}:${connectToken}` };
+  const agentAuth = {
+    "x-iteam-agent-connection": `${computerId}:${agent.id}:${deriveAgentAuthToken(connectToken, agent.id)}`
+  };
+  const siblingImpersonation = await postStatus(port, "/api/messages", {
+    target: "#all",
+    text: "sibling impersonation",
+    authorId: siblingAgent.id
+  }, agentAuth);
+  if (siblingImpersonation !== 403) {
+    throw new Error(`sibling agent impersonation should be 403, got ${siblingImpersonation}`);
+  }
   const dmDelivery = heartbeat.deliveries.find((delivery: any) => delivery.messageId === dmMessage.id);
   if (!dmDelivery) throw new Error("DM delivery was not claimed by the computer heartbeat");
   await post(port, `/api/deliveries/${encodeURIComponent(dmDelivery.id)}/runtime-state`, {
@@ -545,6 +843,14 @@ try {
     const noAuthSse = await fetch(`http://127.0.0.1:${port}/api/computers/${encodeURIComponent(computerId)}/stream`);
     if (noAuthSse.status !== 401) throw new Error(`SSE without auth should be 401, got ${noAuthSse.status}`);
     await noAuthSse.body?.cancel();
+    const crossComputerSse = await fetch(
+      `http://127.0.0.1:${port}/api/computers/${encodeURIComponent(secondComputer.id)}/stream`,
+      { headers: { "x-iteam-connection": `${computerId}:${connectToken}` } }
+    );
+    if (crossComputerSse.status !== 403) {
+      throw new Error(`SSE credentials for another computer should be 403, got ${crossComputerSse.status}`);
+    }
+    await crossComputerSse.body?.cancel();
     const larkExplicitSend = post(port, "/api/external/routed-messages", {
       provider: "lark",
       tenantKey: "tenant-smoke",
@@ -638,7 +944,7 @@ try {
       target: larkTaskMessage.task.threadTarget,
       text: "intermediate task update",
       authorId: agent.id
-    });
+    }, agentAuth);
     const larkTaskLinks = await get(port, "/api/external/message-links");
     if (!larkTaskLinks.some((link: any) => link.direction === "out" && link.messageId === larkTaskThreadReply.id && link.rootMessageId === larkTaskMessage.message.id)) {
       throw new Error("agent task thread update was not linked back to the Lark root");
@@ -730,7 +1036,7 @@ try {
       target: dm.target,
       authorId: agent.id,
       text: '直接发送也应创建。<iteam_schedule>{"create":true,"intervalMs":120000,"prompt":"direct agent schedule"}</iteam_schedule>'
-    });
+    }, agentAuth);
     if (String(directAgentSchedule.text || "").includes("iteam_schedule")) {
       throw new Error("direct agent message should strip schedule directive");
     }
@@ -745,7 +1051,7 @@ try {
       target: dm.target,
       authorId: agent.id,
       text: '工作日定时。<iteam_schedule>{"create":true,"cronExpression":"0 9-19 * * 1-5","timezone":"Asia/Shanghai","prompt":"weekday cron report"}</iteam_schedule>'
-    });
+    }, agentAuth);
     const cronSchedules = await get(port, "/api/scheduled-tasks");
     const cronSchedule = cronSchedules.find((item: any) =>
       item.agentId === agent.id &&
@@ -989,7 +1295,12 @@ try {
     throw new Error("late delivery result should not overwrite cancelled status");
   }
 
-  await verifySpaceIsolation(port);
+  await verifySpaceIsolation(port, {
+    computerId,
+    connectToken,
+    agentId: agent.id,
+    agentAuthToken: deriveAgentAuthToken(connectToken, agent.id)
+  });
 
   console.log("smoke ok");
 } finally {
@@ -1008,7 +1319,40 @@ async function waitForHealth(port: number): Promise<void> {
   throw new Error("server did not start");
 }
 
-async function verifySpaceIsolation(port: number): Promise<void> {
+async function waitForChildOutput(
+  child: ReturnType<typeof spawn>,
+  predicate: (output: string) => boolean,
+  timeoutMs: number
+): Promise<string> {
+  let output = "";
+  const append = (chunk: Buffer | string) => {
+    output += chunk.toString();
+  };
+  child.stdout?.on("data", append);
+  child.stderr?.on("data", append);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate(output)) return output;
+    if (child.exitCode !== null) {
+      throw new Error(`child exited before expected output (${child.exitCode}): ${output}`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  throw new Error(`timed out waiting for child output: ${output}`);
+}
+
+async function waitForChildExit(child: ReturnType<typeof spawn>, timeoutMs: number): Promise<void> {
+  if (child.exitCode !== null) return;
+  await Promise.race([
+    new Promise<void>(resolvePromise => child.once("exit", () => resolvePromise())),
+    new Promise<void>(resolvePromise => setTimeout(resolvePromise, timeoutMs))
+  ]);
+}
+
+async function verifySpaceIsolation(
+  port: number,
+  auth: { computerId: string; connectToken: string; agentId: string; agentAuthToken: string }
+): Promise<void> {
   const before = await get(port, "/api/spaces");
   if (!Array.isArray(before) || !before.some((space: any) => space.id === "space_default")) {
     throw new Error("default space is missing from GET /api/spaces");
@@ -1060,6 +1404,101 @@ async function verifySpaceIsolation(port: number): Promise<void> {
 
   const badChannel = await postStatus(port, "/api/channels", { name: "junk", spaceId: "space_missing" });
   if (badChannel < 400) throw new Error("unknown spaceId must reject with 4xx");
+
+  const computerAuth = { "x-iteam-connection": `${auth.computerId}:${auth.connectToken}` };
+  const crossSpaceRead = await fetch(`http://127.0.0.1:${port}/api/channels`, {
+    headers: { ...computerAuth, "x-iteam-space": alpha.id }
+  });
+  if (crossSpaceRead.status !== 403) {
+    throw new Error(`authenticated computer cross-space read should be 403, got ${crossSpaceRead.status}`);
+  }
+  const crossSpaceChannelCreate = await postStatus(port, "/api/channels", {
+    name: "forbidden-cross-space-channel",
+    spaceId: alpha.id
+  }, computerAuth);
+  if (crossSpaceChannelCreate !== 403) {
+    throw new Error(`cross-space channel create should be 403, got ${crossSpaceChannelCreate}`);
+  }
+  const crossSpaceDelete = await deleteStatus(
+    port,
+    `/api/spaces/${encodeURIComponent(alpha.id)}`,
+    computerAuth
+  );
+  if (crossSpaceDelete !== 403) {
+    throw new Error(`cross-space space delete should be 403, got ${crossSpaceDelete}`);
+  }
+  const unauthenticatedAgentPost = await postStatus(port, "/api/messages", {
+    target: "#all",
+    text: "spoofed agent post",
+    authorId: auth.agentId
+  });
+  if (unauthenticatedAgentPost !== 401) {
+    throw new Error(`agent-authored message without computer auth should be 401, got ${unauthenticatedAgentPost}`);
+  }
+  const crossSpaceAgentPost = await postStatus(port, "/api/messages", {
+    spaceId: alpha.id,
+    target: alphaChannel.target,
+    text: "cross-space agent post",
+    authorId: auth.agentId
+  }, {
+    "x-iteam-agent-connection": `${auth.computerId}:${auth.agentId}:${auth.agentAuthToken}`
+  });
+  if (crossSpaceAgentPost !== 403) {
+    throw new Error(`authenticated agent cross-space post should be 403, got ${crossSpaceAgentPost}`);
+  }
+  const alphaInvite = await post(port, "/api/computers/connect-command", {
+    spaceId: alpha.id,
+    serverUrl: `http://127.0.0.1:${port}`
+  });
+  const alphaComputer = await post(port, "/api/computers/connect", {
+    token: alphaInvite.token,
+    name: "alpha-computer",
+    fingerprint: { id: "ALPHA12345", hostname: "alpha-computer", os: "linux", arch: "x64" },
+    daemonVersion: "0.1.0",
+    runtimes: smokeRuntimes
+  });
+  const alphaAgent = await post(port, "/api/agents", {
+    spaceId: alpha.id,
+    name: "alpha-agent",
+    runtime: "codex",
+    computerId: alphaComputer.id
+  });
+  const alphaMention = await post(port, "/api/messages", {
+    spaceId: alpha.id,
+    target: alphaChannel.target,
+    text: `@${alphaAgent.handle} alpha delivery`,
+    authorId: "human-local"
+  });
+  const alphaDelivery = (await getWithSpace(port, "/api/deliveries", alpha.id))
+    .find((delivery: any) => delivery.messageId === alphaMention.id);
+  if (!alphaDelivery) throw new Error("alpha mention did not create a delivery");
+  const crossSpaceChannelPatch = await patchStatus(
+    port,
+    `/api/channels/${encodeURIComponent(alphaChannel.id)}`,
+    { description: "forbidden" },
+    computerAuth
+  );
+  if (crossSpaceChannelPatch !== 403) {
+    throw new Error(`cross-space channel patch should be 403, got ${crossSpaceChannelPatch}`);
+  }
+  const crossSpaceAgentStop = await postStatus(
+    port,
+    `/api/agents/${encodeURIComponent(alphaAgent.id)}/stop`,
+    {},
+    computerAuth
+  );
+  if (crossSpaceAgentStop !== 403) {
+    throw new Error(`cross-space agent stop should be 403, got ${crossSpaceAgentStop}`);
+  }
+  const crossSpaceDeliveryCancel = await postStatus(
+    port,
+    `/api/deliveries/${encodeURIComponent(alphaDelivery.id)}/cancel`,
+    { reason: "forbidden" },
+    computerAuth
+  );
+  if (crossSpaceDeliveryCancel !== 403) {
+    throw new Error(`cross-space delivery cancel should be 403, got ${crossSpaceDeliveryCancel}`);
+  }
 }
 
 async function getWithSpace(port: number, path: string, spaceId: string): Promise<any> {
@@ -1070,7 +1509,11 @@ async function getWithSpace(port: number, path: string, spaceId: string): Promis
   return res.json();
 }
 
-async function verifyAcpDriverWithFakeRuntime(home: string, runtime = "fake_acp"): Promise<void> {
+async function verifyAcpDriverWithFakeRuntime(
+  home: string,
+  runtime = "fake_acp",
+  expectedCwd?: string
+): Promise<void> {
   const agent: Agent = {
     id: `agent_${runtime}`,
     spaceId: "space_default",
@@ -1115,6 +1558,17 @@ async function verifyAcpDriverWithFakeRuntime(home: string, runtime = "fake_acp"
   if (!firstSession || firstSession !== secondSession) {
     throw new Error("AcpDriver did not reuse the same ACP session for the same sessionKey");
   }
+  if (first.text.includes("preamble:")) {
+    throw new Error("AcpDriver final response included process commentary emitted before a tool call");
+  }
+  const resolvedExpectedCwd = expectedCwd || agent.workspacePath;
+  const expectedProfileRuntimeCwd = expectedCwd ? resolvedExpectedCwd : "";
+  const expectedProfileArgCwd = expectedCwd ? resolvedExpectedCwd : "";
+  if (!first.text.includes(
+    `:${resolvedExpectedCwd}:${resolvedExpectedCwd}:${resolvedExpectedCwd}:${expectedProfileRuntimeCwd}:${expectedProfileArgCwd}:first`
+  )) {
+    throw new Error(`AcpDriver cwd/env did not match the effective runtime cwd: ${first.text}`);
+  }
   if (!firstRunning || !secondRunning || firstRunning.processSlot !== secondRunning.processSlot) {
     throw new Error("AcpDriver did not preserve process affinity for the same sessionKey");
   }
@@ -1158,6 +1612,43 @@ async function verifyAcpDriverWithFakeRuntime(home: string, runtime = "fake_acp"
     throw new Error(`AcpDriver active cancellation should reject cancelled delivery, got ${cancelResult}`);
   }
   await driver.stop(agent);
+}
+
+async function verifyOneShotProfileCwd(home: string, expectedCwd: string): Promise<void> {
+  const agent: Agent = {
+    id: "agent_custom_cwd",
+    spaceId: "space_default",
+    name: "Custom cwd",
+    handle: "custom-cwd",
+    description: "",
+    runtime: "custom_cwd",
+    model: null,
+    computerId: "computer_test",
+    status: "online",
+    desiredStatus: "running",
+    launchId: null,
+    pid: null,
+    workspacePath: join(home, "custom-cwd-agent"),
+    createdAt: "",
+    updatedAt: ""
+  };
+  const driver = new (await import("../src/runtime/oneshot-driver.js")).OneshotDriver("custom_cwd", {
+    serverUrl: "http://127.0.0.1:0",
+    launchId: "launch_custom_cwd"
+  });
+  const result = await driver.deliver(
+    agent,
+    fakeDelivery("delivery_custom_cwd", "custom-cwd", "#custom-cwd", agent),
+    "check cwd"
+  );
+  const observed = JSON.parse(result.text) as { cwd: string; pwd: string; runtimeCwd: string };
+  if (
+    observed.cwd !== expectedCwd ||
+    observed.pwd !== expectedCwd ||
+    observed.runtimeCwd !== expectedCwd
+  ) {
+    throw new Error(`one-shot profile cwd/env mismatch: ${result.text}`);
+  }
 }
 
 async function verifyAcpDriverParallelism(home: string): Promise<void> {
@@ -1356,6 +1847,13 @@ function verifySqliteSpacePersistence(home: string): void {
   const computerId = "computer_persisted";
   const inviteId = "computer_invite_persisted";
   const agentId = "agent_persisted";
+  const channelId = "channel_persisted";
+  const messageId = "msg_persisted";
+  const channelMessageId = "msg_persisted_channel";
+  const legacyAgentMessageId = "msg_persisted_legacy_agent";
+  const deliveryId = "delivery_persisted";
+  const taskId = "task_persisted";
+  const scheduleId = "schedule_persisted";
   const now = new Date().toISOString();
   const first = new SqliteStore(sqliteHome, sqliteFile);
   first.mutate(state => {
@@ -1409,6 +1907,98 @@ function verifySqliteSpacePersistence(home: string): void {
       createdAt: now,
       updatedAt: now
     });
+    state.channels.push({
+      id: channelId,
+      spaceId: "space_default",
+      name: "persisted",
+      target: "#persisted",
+      kind: "channel",
+      description: "",
+      memberIds: ["human-local", agentId],
+      defaultAgentId: agentId,
+      createdAt: now
+    });
+    state.messages.push({
+      id: messageId,
+      spaceId: "space_default",
+      target: "#persisted",
+      authorId: "human-local",
+      type: "human",
+      text: "persisted message",
+      mentions: [],
+      createdAt: now,
+      threadId: null
+    });
+    state.messages.push({
+      id: channelMessageId,
+      spaceId: "space_default",
+      target: "#persisted",
+      authorId: "human-local",
+      type: "human",
+      text: "legacy human channel message",
+      mentions: [],
+      createdAt: now,
+      threadId: null
+    });
+    state.messages.push({
+      id: legacyAgentMessageId,
+      spaceId: "space_default",
+      target: "#persisted",
+      authorId: agentId,
+      type: "human",
+      text: "legacy agent message",
+      mentions: [],
+      createdAt: now,
+      threadId: null
+    });
+    state.deliveries.push({
+      id: deliveryId,
+      spaceId: "space_default",
+      messageId,
+      rootMessageId: messageId,
+      parentDeliveryId: null,
+      depth: 0,
+      agentId,
+      computerId,
+      target: "#persisted",
+      sessionKey: "persisted-session",
+      source: "message",
+      status: "done",
+      attempts: 0,
+      createdAt: now,
+      updatedAt: now,
+      lifecycle: []
+    });
+    state.tasks.push({
+      id: taskId,
+      spaceId: "space_default",
+      number: 1,
+      target: "#persisted",
+      title: "Persisted task",
+      description: "",
+      status: "done",
+      assigneeId: agentId,
+      createdBy: "human-local",
+      messageId,
+      threadTarget: `#persisted:${messageId}`,
+      createdAt: now,
+      updatedAt: now
+    });
+    state.scheduledTasks.push({
+      id: scheduleId,
+      spaceId: "space_default",
+      target: "#persisted",
+      agentId,
+      prompt: "persisted prompt",
+      sessionKey: "persisted-schedule",
+      intervalMs: 60_000,
+      status: "active",
+      nextRunAt: now,
+      runCount: 0,
+      createdBy: "human-local",
+      createdAt: now,
+      updatedAt: now
+    });
   });
   first.close();
 
@@ -1423,7 +2013,66 @@ function verifySqliteSpacePersistence(home: string): void {
   if (state.pendingComputerConnections.find(item => item.id === inviteId)?.spaceId !== spaceId) {
     throw new Error("SQLite invite spaceId was lost after reopen");
   }
+  if (state.channels.find(item => item.id === channelId)?.spaceId !== spaceId) {
+    throw new Error("SQLite channel spaceId was not backfilled from its agent membership");
+  }
+  if (state.messages.find(item => item.id === messageId)?.spaceId !== spaceId) {
+    throw new Error("SQLite message spaceId was lost after reopen");
+  }
+  if (state.messages.find(item => item.id === channelMessageId)?.spaceId !== spaceId) {
+    throw new Error("SQLite human message spaceId was not backfilled from its unique channel");
+  }
+  const legacyAgentMessage = state.messages.find(item => item.id === legacyAgentMessageId);
+  if (legacyAgentMessage?.spaceId !== spaceId || legacyAgentMessage.type !== "agent") {
+    throw new Error("SQLite legacy agent-authored message was not reclassified during space migration");
+  }
+  if (state.deliveries.find(item => item.id === deliveryId)?.spaceId !== spaceId) {
+    throw new Error("SQLite delivery spaceId was lost after reopen");
+  }
+  if (state.tasks.find(item => item.id === taskId)?.spaceId !== spaceId) {
+    throw new Error("SQLite task spaceId was lost after reopen");
+  }
+  if (state.scheduledTasks.find(item => item.id === scheduleId)?.spaceId !== spaceId) {
+    throw new Error("SQLite scheduled task spaceId was lost after reopen");
+  }
   reopened.close();
+
+  const stable = new SqliteStore(sqliteHome, sqliteFile);
+  stable.mutate(current => {
+    current.channels.push({
+      id: "channel_default_mixed",
+      spaceId: "space_default",
+      name: "default-mixed",
+      target: "#default-mixed",
+      kind: "channel",
+      description: "",
+      memberIds: ["human-local", agentId],
+      defaultAgentId: null,
+      createdAt: now
+    });
+    current.messages.push({
+      id: "msg_default_mixed",
+      spaceId: "space_default",
+      target: "#default-mixed",
+      authorId: "human-local",
+      type: "human",
+      text: "legitimate default-space message",
+      mentions: [],
+      createdAt: now,
+      threadId: null
+    });
+  });
+  stable.close();
+
+  const stableReopened = new SqliteStore(sqliteHome, sqliteFile);
+  const stableState = stableReopened.snapshot();
+  if (
+    stableState.channels.find(item => item.id === "channel_default_mixed")?.spaceId !== "space_default" ||
+    stableState.messages.find(item => item.id === "msg_default_mixed")?.spaceId !== "space_default"
+  ) {
+    throw new Error("versioned SQLite space migration rewrote valid default-space data");
+  }
+  stableReopened.close();
 }
 
 function fakeDelivery(id: string, sessionKey: string | null, target: string, agent: any): any {
@@ -1511,10 +2160,38 @@ async function patch(port: number, path: string, body: unknown): Promise<any> {
   return response.json();
 }
 
+async function patchStatus(
+  port: number,
+  path: string,
+  body: unknown,
+  headers: Record<string, string> = {}
+): Promise<number> {
+  const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify(body)
+  });
+  await response.text();
+  return response.status;
+}
+
 async function del(port: number, path: string): Promise<any> {
   const response = await fetch(`http://127.0.0.1:${port}${path}`, { method: "DELETE" });
   if (!response.ok) throw new Error(`${response.status} ${path}: ${await response.text()}`);
   return response.json();
+}
+
+async function deleteStatus(
+  port: number,
+  path: string,
+  headers: Record<string, string> = {}
+): Promise<number> {
+  const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+    method: "DELETE",
+    headers
+  });
+  await response.text();
+  return response.status;
 }
 
 interface SseHandle {

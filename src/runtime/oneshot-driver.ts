@@ -6,6 +6,8 @@
 // long-lived ACP/stream-json drivers will replace some of these later.
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { nowIso } from "../lib.js";
 import { agentEnv, prepareAgentWorkspace, type AgentWorkspaceLayout } from "../workspace.js";
 import type { Agent, DeliveryWithContext } from "../types.js";
@@ -75,10 +77,9 @@ export class OneshotDriver implements AgentDriver {
       computerId: this.computerId,
       connectToken: this.connectToken
     });
-    // Use workspace.dir (which already includes the cross-host fallback) so
-    // we don't spawn into a path that doesn't exist on this machine.
-    const cwd = workspace.dir;
+    const cwd = workspace.runtimeCwd;
     const spec = buildOneShotSpec(agent, delivery, prompt);
+    const effectiveCwd = resolveEffectiveCwd(spec.cwd, cwd);
     const tag = `[Agent ${agent.id} ${agent.runtime}]`;
     console.log(`[${nowIso()}] ${tag} Delivery received (delivery=${delivery.id}, prompt-bytes=${prompt.length})`);
     const startedAt = Date.now();
@@ -86,7 +87,7 @@ export class OneshotDriver implements AgentDriver {
       const text = await runOneShot({
         agent,
         spec,
-        cwd: spec.cwd || cwd,
+        cwd: effectiveCwd,
         workspace,
         serverUrl: this.serverUrl,
         onEvent: ev => this.emit(ev),
@@ -124,12 +125,15 @@ interface RunOneShotArgs {
 
 function runOneShot({ agent, spec, cwd, workspace, serverUrl, onEvent, launchId, tag }: RunOneShotArgs): Promise<string> {
   return new Promise<string>((resolvePromise, reject) => {
+    const env = {
+      ...agentEnv({ agent, serverUrl, workspace }),
+      ...(spec.env || {}),
+      ITEAM_RUNTIME_CWD: cwd,
+      PWD: cwd
+    };
     const child: ChildProcess = spawn(spec.command, spec.args, {
       cwd,
-      env: {
-        ...agentEnv({ agent, serverUrl, workspace }),
-        ...(spec.env || {})
-      },
+      env,
       stdio: ["ignore", "pipe", "pipe"]
     });
     console.log(`[${nowIso()}] ${tag} Process started (pid=${child.pid})`);
@@ -213,6 +217,14 @@ function runOneShot({ agent, spec, cwd, workspace, serverUrl, onEvent, launchId,
       }
     });
   });
+}
+
+function resolveEffectiveCwd(profileCwd: string | undefined, fallback: string): string {
+  const candidate = resolve(profileCwd || fallback);
+  if (!existsSync(candidate) || !statSync(candidate).isDirectory()) {
+    throw new Error(`runtime profile cwd must be an existing directory: ${candidate}`);
+  }
+  return candidate;
 }
 
 function oneshotTimeoutMs(runtime: string): number {

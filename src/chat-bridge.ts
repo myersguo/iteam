@@ -8,16 +8,21 @@ import type { Message, State } from "./types.js";
 
 const agentId = readArg("--agent-id");
 const serverUrl = (readArg("--server-url", "http://127.0.0.1:4318") || "http://127.0.0.1:4318").replace(/\/$/, "");
+const spaceId = readArg("--space-id", process.env.ITEAM_SPACE_ID) || "space_default";
 const runtime = readArg("--runtime", "unknown") || "unknown";
 const launchId = readArg("--launch-id", "") || "";
 const computerId = readArg("--computer-id", process.env.ITEAM_COMPUTER_ID) || "";
 const connectToken = readArg("--connect-token", process.env.ITEAM_CONNECT_TOKEN) || "";
+const agentAuthToken = process.env.ITEAM_AGENT_AUTH_TOKEN || "";
 
 function authHeaders(): Record<string, string> {
-  if (computerId && connectToken) {
-    return { "x-iteam-connection": `${computerId}:${connectToken}` };
+  const headers: Record<string, string> = { "x-iteam-space": spaceId };
+  if (computerId && agentId && agentAuthToken) {
+    headers["x-iteam-agent-connection"] = `${computerId}:${agentId}:${agentAuthToken}`;
+  } else if (computerId && connectToken) {
+    headers["x-iteam-connection"] = `${computerId}:${connectToken}`;
   }
-  return {};
+  return headers;
 }
 
 const server = new McpServer({
@@ -84,7 +89,7 @@ server.registerTool("iteam_message_search", {
 
 server.registerTool("iteam_message_send", {
   title: "Send iTeam Message",
-  description: "Send a message as this agent to an iTeam channel or thread target.",
+  description: "Send an additional asynchronous iTeam update. Do not use this for the current delivery's primary reply; return that as your normal final response.",
   inputSchema: {
     target: z.string().default("#all"),
     text: z.string()
@@ -93,6 +98,7 @@ server.registerTool("iteam_message_send", {
   if (!agentId) return textResult("Cannot send: missing agent id.");
   const message = await requestJson<Message>(`${serverUrl}/api/messages`, {
     method: "POST",
+    headers: authHeaders(),
     body: { target, text, authorId: agentId }
   });
   return textResult(`sent ${message.id} to ${target}`);
@@ -119,9 +125,9 @@ async function stateSnapshot(): Promise<State> {
   if (stateInflight) return stateInflight;
   const job = (async () => {
     const [agents, humans, channels] = await Promise.all([
-      requestJson<State["agents"]>(`${serverUrl}/api/agents`),
-      requestJson<State["humans"]>(`${serverUrl}/api/humans`),
-      requestJson<State["channels"]>(`${serverUrl}/api/channels`)
+      requestJson<State["agents"]>(`${serverUrl}/api/agents`, { headers: authHeaders() }),
+      requestJson<State["humans"]>(`${serverUrl}/api/humans`, { headers: authHeaders() }),
+      requestJson<State["channels"]>(`${serverUrl}/api/channels`, { headers: authHeaders() })
     ]);
     const value = { agents, humans, channels, messages: [] } as unknown as State;
     stateCache = { value, expiresAt: Date.now() + STATE_TTL_MS };
@@ -145,7 +151,7 @@ function messagesUrl(state: State, target: string, limit: number, around?: strin
 }
 
 async function fetchMessages(state: State, target: string, limit: number, around?: string): Promise<Message[]> {
-  return requestJson<Message[]>(messagesUrl(state, target, limit, around));
+  return requestJson<Message[]>(messagesUrl(state, target, limit, around), { headers: authHeaders() });
 }
 
 function formatServerInfo(state: State): string {

@@ -15,14 +15,141 @@ import type {
   PendingComputerConnection,
   RuntimeInfo,
   ScheduledTask,
+  Space,
   State,
   StoreEvent,
   Task
 } from "../types.js";
+import { nowIso } from "../lib.js";
 import { BaseStore, DEFAULT_SPACE_ID, initialState } from "./base.js";
 import { MYSQL_TABLES } from "./mysql-schema.js";
 
 const requireCjs = createRequire(import.meta.url);
+
+export interface MysqlIndexColumn {
+  INDEX_NAME: string;
+  COLUMN_NAME: string;
+  SEQ_IN_INDEX: number;
+  NON_UNIQUE: number;
+}
+
+export function planMysqlChannelUniqueMigration(rows: MysqlIndexColumn[]): {
+  legacyIndexNames: string[];
+  hasSpaceTarget: boolean;
+} {
+  const uniqueIndexes = new Map<string, Array<{ column: string; position: number }>>();
+  for (const row of rows || []) {
+    if (Number(row.NON_UNIQUE) !== 0 || row.INDEX_NAME === "PRIMARY") continue;
+    const columns = uniqueIndexes.get(row.INDEX_NAME) || [];
+    columns.push({ column: row.COLUMN_NAME, position: Number(row.SEQ_IN_INDEX) });
+    uniqueIndexes.set(row.INDEX_NAME, columns);
+  }
+  const normalized = Array.from(uniqueIndexes.entries()).map(([name, columns]) => ({
+    name,
+    columns: columns
+      .sort((left, right) => left.position - right.position)
+      .map(item => item.column)
+  }));
+  return {
+    hasSpaceTarget: normalized.some(index => index.columns.join(",") === "space_id,target"),
+    legacyIndexNames: normalized
+      .filter(index => index.columns.join(",") === "target")
+      .map(index => index.name)
+  };
+}
+
+export const MYSQL_SPACE_BACKFILL_QUERIES = [
+  `UPDATE iteam_channels channel_row
+   LEFT JOIN iteam_agents default_agent ON default_agent.id = channel_row.default_agent_id
+   LEFT JOIN (
+     SELECT
+       member.channel_id,
+       MIN(agent.space_id) AS space_id,
+       COUNT(DISTINCT agent.space_id) AS space_count
+     FROM iteam_channel_members member
+     INNER JOIN iteam_agents agent ON agent.id = member.member_id
+     GROUP BY member.channel_id
+   ) member_space ON member_space.channel_id = channel_row.id
+   SET channel_row.space_id = CASE
+     WHEN member_space.space_count > 1 THEN channel_row.space_id
+     WHEN default_agent.space_id IS NOT NULL
+      AND member_space.space_id IS NOT NULL
+      AND default_agent.space_id <> member_space.space_id
+       THEN channel_row.space_id
+     ELSE COALESCE(default_agent.space_id, member_space.space_id, channel_row.space_id)
+   END
+   WHERE channel_row.space_id = 'space_default'`,
+  `UPDATE iteam_deliveries delivery
+   LEFT JOIN iteam_agents agent ON agent.id = delivery.agent_id
+   SET delivery.space_id = COALESCE(
+     NULLIF(agent.space_id, ''),
+     NULLIF(delivery.space_id, 'space_default'),
+     'space_default'
+   )
+   WHERE delivery.space_id = 'space_default'`,
+  `UPDATE iteam_messages message
+   LEFT JOIN (
+     SELECT
+       message_id,
+       MIN(space_id) AS space_id,
+       COUNT(DISTINCT space_id) AS space_count
+     FROM iteam_deliveries
+     GROUP BY message_id
+   ) delivery ON delivery.message_id = message.id
+   LEFT JOIN iteam_agents agent ON agent.id = message.author_id
+   LEFT JOIN (
+     SELECT
+       target,
+       MIN(space_id) AS space_id,
+       COUNT(DISTINCT space_id) AS space_count
+     FROM iteam_channels
+     GROUP BY target
+   ) channel_space ON channel_space.target = message.target
+   SET message.space_id = CASE
+     WHEN delivery.space_count > 1 OR channel_space.space_count > 1 THEN message.space_id
+     WHEN agent.space_id IS NOT NULL
+      AND delivery.space_id IS NOT NULL
+      AND agent.space_id <> delivery.space_id
+       THEN message.space_id
+     WHEN agent.space_id IS NOT NULL
+      AND channel_space.space_id IS NOT NULL
+      AND agent.space_id <> channel_space.space_id
+       THEN message.space_id
+     WHEN delivery.space_id IS NOT NULL
+      AND channel_space.space_id IS NOT NULL
+      AND delivery.space_id <> channel_space.space_id
+       THEN message.space_id
+     ELSE COALESCE(agent.space_id, delivery.space_id, channel_space.space_id, message.space_id)
+   END
+   WHERE message.space_id = 'space_default'`,
+  `UPDATE iteam_messages message
+   INNER JOIN iteam_agents agent ON agent.id = message.author_id
+   SET message.type = 'agent'
+   WHERE message.type = 'human'`,
+  `UPDATE iteam_tasks task
+   LEFT JOIN iteam_agents agent ON agent.id = task.assignee_id
+   LEFT JOIN iteam_messages message ON message.id = task.message_id
+   SET task.space_id = CASE
+     WHEN NULLIF(message.space_id, 'space_default') IS NOT NULL
+      AND NULLIF(agent.space_id, 'space_default') IS NOT NULL
+      AND message.space_id <> agent.space_id
+       THEN task.space_id
+     ELSE COALESCE(
+       NULLIF(message.space_id, 'space_default'),
+       NULLIF(agent.space_id, 'space_default'),
+       task.space_id
+     )
+   END
+   WHERE task.space_id = 'space_default'`,
+  `UPDATE iteam_scheduled_tasks scheduled
+   LEFT JOIN iteam_agents agent ON agent.id = scheduled.agent_id
+   SET scheduled.space_id = COALESCE(
+     NULLIF(agent.space_id, ''),
+     NULLIF(scheduled.space_id, 'space_default'),
+     'space_default'
+   )
+   WHERE scheduled.space_id = 'space_default'`
+] as const;
 
 interface MysqlConnection {
   query<T = unknown>(sql: string, params?: unknown[]): Promise<[T, unknown]>;
@@ -141,6 +268,26 @@ export class MysqlStore extends BaseStore {
       "VARCHAR(64) NOT NULL DEFAULT 'space_default'"
     );
     await this.addColumnIfMissing(
+      "iteam_messages",
+      "space_id",
+      "VARCHAR(64) NOT NULL DEFAULT 'space_default'"
+    );
+    await this.addColumnIfMissing(
+      "iteam_tasks",
+      "space_id",
+      "VARCHAR(64) NOT NULL DEFAULT 'space_default'"
+    );
+    await this.addColumnIfMissing(
+      "iteam_scheduled_tasks",
+      "space_id",
+      "VARCHAR(64) NOT NULL DEFAULT 'space_default'"
+    );
+    await this.addColumnIfMissing(
+      "iteam_deliveries",
+      "space_id",
+      "VARCHAR(64) NOT NULL DEFAULT 'space_default'"
+    );
+    await this.addColumnIfMissing(
       "iteam_scheduled_tasks",
       "cron_expression",
       "VARCHAR(255) DEFAULT NULL"
@@ -195,7 +342,112 @@ export class MysqlStore extends BaseStore {
       "default_agent_id",
       "VARCHAR(64) DEFAULT NULL"
     );
+    await this.addColumnIfMissing(
+      "iteam_channels",
+      "space_id",
+      "VARCHAR(64) NOT NULL DEFAULT 'space_default'"
+    );
+    await this.runSpaceBackfillMigration();
+    await this.migrateChannelsUniqueSpaceTarget();
     await this.migrateAgentsModelNullable();
+  }
+
+  private async migrateChannelsUniqueSpaceTarget(): Promise<void> {
+    const [rows] = await this.pool.query<MysqlIndexColumn[]>(
+      `SELECT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX, NON_UNIQUE
+       FROM information_schema.STATISTICS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'iteam_channels'
+       ORDER BY INDEX_NAME, SEQ_IN_INDEX`
+    );
+    const plan = planMysqlChannelUniqueMigration(rows);
+    if (!plan.hasSpaceTarget) {
+      await this.pool.query(
+        "ALTER TABLE iteam_channels ADD UNIQUE KEY uniq_space_target (space_id, target)"
+      );
+    }
+    for (const indexName of plan.legacyIndexNames) {
+      await this.pool.query(`ALTER TABLE iteam_channels DROP INDEX \`${escapeMysqlIdentifier(indexName)}\``);
+    }
+  }
+
+  private async runSpaceBackfillMigration(): Promise<void> {
+    const migrationName = "space_backfill_v1";
+    const [rows] = await this.pool.query<Array<{ applied: number }>>(
+      "SELECT 1 AS applied FROM iteam_schema_migrations WHERE name = ?",
+      [migrationName]
+    );
+    if (Array.isArray(rows) && rows.length > 0) return;
+    const connection = await this.pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      await this.backfillEntitySpaceIds(connection);
+      await this.backfillMissingSpaces(connection);
+      await connection.query(
+        "INSERT INTO iteam_schema_migrations (name, applied_at) VALUES (?, ?)",
+        [migrationName, nowIso()]
+      );
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  private async backfillEntitySpaceIds(connection: MysqlConnection): Promise<void> {
+    for (const query of MYSQL_SPACE_BACKFILL_QUERIES) {
+      await connection.query(query);
+    }
+  }
+
+  private async backfillMissingSpaces(connection: MysqlConnection): Promise<void> {
+    const [rows] = await connection.query<Array<{ space_id: string | null }>>(
+      `SELECT DISTINCT space_id FROM (
+         SELECT space_id FROM iteam_computers
+         UNION ALL SELECT space_id FROM iteam_pending_connections
+         UNION ALL SELECT space_id FROM iteam_agents
+         UNION ALL SELECT space_id FROM iteam_channels
+         UNION ALL SELECT space_id FROM iteam_messages
+         UNION ALL SELECT space_id FROM iteam_tasks
+         UNION ALL SELECT space_id FROM iteam_scheduled_tasks
+         UNION ALL SELECT space_id FROM iteam_deliveries
+       ) entity_spaces
+       WHERE space_id IS NOT NULL AND space_id <> ''`
+    );
+    const [existingRows] = await connection.query<Array<{ id: string; slug: string }>>(
+      "SELECT id, slug FROM iteam_spaces"
+    );
+    const existing = new Set((existingRows || []).map(row => row.id));
+    const existingSlugs = new Set((existingRows || []).map(row => row.slug));
+    const now = nowIso();
+    for (const row of rows || []) {
+      const id = String(row.space_id || "").trim();
+      if (!id || existing.has(id)) continue;
+      const isDefault = id === DEFAULT_SPACE_ID;
+      const baseSlug = (isDefault ? "default" : id).slice(0, 64);
+      let slug = baseSlug;
+      let suffix = 2;
+      while (existingSlugs.has(slug)) {
+        const suffixText = `-${suffix++}`;
+        slug = `${baseSlug.slice(0, 64 - suffixText.length)}${suffixText}`;
+      }
+      await connection.query(
+        `INSERT INTO iteam_spaces
+         (id, name, slug, description, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          isDefault ? "Default" : id,
+          slug,
+          isDefault ? "Default iTeam space" : "Recovered from persisted space-owned entities",
+          now,
+          now
+        ]
+      );
+      existing.add(id);
+      existingSlugs.add(slug);
+    }
   }
 
   private async migrateAgentsModelNullable(): Promise<void> {
@@ -224,6 +476,15 @@ export class MysqlStore extends BaseStore {
   // ---------------------------------------------------------------------------
   private async loadFromTables(): Promise<State> {
     const seed = initialState();
+
+    const [spaceRows] = await this.pool.query<Array<{
+      id: string;
+      name: string;
+      slug: string;
+      description: string | null;
+      created_at: string;
+      updated_at: string;
+    }>>("SELECT id, name, slug, description, created_at, updated_at FROM iteam_spaces");
 
     const [humanRows] = await this.pool.query<Array<{
       id: string;
@@ -286,6 +547,7 @@ export class MysqlStore extends BaseStore {
 
     const [channelRows] = await this.pool.query<Array<{
       id: string;
+      space_id: string | null;
       name: string;
       target: string;
       kind: string;
@@ -301,6 +563,7 @@ export class MysqlStore extends BaseStore {
 
     const [messageRows] = await this.pool.query<Array<{
       id: string;
+      space_id: string | null;
       target: string;
       author_id: string;
       type: string;
@@ -313,6 +576,7 @@ export class MysqlStore extends BaseStore {
 
     const [taskRows] = await this.pool.query<Array<{
       id: string;
+      space_id: string | null;
       number: number;
       target: string;
       title: string;
@@ -328,6 +592,7 @@ export class MysqlStore extends BaseStore {
 
     const [deliveryRows] = await this.pool.query<Array<{
       id: string;
+      space_id: string | null;
       message_id: string;
       root_message_id: string;
       parent_delivery_id: string | null;
@@ -347,6 +612,7 @@ export class MysqlStore extends BaseStore {
 
     const [scheduledTaskRows] = await this.pool.query<Array<{
       id: string;
+      space_id: string | null;
       target: string;
       agent_id: string;
       prompt: string;
@@ -507,7 +773,7 @@ export class MysqlStore extends BaseStore {
 
     const channels: Channel[] = channelRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       name: row.name,
       target: row.target,
       kind: row.kind,
@@ -519,7 +785,7 @@ export class MysqlStore extends BaseStore {
 
     const messages: Message[] = messageRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       target: row.target,
       authorId: row.author_id,
       type: row.type,
@@ -532,7 +798,7 @@ export class MysqlStore extends BaseStore {
 
     const tasks: Task[] = taskRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       number: row.number,
       target: row.target,
       title: row.title,
@@ -548,7 +814,7 @@ export class MysqlStore extends BaseStore {
 
     const deliveries: Delivery[] = deliveryRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       messageId: row.message_id,
       rootMessageId: row.root_message_id,
       parentDeliveryId: row.parent_delivery_id,
@@ -568,7 +834,7 @@ export class MysqlStore extends BaseStore {
 
     const scheduledTasks: ScheduledTask[] = scheduledTaskRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       target: row.target,
       agentId: row.agent_id,
       prompt: row.prompt,
@@ -662,10 +928,21 @@ export class MysqlStore extends BaseStore {
       createdAt: row.created_at
     }));
 
+    const spaces: Space[] = spaceRows.length
+      ? spaceRows.map(row => ({
+          id: row.id,
+          name: row.name,
+          slug: row.slug,
+          description: row.description || "",
+          createdAt: row.created_at,
+          updatedAt: row.updated_at
+        }))
+      : seed.spaces;
+
     // Fall back to seed defaults when the database is empty (first run).
     return {
       meta: seed.meta,
-      spaces: seed.spaces,
+      spaces,
       computers,
       pendingComputerConnections,
       humans: humans.length ? humans : seed.humans,
@@ -700,6 +977,23 @@ export class MysqlStore extends BaseStore {
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
+
+      await conn.query("DELETE FROM iteam_spaces");
+      if (state.spaces.length) {
+        await conn.query(
+          "INSERT INTO iteam_spaces (id, name, slug, description, created_at, updated_at) VALUES ?",
+          [
+            state.spaces.map(space => [
+              space.id,
+              space.name,
+              space.slug,
+              space.description ?? null,
+              space.createdAt,
+              space.updatedAt
+            ])
+          ]
+        );
+      }
 
       await conn.query("DELETE FROM iteam_humans");
       if (state.humans.length) {
@@ -790,10 +1084,11 @@ export class MysqlStore extends BaseStore {
       await conn.query("DELETE FROM iteam_channels");
       if (state.channels.length) {
         await conn.query(
-          "INSERT INTO iteam_channels (id, name, target, kind, description, default_agent_id, created_at) VALUES ?",
+          "INSERT INTO iteam_channels (id, space_id, name, target, kind, description, default_agent_id, created_at) VALUES ?",
           [
             state.channels.map(c => [
               c.id,
+              c.spaceId || DEFAULT_SPACE_ID,
               c.name,
               c.target,
               c.kind,
@@ -820,10 +1115,11 @@ export class MysqlStore extends BaseStore {
       await conn.query("DELETE FROM iteam_messages");
       if (state.messages.length) {
         await conn.query(
-          "INSERT INTO iteam_messages (id, target, author_id, type, text, mentions, created_at, thread_id, task_id) VALUES ?",
+          "INSERT INTO iteam_messages (id, space_id, target, author_id, type, text, mentions, created_at, thread_id, task_id) VALUES ?",
           [
             state.messages.map(m => [
               m.id,
+              m.spaceId || DEFAULT_SPACE_ID,
               m.target,
               m.authorId,
               m.type,
@@ -840,10 +1136,11 @@ export class MysqlStore extends BaseStore {
       await conn.query("DELETE FROM iteam_tasks");
       if (state.tasks.length) {
         await conn.query(
-          "INSERT INTO iteam_tasks (id, number, target, title, description, status, assignee_id, created_by, message_id, thread_target, created_at, updated_at) VALUES ?",
+          "INSERT INTO iteam_tasks (id, space_id, number, target, title, description, status, assignee_id, created_by, message_id, thread_target, created_at, updated_at) VALUES ?",
           [
             state.tasks.map(t => [
               t.id,
+              t.spaceId || DEFAULT_SPACE_ID,
               t.number,
               t.target,
               t.title,
@@ -863,10 +1160,11 @@ export class MysqlStore extends BaseStore {
       await conn.query("DELETE FROM iteam_deliveries");
       if (state.deliveries.length) {
         await conn.query(
-          "INSERT INTO iteam_deliveries (id, message_id, root_message_id, parent_delivery_id, depth, agent_id, computer_id, target, session_key, source, status, attempts, created_at, updated_at, error, lifecycle) VALUES ?",
+          "INSERT INTO iteam_deliveries (id, space_id, message_id, root_message_id, parent_delivery_id, depth, agent_id, computer_id, target, session_key, source, status, attempts, created_at, updated_at, error, lifecycle) VALUES ?",
           [
             state.deliveries.map(d => [
               d.id,
+              d.spaceId || DEFAULT_SPACE_ID,
               d.messageId,
               d.rootMessageId,
               d.parentDeliveryId,
@@ -890,10 +1188,11 @@ export class MysqlStore extends BaseStore {
       await conn.query("DELETE FROM iteam_scheduled_tasks");
       if (state.scheduledTasks.length) {
         await conn.query(
-          "INSERT INTO iteam_scheduled_tasks (id, target, agent_id, prompt, session_key, interval_ms, cron_expression, timezone, status, next_run_at, last_run_at, last_message_id, run_count, created_by, created_at, updated_at) VALUES ?",
+          "INSERT INTO iteam_scheduled_tasks (id, space_id, target, agent_id, prompt, session_key, interval_ms, cron_expression, timezone, status, next_run_at, last_run_at, last_message_id, run_count, created_by, created_at, updated_at) VALUES ?",
           [
             state.scheduledTasks.map(task => [
               task.id,
+              task.spaceId || DEFAULT_SPACE_ID,
               task.target,
               task.agentId,
               task.prompt,
@@ -1063,4 +1362,8 @@ function parseJsonField<T>(value: unknown, fallback: T): T {
     }
   }
   return value as T;
+}
+
+function escapeMysqlIdentifier(value: string): string {
+  return value.replaceAll("`", "``");
 }

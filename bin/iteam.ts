@@ -20,7 +20,7 @@ function usage(): void {
 Usage:
   iteam server start [--host 0.0.0.0] [--port 4318]
   iteam server status
-  iteam agent-daemon connect --server-url <url> --connect-token <token> [--name computer-name]
+  iteam agent-daemon connect --server-url <url> --connect-token <token> [--space-id <id>] [--runtime-cwd <path>] [--name computer-name]
   iteam web   # prints the daemon URL (the daemon already serves the bundle); runs vite dev only in a source checkout
   iteam computer list
   iteam agent create <name> [--runtime codex|claude|gemini|trae]
@@ -87,12 +87,17 @@ async function main(): Promise<void> {
     const connectToken = readFlag("--connect-token", process.env.ITEAM_CONNECT_TOKEN);
     if (!serverUrl || !connectToken) throw new Error("--server-url and --connect-token are required");
     const entry = resolveEntry("agent-daemon");
-    const child = spawn(entry.argv[0], [
+    const daemonArgs = [
       ...entry.argv.slice(1),
       "--server-url", String(serverUrl),
       "--connect-token", String(connectToken),
       "--name", String(readFlag("--name", localComputerFingerprint().hostname))
-    ], {
+    ];
+    const spaceId = readFlag("--space-id", process.env.ITEAM_SPACE_ID);
+    if (spaceId && spaceId !== true) daemonArgs.push("--space-id", String(spaceId));
+    const runtimeCwd = readFlag("--runtime-cwd", process.env.ITEAM_RUNTIME_CWD);
+    if (runtimeCwd && runtimeCwd !== true) daemonArgs.push("--runtime-cwd", String(runtimeCwd));
+    const child = spawn(entry.argv[0], daemonArgs, {
       stdio: "inherit",
       env: process.env
     });

@@ -12,6 +12,10 @@
  */
 
 export const SQLITE_TABLES: ReadonlyArray<string> = [
+  `CREATE TABLE IF NOT EXISTS iteam_schema_migrations (
+    name       TEXT NOT NULL PRIMARY KEY,
+    applied_at TEXT NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS iteam_spaces (
     id          TEXT NOT NULL PRIMARY KEY,
     name        TEXT NOT NULL,
@@ -93,6 +97,7 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
   )`,
   `CREATE TABLE IF NOT EXISTS iteam_messages (
     id         TEXT NOT NULL PRIMARY KEY,
+    space_id   TEXT NOT NULL DEFAULT 'space_default',
     target     TEXT NOT NULL,
     author_id  TEXT NOT NULL,
     type       TEXT NOT NULL,
@@ -104,6 +109,7 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
   )`,
   `CREATE TABLE IF NOT EXISTS iteam_tasks (
     id            TEXT NOT NULL PRIMARY KEY,
+    space_id      TEXT NOT NULL DEFAULT 'space_default',
     number        INTEGER NOT NULL,
     target        TEXT NOT NULL,
     title         TEXT NOT NULL,
@@ -118,6 +124,7 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
   )`,
   `CREATE TABLE IF NOT EXISTS iteam_scheduled_tasks (
     id              TEXT NOT NULL PRIMARY KEY,
+    space_id        TEXT NOT NULL DEFAULT 'space_default',
     target          TEXT NOT NULL,
 	    agent_id        TEXT NOT NULL,
 	    prompt          TEXT NOT NULL,
@@ -136,6 +143,7 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
   )`,
   `CREATE TABLE IF NOT EXISTS iteam_deliveries (
     id                 TEXT NOT NULL PRIMARY KEY,
+    space_id           TEXT NOT NULL DEFAULT 'space_default',
     message_id         TEXT NOT NULL,
     root_message_id    TEXT NOT NULL,
     parent_delivery_id TEXT,

@@ -174,7 +174,7 @@ async function route(
   staticConfig: StaticConfig
 ): Promise<void> {
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
-  const spaceId = resolveSpaceIdHeader(req, url);
+  const spaceId = resolveAuthenticatedSpace(core, req, resolveSpaceIdHeader(req, url));
 
   if (req.method === "GET" && url.pathname === "/api/health") {
     return sendJson(res, 200, core.health());
@@ -200,6 +200,9 @@ async function route(
     // with the rest of the daemon-protected routes.
     const credentials = readComputerCredentials(req, url, computerId);
     core.authenticateComputer(credentials.computerId, credentials.token);
+    if (credentials.computerId !== computerId) {
+      throw new HttpError(403, "connection credentials do not match the requested computer");
+    }
 
     res.writeHead(200, {
       "content-type": "text/event-stream",
@@ -243,7 +246,9 @@ async function route(
   }
   const spaceDelete = url.pathname.match(/^\/api\/spaces\/([^/]+)$/);
   if (req.method === "DELETE" && spaceDelete) {
-    core.deleteSpace(decodeURIComponent(spaceDelete[1]));
+    const targetSpaceId = decodeURIComponent(spaceDelete[1]);
+    resolveAuthenticatedSpace(core, req, targetSpaceId);
+    core.deleteSpace(targetSpaceId);
     return sendJson(res, 200, { ok: true });
   }
   if (req.method === "GET" && url.pathname === "/api/channels") return sendJson(res, 200, core.listChannels(spaceId));
@@ -302,12 +307,16 @@ async function route(
 
   if (req.method === "POST" && url.pathname === "/api/channels") {
     const body = await parseJsonBody<any>(req);
-    return sendJson(res, 201, core.createChannel({ ...body, spaceId: body?.spaceId || spaceId }));
+    return sendJson(res, 201, core.createChannel({
+      ...body,
+      spaceId: resolveAuthenticatedSpace(core, req, body?.spaceId || spaceId)
+    }));
   }
 
   const agentDm = url.pathname.match(/^\/api\/direct-messages\/agents\/([^/]+)$/);
   if (req.method === "POST" && agentDm) {
     const agentId = decodeURIComponent(agentDm[1]);
+    requireResourceSpaceIfAuthenticated(core, req, "agent", agentId);
     return sendJson(res, 201, core.ensureAgentDmChannel(agentId));
   }
 
@@ -315,12 +324,16 @@ async function route(
   if (req.method === "PATCH" && channelPatch) {
     const body = await parseJsonBody<any>(req);
     const channelId = decodeURIComponent(channelPatch[1]);
+    requireResourceSpaceIfAuthenticated(core, req, "channel", channelId);
     return sendJson(res, 200, core.patchChannel(channelId, body));
   }
 
   if (req.method === "POST" && url.pathname === "/api/computers/connect-command") {
     const body = await parseJsonBody<any>(req);
-    return sendJson(res, 201, core.createConnectInvite({ ...body, spaceId: body?.spaceId || spaceId }, `http://${req.headers.host}`));
+    return sendJson(res, 201, core.createConnectInvite({
+      ...body,
+      spaceId: resolveAuthenticatedSpace(core, req, body?.spaceId || spaceId)
+    }, `http://${req.headers.host}`));
   }
 
   if (req.method === "POST" && url.pathname === "/api/computers/connect") {
@@ -335,21 +348,27 @@ async function route(
   const computerDelete = url.pathname.match(/^\/api\/computers\/([^/]+)$/);
   if (req.method === "DELETE" && computerDelete) {
     const id = decodeURIComponent(computerDelete[1]);
+    requireResourceSpaceIfAuthenticated(core, req, "computer", id);
     core.deleteComputer(id);
     return sendJson(res, 200, { ok: true });
   }
 
   if (req.method === "POST" && url.pathname === "/api/agents") {
     const body = await parseJsonBody<any>(req);
-    return sendJson(res, 201, core.createAgent({ ...body, spaceId: body?.spaceId || spaceId }));
+    return sendJson(res, 201, core.createAgent({
+      ...body,
+      spaceId: resolveAuthenticatedSpace(core, req, body?.spaceId || spaceId)
+    }));
   }
 
   const agentPatch = url.pathname.match(/^\/api\/agents\/([^/]+)$/);
   if (req.method === "PATCH" && agentPatch) {
     const body = await parseJsonBody<any>(req);
+    requireResourceSpaceIfAuthenticated(core, req, "agent", agentPatch[1]);
     return sendJson(res, 200, core.patchAgent(agentPatch[1], body));
   }
   if (req.method === "DELETE" && agentPatch) {
+    requireResourceSpaceIfAuthenticated(core, req, "agent", agentPatch[1]);
     const agent = core.deleteAgent(decodeURIComponent(agentPatch[1]));
     return sendJson(res, 200, { ok: true, agentId: agent.id });
   }
@@ -378,12 +397,15 @@ async function route(
   const agentAction = url.pathname.match(/^\/api\/agents\/([^/]+)\/(start|stop)$/);
   if (req.method === "POST" && agentAction) {
     const [, agentId, action] = agentAction;
+    requireResourceSpaceIfAuthenticated(core, req, "agent", agentId);
     return sendJson(res, 200, core.setAgentDesiredStatus(agentId, action as "start" | "stop"));
   }
 
   if (req.method === "POST" && url.pathname === "/api/messages") {
     const body = await parseJsonBody<any>(req);
-    return sendJson(res, 201, core.createMessage({ ...body, spaceId: body?.spaceId || spaceId }));
+    const messageSpaceId = resolveAuthenticatedSpace(core, req, body?.spaceId || spaceId);
+    requireAgentAuthorAuthIfNeeded(core, req, body?.authorId);
+    return sendJson(res, 201, core.createMessage({ ...body, spaceId: messageSpaceId }));
   }
 
   const deliveryResult = url.pathname.match(/^\/api\/deliveries\/([^/]+)\/result$/);
@@ -417,12 +439,16 @@ async function route(
   const deliveryCancel = url.pathname.match(/^\/api\/deliveries\/([^/]+)\/cancel$/);
   if (req.method === "POST" && deliveryCancel) {
     const body = await parseJsonBody<any>(req);
+    requireResourceSpaceIfAuthenticated(core, req, "delivery", deliveryCancel[1]);
     return sendJson(res, 200, core.cancelDelivery(deliveryCancel[1], body?.reason));
   }
 
   if (req.method === "POST" && url.pathname === "/api/ingress/pairing-codes") {
     const body = await parseJsonBody<any>(req);
-    return sendJson(res, 201, core.createIngressPairing({ ...body, spaceId: body?.spaceId || spaceId }));
+    return sendJson(res, 201, core.createIngressPairing({
+      ...body,
+      spaceId: resolveAuthenticatedSpace(core, req, body?.spaceId || spaceId)
+    }));
   }
 
   if (req.method === "POST" && url.pathname === "/api/ingress/pair") {
@@ -443,12 +469,18 @@ async function route(
 
   if (req.method === "POST" && url.pathname === "/api/external/bot-bindings") {
     const body = await parseJsonBody<any>(req);
-    return sendJson(res, 201, core.upsertExternalBotBinding({ ...body, spaceId: body?.spaceId || spaceId }));
+    return sendJson(res, 201, core.upsertExternalBotBinding({
+      ...body,
+      spaceId: resolveAuthenticatedSpace(core, req, body?.spaceId || spaceId)
+    }));
   }
 
   if (req.method === "POST" && url.pathname === "/api/external/bot-configs") {
     const body = await parseJsonBody<any>(req);
-    const saved = core.upsertExternalBotConfig({ ...body, spaceId: body?.spaceId || spaceId });
+    const saved = core.upsertExternalBotConfig({
+      ...body,
+      spaceId: resolveAuthenticatedSpace(core, req, body?.spaceId || spaceId)
+    });
     void Promise.resolve(staticConfig.externalBotRuntime?.sync(saved.provider, saved.spaceId)).catch(error => {
       console.error(`[http] external bot runtime sync failed for ${saved.provider}@${saved.spaceId}: ${(error as Error).message}`);
     });
@@ -466,36 +498,49 @@ async function route(
 
   if (req.method === "POST" && url.pathname === "/api/external/routed-messages") {
     const body = await parseJsonBody<any>(req);
-    return sendJson(res, 201, core.createExternalRoutedMessage({ ...body, spaceId: body?.spaceId || spaceId }));
+    return sendJson(res, 201, core.createExternalRoutedMessage({
+      ...body,
+      spaceId: resolveAuthenticatedSpace(core, req, body?.spaceId || spaceId)
+    }));
   }
 
   if (req.method === "POST" && url.pathname === "/api/external/message-links/backfill") {
     const body = await parseJsonBody<any>(req);
+    requireResourceSpaceIfAuthenticated(core, req, "message", body.rootMessageId);
     return sendJson(res, 200, core.backfillExternalMessageLinks(body.rootMessageId));
   }
 
   if (req.method === "POST" && url.pathname === "/api/tasks") {
     const body = await parseJsonBody<any>(req);
-    return sendJson(res, 201, core.createTask({ ...body, spaceId: body?.spaceId || spaceId }));
+    return sendJson(res, 201, core.createTask({
+      ...body,
+      spaceId: resolveAuthenticatedSpace(core, req, body?.spaceId || spaceId)
+    }));
   }
 
   const taskPatch = url.pathname.match(/^\/api\/tasks\/([^/]+)$/);
   if (req.method === "PATCH" && taskPatch) {
     const body = await parseJsonBody<any>(req);
+    requireResourceSpaceIfAuthenticated(core, req, "task", taskPatch[1]);
     return sendJson(res, 200, core.patchTask(taskPatch[1], body));
   }
 
   if (req.method === "POST" && url.pathname === "/api/scheduled-tasks") {
     const body = await parseJsonBody<any>(req);
-    return sendJson(res, 201, core.createScheduledTask({ ...body, spaceId: body?.spaceId || spaceId }));
+    return sendJson(res, 201, core.createScheduledTask({
+      ...body,
+      spaceId: resolveAuthenticatedSpace(core, req, body?.spaceId || spaceId)
+    }));
   }
 
   const scheduledTask = url.pathname.match(/^\/api\/scheduled-tasks\/([^/]+)$/);
   if (scheduledTask && req.method === "PATCH") {
     const body = await parseJsonBody<any>(req);
+    requireResourceSpaceIfAuthenticated(core, req, "scheduledTask", scheduledTask[1]);
     return sendJson(res, 200, core.patchScheduledTask(scheduledTask[1], body));
   }
   if (scheduledTask && req.method === "DELETE") {
+    requireResourceSpaceIfAuthenticated(core, req, "scheduledTask", scheduledTask[1]);
     core.deleteScheduledTask(scheduledTask[1]);
     return sendJson(res, 200, { ok: true });
   }
@@ -631,4 +676,131 @@ function parseConnectionHeader(req: IncomingMessage): { computerId: string; toke
   const colonAt = raw.indexOf(":");
   if (colonAt <= 0) throw new HttpError(401, "X-Iteam-Connection format must be <computerId>:<token>");
   return { computerId: raw.slice(0, colonAt), token: raw.slice(colonAt + 1) };
+}
+
+function resolveAuthenticatedSpace(
+  core: IteamCore,
+  req: IncomingMessage,
+  spaceId: string | null | undefined
+): string | null {
+  const agentCredentials = readAgentCredentialsIfPresent(req);
+  if (agentCredentials) {
+    const agent = core.authenticateAgent(
+      agentCredentials.computerId,
+      agentCredentials.agentId,
+      agentCredentials.token
+    );
+    if (spaceId && agent.spaceId !== spaceId) {
+      throw new HttpError(403, "agent cannot access a different space");
+    }
+    return agent.spaceId;
+  }
+  const header = req.headers["x-iteam-connection"];
+  const raw = Array.isArray(header) ? header[0] : header;
+  if (!raw) return spaceId || null;
+  const { computerId, token } = parseConnectionHeader(req);
+  const computer = core.authenticateComputer(computerId, token);
+  if (spaceId && computer.spaceId !== spaceId) {
+    throw new HttpError(403, "computer cannot access a different space");
+  }
+  return computer.spaceId;
+}
+
+function requireAgentAuthorAuthIfNeeded(
+  core: IteamCore,
+  req: IncomingMessage,
+  authorId: string | null | undefined
+): void {
+  if (!authorId) return;
+  const agent = (core.snapshot().agents || []).find(item => item.id === authorId);
+  if (!agent) return;
+  const agentCredentials = readAgentCredentialsIfPresent(req);
+  if (agentCredentials) {
+    const authenticatedAgent = core.authenticateAgent(
+      agentCredentials.computerId,
+      agentCredentials.agentId,
+      agentCredentials.token
+    );
+    if (authenticatedAgent.id !== authorId) {
+      throw new HttpError(403, "agent cannot impersonate another agent");
+    }
+    return;
+  }
+  throw new HttpError(401, "X-Iteam-Agent-Connection header required");
+}
+
+type SpaceOwnedResourceKind =
+  | "channel"
+  | "computer"
+  | "agent"
+  | "delivery"
+  | "task"
+  | "scheduledTask"
+  | "message";
+
+function requireResourceSpaceIfAuthenticated(
+  core: IteamCore,
+  req: IncomingMessage,
+  kind: SpaceOwnedResourceKind,
+  resourceId: string
+): void {
+  const agentCredentials = readAgentCredentialsIfPresent(req);
+  if (agentCredentials) {
+    const agent = core.authenticateAgent(
+      agentCredentials.computerId,
+      agentCredentials.agentId,
+      agentCredentials.token
+    );
+    requireResourceSpace(core, kind, resourceId, agent.spaceId);
+    return;
+  }
+  const header = req.headers["x-iteam-connection"];
+  const raw = Array.isArray(header) ? header[0] : header;
+  if (!raw) return;
+  const { computerId, token } = parseConnectionHeader(req);
+  const computer = core.authenticateComputer(computerId, token);
+  requireResourceSpace(core, kind, resourceId, computer.spaceId);
+}
+
+function requireResourceSpace(
+  core: IteamCore,
+  kind: SpaceOwnedResourceKind,
+  resourceId: string,
+  expectedSpaceId: string
+): void {
+  const state = core.snapshot();
+  const collection =
+    kind === "channel" ? state.channels :
+    kind === "computer" ? state.computers :
+    kind === "agent" ? state.agents :
+    kind === "delivery" ? state.deliveries :
+    kind === "task" ? state.tasks :
+    kind === "scheduledTask" ? state.scheduledTasks :
+    state.messages;
+  const resource = collection.find(item => item.id === resourceId);
+  if (!resource) throw new HttpError(404, `${kind} not found`);
+  if (resource.spaceId !== expectedSpaceId) {
+    throw new HttpError(403, `${kind} belongs to a different space`);
+  }
+}
+
+function readAgentCredentialsIfPresent(
+  req: IncomingMessage
+): { computerId: string; agentId: string; token: string } | null {
+  const header = req.headers["x-iteam-agent-connection"];
+  const raw = Array.isArray(header) ? header[0] : header;
+  if (!raw) return null;
+  const firstColon = raw.indexOf(":");
+  const secondColon = raw.indexOf(":", firstColon + 1);
+  if (firstColon <= 0 || secondColon <= firstColon + 1) {
+    throw new HttpError(
+      401,
+      "X-Iteam-Agent-Connection format must be <computerId>:<agentId>:<token>"
+    );
+  }
+  return {
+    computerId: raw.slice(0, firstColon),
+    agentId: raw.slice(firstColon + 1, secondColon),
+    token: raw.slice(secondColon + 1)
+  };
 }

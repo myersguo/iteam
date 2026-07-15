@@ -87,6 +87,15 @@ function handle(message) {
 
 function emitUpdates(sessionId, promptText, promptCount) {
   const base = { sessionId };
+  const probeIndex = process.argv.indexOf("--runtime-cwd-probe");
+  const profileArgCwd = probeIndex >= 0 ? process.argv[probeIndex + 1] || "" : "";
+  notify("session/update", {
+    ...base,
+    update: {
+      sessionUpdate: "agent_message_chunk",
+      content: [{ type: "text", text: `preamble:${sessionId}:${promptCount}` }]
+    }
+  });
   notify("session/update", {
     ...base,
     update: {
@@ -123,7 +132,10 @@ function emitUpdates(sessionId, promptText, promptCount) {
     ...base,
     update: {
       sessionUpdate: "agent_message_chunk",
-      content: [{ type: "text", text: `reply:${sessionId}:${promptCount}:${promptText}` }]
+      content: [{
+        type: "text",
+        text: `reply:${sessionId}:${promptCount}:${process.cwd()}:${process.env.PWD}:${process.env.ITEAM_RUNTIME_CWD}:${process.env.PROFILE_RUNTIME_CWD || ""}:${profileArgCwd}:${promptText}`
+      }]
     }
   });
 }

@@ -93,27 +93,16 @@ export class CodexDriver implements AgentDriver {
   }
 
   private async doStart(agent: Agent, processIndex: number): Promise<void> {
-    const poolAgent = { ...agent };
-    const path = await import("node:path");
-    const lib = await import("../lib.js");
-    const baseLocalDir = path.join(lib.defaultHome(), "agents", agent.id);
-    const baseRequestedDir = agent.workspacePath || baseLocalDir;
-    poolAgent.workspacePath = `${baseRequestedDir}-pool-${processIndex}`;
-
     const workspace = prepareAgentWorkspace({
-      agent: poolAgent,
+      agent,
       serverUrl: this.serverUrl,
       launchId: this.launchId,
+      stateSuffix: `-pool-${processIndex}`,
       computerId: this.computerId,
       connectToken: this.connectToken
     });
 
-    // Restore the original agent ID in bridgeArgs so the chat bridge authenticates correctly
-    workspace.bridgeArgs = workspace.bridgeArgs.map(arg =>
-      arg === poolAgent.id ? agent.id : arg
-    );
-
-    const cwd = workspace.dir;
+    const cwd = workspace.runtimeCwd;
     const child = spawn("codex", [
       "app-server",
       "--listen", "stdio://",

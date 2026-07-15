@@ -149,7 +149,7 @@ iteam message read '#all'
 
 ```text
 iteam daemon start [--port 4318]
-iteam daemon connect --server-url <url> --connect-token <token> [--space-id <id>] [--name <hostname>]
+iteam daemon connect --server-url <url> --connect-token <token> [--space-id <id>] [--runtime-cwd <path>] [--name <hostname>]
 iteam daemon status
 iteam web
 
@@ -272,6 +272,19 @@ npm run cli -- ...   # iteam CLI via tsx
 npm run typecheck    # TypeScript type checking
 npm run build        # build web + CLI bundles
 npm run smoke        # end-to-end smoke test
+```
+
+By default, every agent runs inside its own persisted `workspacePath`, while
+pool workers keep their private runtime state in sibling `-pool-N` directories.
+Use `--runtime-cwd` only when every agent on one computer should share an
+explicit override:
+
+```bash
+iteam daemon connect \
+  --server-url http://server:4318 \
+  --connect-token connect_xxx \
+  --space-id space_xxx \
+  --runtime-cwd /path/to/working-directory
 ```
 
 ## Deployment notes

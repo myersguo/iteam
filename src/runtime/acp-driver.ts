@@ -10,6 +10,8 @@
 // Wire details follow the ACP spec at https://agentclientprotocol.com/.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { nowIso } from "../lib.js";
 import { agentEnv, prepareAgentWorkspace, type AgentWorkspaceLayout } from "../workspace.js";
 import type { Agent, DeliveryWithContext } from "../types.js";
@@ -161,33 +163,30 @@ export class AcpDriver implements AgentDriver {
   }
 
   private async doStart(agent: Agent, processIndex: number): Promise<void> {
-    const poolAgent = { ...agent };
-    const path = await import("node:path");
-    const lib = await import("../lib.js");
-    const baseLocalDir = path.join(lib.defaultHome(), "agents", agent.id);
-    const baseRequestedDir = agent.workspacePath || baseLocalDir;
-    poolAgent.workspacePath = `${baseRequestedDir}-pool-${processIndex}`;
-
     const workspace = prepareAgentWorkspace({
-      agent: poolAgent,
+      agent,
       serverUrl: this.serverUrl,
       launchId: this.launchId,
+      stateSuffix: `-pool-${processIndex}`,
       computerId: this.computerId,
       connectToken: this.connectToken
     });
     
-    // Restore the original agent ID in bridgeArgs so the chat bridge authenticates correctly
-    workspace.bridgeArgs = workspace.bridgeArgs.map(arg => 
-      arg === poolAgent.id ? agent.id : arg
-    );
-    
-    const cwd = workspace.dir;
-    const spec = buildAcpSpec(agent, workspace);
+    const profile = resolveAcpRuntimeProfile(agent.runtime);
+    if (!profile) {
+      throw new Error(`acp driver does not support runtime: ${agent.runtime}`);
+    }
+    const initialParams = { agent, workspace, timeoutMs: TURN_IDLE_TIMEOUT_MS };
+    const cwd = resolveEffectiveCwd(renderAcpProfileCwd(profile, initialParams), workspace.runtimeCwd);
+    workspace.runtimeCwd = cwd;
+    const spec = buildAcpSpec(agent, workspace, profile);
     const child = spawn(spec.command, spec.args, {
-      cwd: spec.cwd || cwd,
+      cwd,
       env: {
         ...agentEnv({ agent, serverUrl: this.serverUrl, workspace }),
-        ...(spec.env || {})
+        ...(spec.env || {}),
+        ITEAM_RUNTIME_CWD: cwd,
+        PWD: cwd
       },
       stdio: ["pipe", "pipe", "pipe"]
     }) as ChildProcessWithoutNullStreams;
@@ -468,7 +467,7 @@ export class AcpDriver implements AgentDriver {
     let sessionResult: { sessionId: string };
     try {
       sessionResult = await processState.rpc.request<{ sessionId: string }>("session/new", {
-        cwd: processState.workspace.dir,
+        cwd: processState.workspace.runtimeCwd,
         mcpServers: buildMcpServers(processState.workspace)
       });
     } finally {
@@ -537,9 +536,12 @@ export class AcpDriver implements AgentDriver {
     const { sessionId } = sessionState;
     const accumulator: string[] = [];
     const offEvent = this.on(event => {
-      if (event.type !== "message_chunk") return;
       if (event.sessionId && event.sessionId !== sessionId) return;
-      if (event.text) accumulator.push(event.text);
+      if (event.type === "tool_call") {
+        accumulator.length = 0;
+        return;
+      }
+      if (event.type === "message_chunk" && event.text) accumulator.push(event.text);
     });
 
     const MAX_PROMPT_BYTES = 64000;
@@ -742,22 +744,26 @@ export class AcpDriver implements AgentDriver {
   }
 }
 
-function buildAcpSpec(agent: Agent, workspace: AgentWorkspaceLayout): AcpRuntimeSpec {
-  const profile = resolveAcpRuntimeProfile(agent.runtime);
-  if (profile) {
-    const params = { agent, workspace, timeoutMs: TURN_IDLE_TIMEOUT_MS };
-    return {
-      command: profile.command,
-      args: renderAcpProfileArgs(profile, params),
-      cwd: renderAcpProfileCwd(profile, params),
-      env: renderAcpProfileEnv(profile, params)
-    };
+function buildAcpSpec(
+  agent: Agent,
+  workspace: AgentWorkspaceLayout,
+  profile = resolveAcpRuntimeProfile(agent.runtime)
+): AcpRuntimeSpec {
+  if (!profile) throw new Error(`acp driver does not support runtime: ${agent.runtime}`);
+  const params = { agent, workspace, timeoutMs: TURN_IDLE_TIMEOUT_MS };
+  return {
+    command: profile.command,
+    args: renderAcpProfileArgs(profile, params),
+    env: renderAcpProfileEnv(profile, params)
+  };
+}
+
+function resolveEffectiveCwd(profileCwd: string | undefined, fallback: string): string {
+  const candidate = resolve(profileCwd || fallback);
+  if (!existsSync(candidate) || !statSync(candidate).isDirectory()) {
+    throw new Error(`ACP runtime profile cwd must be an existing directory: ${candidate}`);
   }
-  // Codex's `app-server` speaks a proprietary dialect (Initialize/TurnStart/
-  // AgentMessageDelta), not ACP — see `codex app-server generate-json-schema`.
-  // Claude has its own stream-json wire format and lives in ClaudeDriver.
-  // Other ACP runtimes can be configured with ITEAM_ACP_RUNTIMES.
-  throw new Error(`acp driver does not support runtime: ${agent.runtime}`);
+  return candidate;
 }
 
 interface AcpMcpServer {
@@ -773,7 +779,8 @@ function buildMcpServers(workspace: AgentWorkspaceLayout): AcpMcpServer[] {
       name: "chat",
       command: workspace.bridgeCommand,
       args: workspace.bridgeArgs,
-      env: []
+      env: Object.entries(workspace.runtimeAuthEnv)
+        .map(([name, value]) => ({ name, value }))
     }
   ];
 }

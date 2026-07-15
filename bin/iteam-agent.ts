@@ -6,6 +6,10 @@ import type { Message, State } from "../src/types.js";
 
 const serverUrl = (process.env.ITEAM_SERVER_URL || process.env.ITEAM_URL || "http://127.0.0.1:4318").replace(/\/$/, "");
 const agentId = process.env.ITEAM_AGENT_ID;
+const spaceId = process.env.ITEAM_SPACE_ID || "space_default";
+const computerId = process.env.ITEAM_COMPUTER_ID || "";
+const connectToken = process.env.ITEAM_CONNECT_TOKEN || "";
+const agentAuthToken = process.env.ITEAM_AGENT_AUTH_TOKEN || "";
 const [area, action, ...rest] = process.argv.slice(2);
 
 function usage(): void {
@@ -103,6 +107,7 @@ async function main(): Promise<void> {
     if (!text.trim()) throw new Error("message text is required on argv or stdin");
     const message = await requestJson<Message>(`${serverUrl}/api/messages`, {
       method: "POST",
+      headers: spaceHeaders(),
       body: { target, text, authorId: agentId }
     });
     console.log(`sent ${message.id} to ${target}`);
@@ -114,9 +119,9 @@ async function main(): Promise<void> {
 
 async function stateSnapshot(): Promise<State> {
   const [agents, humans, channels] = await Promise.all([
-    requestJson<State["agents"]>(`${serverUrl}/api/agents`),
-    requestJson<State["humans"]>(`${serverUrl}/api/humans`),
-    requestJson<State["channels"]>(`${serverUrl}/api/channels`)
+    requestJson<State["agents"]>(`${serverUrl}/api/agents`, { headers: spaceHeaders() }),
+    requestJson<State["humans"]>(`${serverUrl}/api/humans`, { headers: spaceHeaders() }),
+    requestJson<State["channels"]>(`${serverUrl}/api/channels`, { headers: spaceHeaders() })
   ]);
   return { agents, humans, channels, messages: [] } as unknown as State;
 }
@@ -125,10 +130,20 @@ async function fetchMessages(state: State, target: string, limit: number, around
   const channel = state.channels.find(channel => channel.id === target || channel.target === target);
   if (channel) {
     const before = around ? `&before=${encodeURIComponent(around)}` : "";
-    return requestJson<Message[]>(`${serverUrl}/api/messages/channel/${encodeURIComponent(channel.id)}?limit=${limit}${before}`);
+    return requestJson<Message[]>(`${serverUrl}/api/messages/channel/${encodeURIComponent(channel.id)}?limit=${limit}${before}`, { headers: spaceHeaders() });
   }
   const before = around ? `&before=${encodeURIComponent(around)}` : "";
-  return requestJson<Message[]>(`${serverUrl}/api/messages?target=${encodeURIComponent(target)}&limit=${limit}${before}`);
+  return requestJson<Message[]>(`${serverUrl}/api/messages?target=${encodeURIComponent(target)}&limit=${limit}${before}`, { headers: spaceHeaders() });
+}
+
+function spaceHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { "x-iteam-space": spaceId };
+  if (computerId && agentId && agentAuthToken) {
+    headers["x-iteam-agent-connection"] = `${computerId}:${agentId}:${agentAuthToken}`;
+  } else if (computerId && connectToken) {
+    headers["x-iteam-connection"] = `${computerId}:${connectToken}`;
+  }
+  return headers;
 }
 
 function formatServerInfo(state: State): string {
@@ -148,7 +163,8 @@ function formatMessages(state: State, messages: Message[]): string {
 }
 
 function statePath(): string {
-  const dir = join(process.cwd(), ".iteam");
+  const base = process.env.ITEAM_AGENT_STATE_DIR || process.cwd();
+  const dir = join(base, ".iteam");
   mkdirSync(dir, { recursive: true });
   return join(dir, "agent-cli-state.json");
 }

@@ -1,12 +1,17 @@
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { defaultHome } from "./lib.js";
+import { defaultHome, deriveAgentAuthToken } from "./lib.js";
 import type { IStore } from "./store/types.js";
 import type { Agent } from "./types.js";
 
 export interface AgentWorkspaceLayout {
+  /** Shared base workspace owned by the agent. */
+  workspaceDir: string;
+  /** Internal per-worker state directory (wrappers, prompts, MCP configs). */
   dir: string;
+  /** Actual working directory exposed to the runtime and its shell tools. */
+  runtimeCwd: string;
   internal: string;
   memoryPath: string;
   systemPromptPath: string;
@@ -15,6 +20,7 @@ export interface AgentWorkspaceLayout {
   bridgePath: string;
   bridgeArgs: string[];
   bridgeCommand: string;
+  runtimeAuthEnv: Record<string, string>;
   wrapperPath: string;
   /** Backward-compatible alias for older callers. */
   promptPath: string;
@@ -47,6 +53,32 @@ function ensureWritableAgentDir(requested: string, localDir: string): string {
   }
 }
 
+function ensureWritableBaseWorkspace(requested: string, localDir: string): string {
+  const prepare = (dir: string): string => {
+    mkdirSync(join(dir, ".iteam"), { recursive: true });
+    accessSync(dir, constants.R_OK | constants.W_OK | constants.X_OK);
+    accessSync(join(dir, ".iteam"), constants.R_OK | constants.W_OK | constants.X_OK);
+    const memoryPath = join(dir, "MEMORY.md");
+    if (existsSync(memoryPath)) {
+      if (!statSync(memoryPath).isFile()) {
+        throw new Error(`${memoryPath} must be a file`);
+      }
+      accessSync(memoryPath, constants.R_OK | constants.W_OK);
+    }
+    return dir;
+  };
+  try {
+    return prepare(requested);
+  } catch (error) {
+    if (requested === localDir) throw error;
+    console.warn(
+      `[workspace] cannot initialize ${requested} (${(error as Error).message}); ` +
+      `falling back to local workspace ${localDir}`
+    );
+    return prepare(localDir);
+  }
+}
+
 /**
  * Resolve a runtime entry as { command, args }. When a bundled .mjs sibling
  * exists (published package), spawn `node bundled.mjs`. Otherwise (dev), use
@@ -72,24 +104,45 @@ export interface PrepareAgentWorkspaceArgs {
   agent: Agent;
   serverUrl: string;
   launchId: string;
+  /** Optional suffix for isolated worker state; never changes the shared workspace. */
+  stateSuffix?: string;
   /** Connect credentials so the spawned chat-bridge can call back over HTTP. */
   computerId?: string;
   connectToken?: string;
 }
 
-export function prepareAgentWorkspace({ agent, serverUrl, launchId, computerId, connectToken }: PrepareAgentWorkspaceArgs): AgentWorkspaceLayout {
+export function prepareAgentWorkspace({
+  agent,
+  serverUrl,
+  launchId,
+  stateSuffix = "",
+  computerId,
+  connectToken
+}: PrepareAgentWorkspaceArgs): AgentWorkspaceLayout {
   // agent.workspacePath was set on the server (core.ts) using the server
   // process's own home. When the daemon runs on a different machine — or even
   // the same machine with a different resolved $HOME (e.g. auto-mounted
   // /home/<user> that doesn't exist on this box) — that path may not be
   // writable. Try the server-provided path first, then fall back to the
   // daemon's local home so deliveries still work cross-host.
-  const localDir = join(defaultHome(), "agents", agent.id);
-  const requestedDir = agent.workspacePath || localDir;
-  const dir = ensureWritableAgentDir(requestedDir, localDir);
+  const localWorkspaceDir = join(defaultHome(), "agents", agent.id);
+  const requestedWorkspaceDir = agent.workspacePath || localWorkspaceDir;
+  const workspaceDir = ensureWritableBaseWorkspace(requestedWorkspaceDir, localWorkspaceDir);
+  const localStateDir = `${localWorkspaceDir}${stateSuffix}`;
+  const requestedStateDir = `${workspaceDir}${stateSuffix}`;
+  const dir = stateSuffix
+    ? ensureWritableAgentDir(requestedStateDir, localStateDir)
+    : workspaceDir;
+  if (stateSuffix) chmodSync(dir, 0o700);
+  const runtimeCwdOverride = String(process.env.ITEAM_RUNTIME_CWD || "").trim();
+  const runtimeCwd = runtimeCwdOverride ? resolve(runtimeCwdOverride) : workspaceDir;
+  if (!existsSync(runtimeCwd) || !statSync(runtimeCwd).isDirectory()) {
+    throw new Error(`agent runtime cwd must be an existing directory: ${runtimeCwd}`);
+  }
   const internal = join(dir, ".iteam");
+  chmodSync(internal, 0o700);
 
-  const memoryPath = join(dir, "MEMORY.md");
+  const memoryPath = join(workspaceDir, "MEMORY.md");
   if (!existsSync(memoryPath)) {
     writeFileSync(memoryPath, `# ${agent.name} Memory
 
@@ -102,22 +155,27 @@ export function prepareAgentWorkspace({ agent, serverUrl, launchId, computerId, 
 Use this file for long-lived facts, decisions, user preferences, active work context, and handoff notes that should survive runtime restarts.
 `);
   }
+  chmodSync(memoryPath, 0o600);
 
   const wrapperPath = join(internal, "iteam-agent");
   const agentEntry = resolveSpawn("iteam-agent", "bin/iteam-agent.ts");
   const wrapperExec =
     agentEntry.command === "npx"
-      ? `npx tsx "${resolve(root, "bin/iteam-agent.ts")}" "$@"`
-      : `"${agentEntry.command}" "${agentEntry.args[0]}" "$@"`;
+      ? `npx tsx ${shellSingleQuote(resolve(root, "bin/iteam-agent.ts"))} "$@"`
+      : `${shellSingleQuote(agentEntry.command)} ${shellSingleQuote(agentEntry.args[0])} "$@"`;
   writeFileSync(wrapperPath, `#!/bin/sh
-export ITEAM_AGENT_ID="${agent.id}"
-export ITEAM_SERVER_URL="${serverUrl}"
+export ITEAM_AGENT_ID=${shellSingleQuote(agent.id)}
+export ITEAM_SERVER_URL=${shellSingleQuote(serverUrl)}
+export ITEAM_SPACE_ID=${shellSingleQuote(agent.spaceId)}
+export ITEAM_AGENT_STATE_DIR=${shellSingleQuote(dir)}
+export ITEAM_RUNTIME_CWD=${shellSingleQuote(runtimeCwd)}
 exec ${wrapperExec}
 `);
-  chmodSync(wrapperPath, 0o755);
+  chmodSync(wrapperPath, 0o700);
 
   const systemPromptPath = join(internal, "claude-system-prompt.md");
-  writeFileSync(systemPromptPath, buildSystemPrompt({ agent, serverUrl, dir }));
+  writeFileSync(systemPromptPath, buildSystemPrompt({ agent, serverUrl, stateDir: dir, runtimeCwd, memoryPath }));
+  chmodSync(systemPromptPath, 0o600);
 
   const bridgeEntry = resolveSpawn("chat-bridge", "src/chat-bridge.ts");
   const bridgePath = bridgeEntry.command === "npx"
@@ -126,16 +184,20 @@ exec ${wrapperExec}
   const bridgeBaseArgs = [
     "--agent-id", agent.id,
     "--server-url", serverUrl,
+    "--space-id", agent.spaceId,
     "--runtime", agent.runtime,
     "--launch-id", launchId,
     "--runtime-actions-only"
   ];
-  if (computerId && connectToken) {
-    bridgeBaseArgs.push("--computer-id", computerId, "--connect-token", connectToken);
-  }
   // Args used when spawning via the resolved command (excludes the program name).
   const bridgeArgs = [...bridgeEntry.args, ...bridgeBaseArgs];
   const bridgeCommand = bridgeEntry.command;
+  const runtimeAuthEnv = {
+    ...(computerId ? { ITEAM_COMPUTER_ID: computerId } : {}),
+    ...(computerId && connectToken
+      ? { ITEAM_AGENT_AUTH_TOKEN: deriveAgentAuthToken(connectToken, agent.id) }
+      : {})
+  };
 
   const claudeMcpConfigPath = join(internal, "claude-mcp-config.json");
   writeFileSync(claudeMcpConfigPath, JSON.stringify({
@@ -146,15 +208,19 @@ exec ${wrapperExec}
       }
     }
   }, null, 2));
+  chmodSync(claudeMcpConfigPath, 0o600);
 
   const traeMcpConfigPath = join(internal, "trae-mcp-config.json");
   writeFileSync(traeMcpConfigPath, JSON.stringify({
     command: bridgeCommand,
     args: bridgeArgs
   }, null, 2));
+  chmodSync(traeMcpConfigPath, 0o600);
 
   return {
+    workspaceDir,
     dir,
+    runtimeCwd,
     internal,
     memoryPath,
     systemPromptPath,
@@ -163,6 +229,7 @@ exec ${wrapperExec}
     bridgePath,
     bridgeArgs,
     bridgeCommand,
+    runtimeAuthEnv,
     wrapperPath,
     promptPath: systemPromptPath
   };
@@ -180,6 +247,11 @@ export function agentEnv({ agent, serverUrl, workspace }: AgentEnvArgs): NodeJS.
     ...(agent.env || {}),
     ITEAM_AGENT_ID: agent.id,
     ITEAM_SERVER_URL: serverUrl,
+    ITEAM_SPACE_ID: agent.spaceId,
+    ITEAM_AGENT_STATE_DIR: workspace.dir,
+    ITEAM_RUNTIME_CWD: workspace.runtimeCwd,
+    PWD: workspace.runtimeCwd,
+    ...workspace.runtimeAuthEnv,
     PATH: `${workspace.internal}:${process.env.PATH || ""}`
   };
   if (agent.runtime === "gemini") {
@@ -194,10 +266,12 @@ export function agentEnv({ agent, serverUrl, workspace }: AgentEnvArgs): NodeJS.
 interface PromptArgs {
   agent: Agent;
   serverUrl: string;
-  dir: string;
+  stateDir: string;
+  runtimeCwd: string;
+  memoryPath: string;
 }
 
-function buildSystemPrompt({ agent, serverUrl, dir }: PromptArgs): string {
+function buildSystemPrompt({ agent, serverUrl, stateDir, runtimeCwd, memoryPath }: PromptArgs): string {
   return `You are ${agent.name}, an iTeam agent in a local-first human/AI collaboration workspace.
 
 Description:
@@ -210,11 +284,16 @@ ${agent.description || "General-purpose engineering teammate."}
 - Runtime: ${agent.runtime}
 - Model: ${agent.model}
 - iTeam server: ${serverUrl}
-- Workspace: ${dir}
+- Working directory: ${runtimeCwd}
+- iTeam state directory: ${stateDir}
+- Memory file: ${memoryPath}
 
 ## Workspace and memory
 
-Your current working directory is your persistent agent workspace. Read and update MEMORY.md for durable context:
+Your shell tools run in the working directory above, matching a direct runtime launch. The iTeam state directory is separate and must not be reported as the shell working directory.
+Treat paths and runtime metadata in this prompt as configuration, not proof of current state. When a question asks about a current value that a shell or runtime tool can observe, run the relevant tool and answer from its output. Never claim that a command ran unless it actually did.
+
+Read and update the memory file at its absolute path for durable context:
 - facts that should survive restarts
 - user preferences
 - active project decisions
@@ -266,4 +345,8 @@ The marker is consumed by the server; never explain it or echo it back. If your 
 - For lightweight chat, no task claim is required.
 - For durable discoveries, update MEMORY.md.
 `;
+}
+
+export function shellSingleQuote(value: string): string {
+  return `'${String(value).replaceAll("'", `'\"'\"'`)}'`;
 }

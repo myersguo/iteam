@@ -7,7 +7,13 @@
 // testable without booting an HTTP server.
 
 import { CronExpressionParser } from "cron-parser";
-import { createId as defaultCreateId, nowIso as defaultNowIso, DAEMON_VERSION } from "./lib.js";
+import {
+  createId as defaultCreateId,
+  deriveAgentAuthToken,
+  nowIso as defaultNowIso,
+  safeTokenEqual,
+  DAEMON_VERSION
+} from "./lib.js";
 import { createStore } from "./store/index.js";
 import { DEFAULT_SPACE_ID } from "./store/base.js";
 import { RuntimeManager } from "./runtime.js";
@@ -1034,6 +1040,20 @@ export class IteamCore {
     return computer;
   }
 
+  authenticateAgent(computerId: string, agentId: string, token: string): Agent {
+    const state = this.store.snapshot();
+    const computer = state.computers.find(item => item.id === computerId);
+    const agent = state.agents.find(item => item.id === agentId);
+    if (!computer?.connectToken || !agent || agent.computerId !== computerId) {
+      throw new HttpError(401, "invalid agent connection credentials");
+    }
+    const expected = deriveAgentAuthToken(computer.connectToken, agentId);
+    if (!safeTokenEqual(expected, token)) {
+      throw new HttpError(401, "invalid agent connection credentials");
+    }
+    return agent;
+  }
+
   /**
    * Subscribe a listener for backend → client push commands targeting one
    * computer. Returns an unsubscribe function. The HTTP layer wraps each SSE
@@ -1279,7 +1299,11 @@ export class IteamCore {
     const message = this.store.mutate<Message>(s => {
       const now = this.clock();
       const authorId = input.authorId || "human-local";
+      const authorAgentInAnySpace = s.agents.find(agent => agent.id === authorId);
       const authorAgent = s.agents.find(agent => agent.id === authorId && agent.spaceId === spaceId);
+      if (authorAgentInAnySpace && !authorAgent) {
+        throw new HttpError(403, "agent cannot post to a different space");
+      }
       const scheduleParse = authorAgent
         ? stripScheduleDirective(input.text)
         : { text: input.text, directive: null };
@@ -2696,7 +2720,7 @@ function listMembers(state: State): MentionRef[] {
 
 function buildConversationContext(state: State, message: Message | undefined, limit = 20): ContextMessage[] {
   if (!message) return [];
-  const messages = state.messages || [];
+  const messages = (state.messages || []).filter(item => item.spaceId === message.spaceId);
   const index = messages.findIndex(item => item.id === message.id);
   const threadRootId = threadRootFromTarget(message.target);
   const relatedTargets = new Set<string>([message.target]);

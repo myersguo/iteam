@@ -1,14 +1,19 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
+import { existsSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { requestJson } from "./http-client.js";
 import { DAEMON_VERSION, localComputerFingerprint, nowIso } from "./lib.js";
 import { detectRuntimes } from "./runtimes.js";
 import { AgentLauncher } from "./agent-launcher.js";
+import { legacyIteamMcpServerNames, type ConfiguredMcpServer } from "./legacy-traex-mcp.js";
 import type { Agent, ConnectComputerResult, DeliveryWithContext } from "./types.js";
 
 const serverUrl = readArg("--server-url", process.env.ITEAM_SERVER_URL);
 const cliConnectToken = readArg("--connect-token", process.env.ITEAM_CONNECT_TOKEN);
 const expectedSpaceId = readArg("--space-id", process.env.ITEAM_SPACE_ID) || undefined;
+const configuredRuntimeCwd = readArg("--runtime-cwd", process.env.ITEAM_RUNTIME_CWD);
+const runtimeCwd = configuredRuntimeCwd ? resolve(configuredRuntimeCwd) : undefined;
 const name = readArg("--name", localComputerFingerprint().hostname) || localComputerFingerprint().hostname;
 const intervalMs = Number(readArg("--interval-ms", "5000"));
 const taskProgressIntervalMs = readPositiveMs(
@@ -24,6 +29,11 @@ if (!cliConnectToken) {
   printUsage("--connect-token is required (token is the computer's permanent identity)");
   process.exit(1);
 }
+if (runtimeCwd && (!existsSync(runtimeCwd) || !statSync(runtimeCwd).isDirectory())) {
+  printUsage(`--runtime-cwd must be an existing directory: ${runtimeCwd}`);
+  process.exit(1);
+}
+if (runtimeCwd) process.env.ITEAM_RUNTIME_CWD = runtimeCwd;
 
 const baseUrl = serverUrl.replace(/\/$/, "");
 
@@ -42,6 +52,10 @@ const baseUrl = serverUrl.replace(/\/$/, "");
  */
 const connectToken: string = cliConnectToken;
 let computerId: string | undefined;
+console.log(
+  `[${nowIso()}] agent runtime working directory ${runtimeCwd || "(per-agent workspace)"}; ` +
+  `expected space ${expectedSpaceId || "(from invite)"}`
+);
 
 const launcher = new AgentLauncher({
   serverUrl: baseUrl,
@@ -50,6 +64,8 @@ const launcher = new AgentLauncher({
   reportDeliveryRuntimeState,
   getCredentials: () => ({ computerId, connectToken })
 });
+
+cleanupLegacyTraexMcpServers();
 
 /**
  * Watchdog state. zouk-daemon tracks lastHeartbeatAt and force-resets the
@@ -431,6 +447,46 @@ function findPeerDaemonPids(): PeerProcess[] {
   }
 }
 
+function cleanupLegacyTraexMcpServers(): void {
+  for (const command of ["traex", "traecli"]) {
+    try {
+      const raw = execFileSync(command, ["mcp", "list", "--json"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 10_000
+      });
+      const parsed = JSON.parse(raw) as ConfiguredMcpServer[];
+      const names = legacyIteamMcpServerNames(parsed);
+      for (const name of names) {
+        execFileSync(command, ["mcp", "remove", name], {
+          encoding: "utf8",
+          stdio: ["ignore", "ignore", "ignore"],
+          timeout: 10_000
+        });
+        console.log(`[${nowIso()}] removed legacy global Traex MCP server ${name}`);
+      }
+      if (names.length > 0) {
+        const verifyRaw = execFileSync(command, ["mcp", "list", "--json"], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+          timeout: 10_000
+        });
+        const remaining = legacyIteamMcpServerNames(
+          JSON.parse(verifyRaw) as ConfiguredMcpServer[]
+        );
+        if (remaining.length > 0) {
+          throw new Error(`legacy MCP servers remain: ${remaining.join(", ")}`);
+        }
+      }
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") continue;
+      throw new Error(`legacy Traex MCP cleanup failed: ${(error as Error).message}`);
+    }
+  }
+}
+
 // (credential persistence removed: token is the permanent identity passed
 // via --connect-token on every launch; storage of truth is the server.)
 
@@ -611,9 +667,9 @@ function printUsage(reason: string): void {
   console.error(`agent-daemon: ${reason}`);
   console.error("");
   console.error("Usage:");
-  console.error("  iteam agent-daemon --server-url <url> --connect-token <token> [--space-id <id>] [--name <hostname>] [--interval-ms <ms>] [--task-progress-interval-ms <ms>]");
+  console.error("  iteam agent-daemon --server-url <url> --connect-token <token> [--space-id <id>] [--runtime-cwd <path>] [--name <hostname>] [--interval-ms <ms>] [--task-progress-interval-ms <ms>]");
   console.error("");
-  console.error("Environment fallbacks: ITEAM_SERVER_URL, ITEAM_CONNECT_TOKEN, ITEAM_SPACE_ID, ITEAM_TASK_PROGRESS_INTERVAL_MS");
+  console.error("Environment fallbacks: ITEAM_SERVER_URL, ITEAM_CONNECT_TOKEN, ITEAM_SPACE_ID, ITEAM_RUNTIME_CWD, ITEAM_TASK_PROGRESS_INTERVAL_MS");
   console.error("");
   console.error("--connect-token is the computer's permanent identity. The server issues");
   console.error("it once when you generate an invite, binds it to a brand-new computer on");
@@ -623,6 +679,9 @@ function printUsage(reason: string): void {
   console.error("--space-id is optional. The invite already carries the space; this flag");
   console.error("is only used to log the expected space id and warn on mismatch. It never");
   console.error("overrides the server's answer.");
+  console.error("");
+  console.error("--runtime-cwd optionally overrides the shell working directory for every agent");
+  console.error("launched by this daemon. Without it, each agent uses its own workspacePath.");
   console.error("");
   console.error("To obtain a token, ask the server for an invite:");
   console.error("  curl -X POST <server-url>/api/computers/connect-command \\");

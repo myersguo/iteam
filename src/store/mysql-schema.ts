@@ -11,6 +11,13 @@
  */
 export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
   {
+    name: "iteam_schema_migrations",
+    ddl: `CREATE TABLE IF NOT EXISTS iteam_schema_migrations (
+      name       VARCHAR(128) NOT NULL PRIMARY KEY,
+      applied_at VARCHAR(40)  NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+  },
+  {
     name: "iteam_spaces",
     ddl: `CREATE TABLE IF NOT EXISTS iteam_spaces (
       id          VARCHAR(64)  NOT NULL PRIMARY KEY,
@@ -101,13 +108,14 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
     name: "iteam_channels",
     ddl: `CREATE TABLE IF NOT EXISTS iteam_channels (
       id                VARCHAR(64)  NOT NULL PRIMARY KEY,
+      space_id          VARCHAR(64)  NOT NULL DEFAULT 'space_default',
       name              VARCHAR(255) NOT NULL,
       target            VARCHAR(255) NOT NULL,
       kind              VARCHAR(32)  NOT NULL,
       description       TEXT,
       default_agent_id  VARCHAR(64)  DEFAULT NULL,
       created_at        VARCHAR(40)  NOT NULL,
-      UNIQUE KEY uniq_target (target)
+      UNIQUE KEY uniq_space_target (space_id, target)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
   },
   {
@@ -123,6 +131,7 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
     name: "iteam_messages",
     ddl: `CREATE TABLE IF NOT EXISTS iteam_messages (
       id         VARCHAR(64)  NOT NULL PRIMARY KEY,
+      space_id   VARCHAR(64)  NOT NULL DEFAULT 'space_default',
       target     VARCHAR(255) NOT NULL,
       author_id  VARCHAR(64)  NOT NULL,
       type       VARCHAR(32)  NOT NULL,
@@ -141,6 +150,7 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
     name: "iteam_tasks",
     ddl: `CREATE TABLE IF NOT EXISTS iteam_tasks (
       id            VARCHAR(64)  NOT NULL PRIMARY KEY,
+      space_id      VARCHAR(64)  NOT NULL DEFAULT 'space_default',
       number        INT          NOT NULL,
       target        VARCHAR(255) NOT NULL,
       title         VARCHAR(512) NOT NULL,
@@ -161,6 +171,7 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
     name: "iteam_scheduled_tasks",
     ddl: `CREATE TABLE IF NOT EXISTS iteam_scheduled_tasks (
       id              VARCHAR(64)  NOT NULL PRIMARY KEY,
+      space_id        VARCHAR(64)  NOT NULL DEFAULT 'space_default',
       target          VARCHAR(255) NOT NULL,
 	      agent_id        VARCHAR(64)  NOT NULL,
 	      prompt          TEXT         NOT NULL,
@@ -184,6 +195,7 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
     name: "iteam_deliveries",
     ddl: `CREATE TABLE IF NOT EXISTS iteam_deliveries (
       id                 VARCHAR(64)  NOT NULL PRIMARY KEY,
+      space_id           VARCHAR(64)  NOT NULL DEFAULT 'space_default',
       message_id         VARCHAR(64)  NOT NULL,
       root_message_id    VARCHAR(64)  NOT NULL,
       parent_delivery_id VARCHAR(64)  DEFAULT NULL,

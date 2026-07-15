@@ -98,6 +98,10 @@ export class SqliteStore extends BaseStore {
     this.addColumnIfMissing("iteam_computers", "space_id", "TEXT NOT NULL DEFAULT 'space_default'");
     this.addColumnIfMissing("iteam_pending_connections", "space_id", "TEXT NOT NULL DEFAULT 'space_default'");
     this.addColumnIfMissing("iteam_agents", "space_id", "TEXT NOT NULL DEFAULT 'space_default'");
+    this.addColumnIfMissing("iteam_messages", "space_id", "TEXT NOT NULL DEFAULT 'space_default'");
+    this.addColumnIfMissing("iteam_tasks", "space_id", "TEXT NOT NULL DEFAULT 'space_default'");
+    this.addColumnIfMissing("iteam_scheduled_tasks", "space_id", "TEXT NOT NULL DEFAULT 'space_default'");
+    this.addColumnIfMissing("iteam_deliveries", "space_id", "TEXT NOT NULL DEFAULT 'space_default'");
     this.addColumnIfMissing("iteam_scheduled_tasks", "cron_expression", "TEXT");
     this.addColumnIfMissing("iteam_scheduled_tasks", "timezone", "TEXT");
     this.addColumnIfMissing("iteam_scheduled_tasks", "session_key", "TEXT");
@@ -110,8 +114,222 @@ export class SqliteStore extends BaseStore {
     this.addColumnIfMissing("iteam_external_bot_configs", "last_connected_at", "TEXT");
     this.addColumnIfMissing("iteam_channels", "default_agent_id", "TEXT");
     this.addColumnIfMissing("iteam_channels", "space_id", "TEXT NOT NULL DEFAULT 'space_default'");
+    this.runSpaceBackfillMigration();
     this.migrateChannelsUniqueSpaceTarget();
     this.migrateAgentsModelNullable();
+  }
+
+  private runSpaceBackfillMigration(): void {
+    const migrationName = "space_backfill_v1";
+    const applied = this.db
+      .prepare("SELECT 1 FROM iteam_schema_migrations WHERE name = ?")
+      .get(migrationName);
+    if (applied) return;
+    const hasCandidates = this.db.prepare(`
+      SELECT 1
+      WHERE EXISTS (SELECT 1 FROM iteam_channels WHERE space_id = 'space_default')
+         OR EXISTS (SELECT 1 FROM iteam_messages WHERE space_id = 'space_default')
+         OR EXISTS (SELECT 1 FROM iteam_tasks WHERE space_id = 'space_default')
+         OR EXISTS (SELECT 1 FROM iteam_scheduled_tasks WHERE space_id = 'space_default')
+         OR EXISTS (SELECT 1 FROM iteam_deliveries WHERE space_id = 'space_default')
+    `).get();
+    if (!hasCandidates) return;
+    const migrate = this.db.transaction(() => {
+      this.backfillChannelSpaceIds();
+      this.backfillEntitySpaceIds();
+      this.db.prepare(
+        "INSERT INTO iteam_schema_migrations (name, applied_at) VALUES (?, ?)"
+      ).run(migrationName, new Date().toISOString());
+    });
+    migrate();
+  }
+
+  private backfillChannelSpaceIds(): void {
+    this.db.exec(`
+      UPDATE iteam_channels
+      SET space_id = COALESCE(
+        (
+          SELECT agent.space_id
+          FROM iteam_agents agent
+          WHERE agent.id = iteam_channels.default_agent_id
+        ),
+        (
+          SELECT MIN(agent.space_id)
+          FROM iteam_channel_members member
+          JOIN iteam_agents agent ON agent.id = member.member_id
+          WHERE member.channel_id = iteam_channels.id
+          HAVING COUNT(DISTINCT agent.space_id) = 1
+        ),
+        space_id
+      )
+      WHERE space_id = 'space_default'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM iteam_agents default_agent
+          JOIN iteam_channel_members member ON member.channel_id = iteam_channels.id
+          JOIN iteam_agents member_agent ON member_agent.id = member.member_id
+          WHERE default_agent.id = iteam_channels.default_agent_id
+            AND default_agent.space_id <> member_agent.space_id
+        )
+    `);
+  }
+
+  private backfillEntitySpaceIds(): void {
+    this.db.exec(`
+      UPDATE iteam_deliveries
+      SET space_id = COALESCE(
+        (SELECT agent.space_id FROM iteam_agents agent WHERE agent.id = iteam_deliveries.agent_id),
+        NULLIF(space_id, 'space_default'),
+        'space_default'
+      )
+      WHERE space_id = 'space_default'
+    `);
+    this.db.exec(`
+      UPDATE iteam_messages
+      SET space_id = CASE
+        WHEN (
+          SELECT COUNT(DISTINCT delivery.space_id)
+          FROM iteam_deliveries delivery
+          WHERE delivery.message_id = iteam_messages.id
+        ) > 1 THEN space_id
+        WHEN (
+          SELECT COUNT(DISTINCT channel.space_id)
+          FROM iteam_channels channel
+          WHERE channel.target = iteam_messages.target
+        ) > 1 THEN space_id
+        WHEN (
+          SELECT agent.space_id
+          FROM iteam_agents agent
+          WHERE agent.id = iteam_messages.author_id
+        ) IS NOT NULL
+        AND (
+          SELECT MIN(delivery.space_id)
+          FROM iteam_deliveries delivery
+          WHERE delivery.message_id = iteam_messages.id
+          HAVING COUNT(DISTINCT delivery.space_id) = 1
+        ) IS NOT NULL
+        AND (
+          SELECT agent.space_id
+          FROM iteam_agents agent
+          WHERE agent.id = iteam_messages.author_id
+        ) <> (
+          SELECT MIN(delivery.space_id)
+          FROM iteam_deliveries delivery
+          WHERE delivery.message_id = iteam_messages.id
+          HAVING COUNT(DISTINCT delivery.space_id) = 1
+        ) THEN space_id
+        WHEN (
+          SELECT agent.space_id
+          FROM iteam_agents agent
+          WHERE agent.id = iteam_messages.author_id
+        ) IS NOT NULL
+        AND (
+          SELECT MIN(channel.space_id)
+          FROM iteam_channels channel
+          WHERE channel.target = iteam_messages.target
+          HAVING COUNT(DISTINCT channel.space_id) = 1
+        ) IS NOT NULL
+        AND (
+          SELECT agent.space_id
+          FROM iteam_agents agent
+          WHERE agent.id = iteam_messages.author_id
+        ) <> (
+          SELECT MIN(channel.space_id)
+          FROM iteam_channels channel
+          WHERE channel.target = iteam_messages.target
+          HAVING COUNT(DISTINCT channel.space_id) = 1
+        ) THEN space_id
+        WHEN (
+          SELECT MIN(delivery.space_id)
+          FROM iteam_deliveries delivery
+          WHERE delivery.message_id = iteam_messages.id
+          HAVING COUNT(DISTINCT delivery.space_id) = 1
+        ) IS NOT NULL
+        AND (
+          SELECT MIN(channel.space_id)
+          FROM iteam_channels channel
+          WHERE channel.target = iteam_messages.target
+          HAVING COUNT(DISTINCT channel.space_id) = 1
+        ) IS NOT NULL
+        AND (
+          SELECT MIN(delivery.space_id)
+          FROM iteam_deliveries delivery
+          WHERE delivery.message_id = iteam_messages.id
+          HAVING COUNT(DISTINCT delivery.space_id) = 1
+        ) <> (
+          SELECT MIN(channel.space_id)
+          FROM iteam_channels channel
+          WHERE channel.target = iteam_messages.target
+          HAVING COUNT(DISTINCT channel.space_id) = 1
+        ) THEN space_id
+        ELSE COALESCE(
+          (SELECT agent.space_id FROM iteam_agents agent WHERE agent.id = iteam_messages.author_id),
+          (
+            SELECT MIN(delivery.space_id)
+            FROM iteam_deliveries delivery
+            WHERE delivery.message_id = iteam_messages.id
+            HAVING COUNT(DISTINCT delivery.space_id) = 1
+          ),
+          (
+            SELECT MIN(channel.space_id)
+            FROM iteam_channels channel
+            WHERE channel.target = iteam_messages.target
+            HAVING COUNT(DISTINCT channel.space_id) = 1
+          ),
+          space_id
+        )
+      END
+      WHERE space_id = 'space_default'
+    `);
+    this.db.exec(`
+      UPDATE iteam_messages
+      SET type = 'agent'
+      WHERE type = 'human'
+        AND EXISTS (
+          SELECT 1
+          FROM iteam_agents agent
+          WHERE agent.id = iteam_messages.author_id
+        )
+    `);
+    this.db.exec(`
+      UPDATE iteam_tasks
+      SET space_id = CASE
+        WHEN (
+          SELECT message.space_id
+          FROM iteam_messages message
+          WHERE message.id = iteam_tasks.message_id
+        ) IS NOT NULL
+        AND (
+          SELECT agent.space_id
+          FROM iteam_agents agent
+          WHERE agent.id = iteam_tasks.assignee_id
+        ) IS NOT NULL
+        AND (
+          SELECT message.space_id
+          FROM iteam_messages message
+          WHERE message.id = iteam_tasks.message_id
+        ) <> (
+          SELECT agent.space_id
+          FROM iteam_agents agent
+          WHERE agent.id = iteam_tasks.assignee_id
+        ) THEN space_id
+        ELSE COALESCE(
+          (SELECT message.space_id FROM iteam_messages message WHERE message.id = iteam_tasks.message_id),
+          (SELECT agent.space_id FROM iteam_agents agent WHERE agent.id = iteam_tasks.assignee_id),
+          space_id
+        )
+      END
+      WHERE space_id = 'space_default'
+    `);
+    this.db.exec(`
+      UPDATE iteam_scheduled_tasks
+      SET space_id = COALESCE(
+        (SELECT agent.space_id FROM iteam_agents agent WHERE agent.id = iteam_scheduled_tasks.agent_id),
+        NULLIF(space_id, 'space_default'),
+        'space_default'
+      )
+      WHERE space_id = 'space_default'
+    `);
   }
 
   // Legacy iteam_channels had UNIQUE(target). Multi-space channels need
@@ -336,6 +554,7 @@ export class SqliteStore extends BaseStore {
       .prepare("SELECT * FROM iteam_messages ORDER BY created_at ASC")
       .all() as Array<{
         id: string;
+        space_id: string | null;
         target: string;
         author_id: string;
         type: string;
@@ -350,6 +569,7 @@ export class SqliteStore extends BaseStore {
       .prepare("SELECT * FROM iteam_tasks ORDER BY number ASC")
       .all() as Array<{
         id: string;
+        space_id: string | null;
         number: number;
         target: string;
         title: string;
@@ -367,6 +587,7 @@ export class SqliteStore extends BaseStore {
       .prepare("SELECT * FROM iteam_deliveries ORDER BY created_at ASC")
       .all() as Array<{
         id: string;
+        space_id: string | null;
         message_id: string;
         root_message_id: string;
         parent_delivery_id: string | null;
@@ -388,6 +609,7 @@ export class SqliteStore extends BaseStore {
       .prepare("SELECT * FROM iteam_scheduled_tasks ORDER BY created_at ASC")
       .all() as Array<{
         id: string;
+        space_id: string | null;
         target: string;
         agent_id: string;
         prompt: string;
@@ -567,7 +789,7 @@ export class SqliteStore extends BaseStore {
 
     const messages: Message[] = messageRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       target: row.target,
       authorId: row.author_id,
       type: row.type,
@@ -580,7 +802,7 @@ export class SqliteStore extends BaseStore {
 
     const tasks: Task[] = taskRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       number: row.number,
       target: row.target,
       title: row.title,
@@ -596,7 +818,7 @@ export class SqliteStore extends BaseStore {
 
     const deliveries: Delivery[] = deliveryRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       messageId: row.message_id,
       rootMessageId: row.root_message_id,
       parentDeliveryId: row.parent_delivery_id,
@@ -616,7 +838,7 @@ export class SqliteStore extends BaseStore {
 
     const scheduledTasks: ScheduledTask[] = scheduledTaskRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       target: row.target,
       agentId: row.agent_id,
       prompt: row.prompt,
@@ -873,11 +1095,12 @@ export class SqliteStore extends BaseStore {
     this.db.exec("DELETE FROM iteam_messages");
     if (state.messages.length) {
       const stmt = this.db.prepare(
-        "INSERT INTO iteam_messages (id, target, author_id, type, text, mentions, created_at, thread_id, task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO iteam_messages (id, space_id, target, author_id, type, text, mentions, created_at, thread_id, task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       );
       for (const m of state.messages) {
         stmt.run(
           m.id,
+          m.spaceId || DEFAULT_SPACE_ID,
           m.target,
           m.authorId,
           m.type,
@@ -893,11 +1116,12 @@ export class SqliteStore extends BaseStore {
     this.db.exec("DELETE FROM iteam_tasks");
     if (state.tasks.length) {
       const stmt = this.db.prepare(
-        "INSERT INTO iteam_tasks (id, number, target, title, description, status, assignee_id, created_by, message_id, thread_target, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO iteam_tasks (id, space_id, number, target, title, description, status, assignee_id, created_by, message_id, thread_target, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       );
       for (const t of state.tasks) {
         stmt.run(
           t.id,
+          t.spaceId || DEFAULT_SPACE_ID,
           t.number,
           t.target,
           t.title,
@@ -916,11 +1140,12 @@ export class SqliteStore extends BaseStore {
     this.db.exec("DELETE FROM iteam_deliveries");
     if (state.deliveries.length) {
       const stmt = this.db.prepare(
-        "INSERT INTO iteam_deliveries (id, message_id, root_message_id, parent_delivery_id, depth, agent_id, computer_id, target, session_key, source, status, attempts, created_at, updated_at, error, lifecycle) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO iteam_deliveries (id, space_id, message_id, root_message_id, parent_delivery_id, depth, agent_id, computer_id, target, session_key, source, status, attempts, created_at, updated_at, error, lifecycle) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       );
       for (const d of state.deliveries) {
         stmt.run(
           d.id,
+          d.spaceId || DEFAULT_SPACE_ID,
           d.messageId ?? null,
           d.rootMessageId ?? null,
           d.parentDeliveryId ?? null,
@@ -943,11 +1168,12 @@ export class SqliteStore extends BaseStore {
     this.db.exec("DELETE FROM iteam_scheduled_tasks");
     if (state.scheduledTasks.length) {
       const stmt = this.db.prepare(
-        "INSERT INTO iteam_scheduled_tasks (id, target, agent_id, prompt, session_key, interval_ms, cron_expression, timezone, status, next_run_at, last_run_at, last_message_id, run_count, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO iteam_scheduled_tasks (id, space_id, target, agent_id, prompt, session_key, interval_ms, cron_expression, timezone, status, next_run_at, last_run_at, last_message_id, run_count, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       );
       for (const task of state.scheduledTasks) {
         stmt.run(
           task.id,
+          task.spaceId || DEFAULT_SPACE_ID,
           task.target,
           task.agentId,
           task.prompt,
