@@ -899,6 +899,25 @@ function App() {
     refresh(updated.target);
   }
 
+  async function deleteChannel(channelToDelete: Channel) {
+    if (!window.confirm(`Delete #${channelToDelete.name}? Its messages, tasks, schedules, and deliveries will also be deleted.`)) {
+      return;
+    }
+    const deletingCurrentChannel = channel === channelToDelete.target;
+    await api.del(`/api/channels/${encodeURIComponent(channelToDelete.id)}`);
+    if (renameChannel?.id === channelToDelete.id) setRenameChannel(null);
+    if (deletingCurrentChannel) {
+      setChannel("#all");
+      setSection("chat");
+      setThreadRootId(null);
+      setTaskThreadRoot(null);
+      setThreadMessages([]);
+      refresh("#all");
+      return;
+    }
+    refresh();
+  }
+
   async function openAgentDm(agent: Agent) {
     const dm = await api.post<Channel>(`/api/direct-messages/agents/${encodeURIComponent(agent.id)}`);
     setSelectedAgentId(agent.id);
@@ -1152,6 +1171,7 @@ function App() {
           channel={renameChannel}
           agents={state.agents || []}
           onRename={updateChannel}
+          onDelete={deleteChannel}
           onClose={() => setRenameChannel(null)}
         />
       )}
@@ -1388,7 +1408,7 @@ function ChatSidebar({
                 {!protectedChannel && (
                   <button
                     className="row-icon-btn"
-                    title="Rename channel"
+                    title="Edit channel"
                     onClick={event => {
                       event.stopPropagation();
                       openRenameChannel(c);
@@ -3594,23 +3614,27 @@ function RenameChannelModal({
   channel,
   agents,
   onRename,
+  onDelete,
   onClose
 }: {
   channel: Channel;
   agents: Agent[];
   onRename: (channelId: string, body: { name?: string; description?: string; defaultAgentId?: string | null }) => Promise<void> | void;
+  onDelete: (channel: Channel) => Promise<void>;
   onClose: () => void;
 }) {
   const [name, setName] = useState(channel.name);
   const [description, setDescription] = useState(channel.description || "");
   const [defaultAgentId, setDefaultAgentId] = useState<string>(channel.defaultAgentId || "");
   const [busy, setBusy] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState("");
   const valid = !!name.trim();
   const isDm = channel.kind === "dm";
+  const canDelete = !isDm && !isProtectedChannel(channel);
 
   async function submit() {
-    if (!valid || busy) return;
+    if (!valid || busy || deleting) return;
     setBusy(true);
     setError("");
     try {
@@ -3627,6 +3651,19 @@ function RenameChannelModal({
     }
   }
 
+  async function remove() {
+    if (busy || deleting || !canDelete) return;
+    setDeleting(true);
+    setError("");
+    try {
+      await onDelete(channel);
+      setDeleting(false);
+    } catch (err) {
+      setError((err as Error).message || "Failed to delete channel");
+      setDeleting(false);
+    }
+  }
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <section
@@ -3636,7 +3673,18 @@ function RenameChannelModal({
         aria-labelledby="rename-channel-title"
         onClick={e => e.stopPropagation()}
       >
-        <button className="modal-close" title="Close" onClick={onClose}>
+        {canDelete && (
+          <button
+            className="modal-close modal-delete"
+            title="Delete channel"
+            aria-label="Delete channel"
+            disabled={busy || deleting}
+            onClick={() => void remove()}
+          >
+            <Trash2 size={17} />
+          </button>
+        )}
+        <button className="modal-close" title="Close" disabled={busy || deleting} onClick={onClose}>
           <X />
         </button>
         <p className="eyebrow">Channel settings</p>
@@ -3676,10 +3724,10 @@ function RenameChannelModal({
           </label>
         )}
         <footer className="modal-actions">
-          <button className="btn btn-ghost" onClick={onClose}>
+          <button className="btn btn-ghost" onClick={onClose} disabled={busy || deleting}>
             Cancel
           </button>
-          <button className="btn btn-primary" disabled={!valid || busy} onClick={submit}>
+          <button className="btn btn-primary" disabled={!valid || busy || deleting} onClick={submit}>
             {busy ? "Saving..." : "Save channel"}
           </button>
         </footer>

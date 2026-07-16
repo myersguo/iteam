@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Agent } from "../src/types.js";
+import { IteamCore } from "../src/core.js";
 import { deriveAgentAuthToken } from "../src/lib.js";
 import { formatTaskRuntimeProgress } from "../src/agent-launcher.js";
 import { AcpDriver } from "../src/runtime/acp-driver.js";
@@ -273,6 +274,49 @@ try {
   if (renderedAcpArgs.join(" ") !== "acp --workspace /workspace/acp -m test-model") {
     throw new Error("ACP runtime profile templates did not render workspace/model values");
   }
+  const traexProfile = resolveAcpRuntimeProfile("traex");
+  if (!traexProfile || traexProfile.command !== "traex") {
+    throw new Error("built-in Traex ACP runtime profile was not loaded");
+  }
+  const renderedTraeArgs = renderAcpProfileArgs(traexProfile, {
+    agent: {
+      id: "agent_trae_model",
+      spaceId: "space_default",
+      name: "Trae Model Agent",
+      handle: "trae-model",
+      description: "",
+      runtime: "traex",
+      model: "Gemini-3-Flash-Preview",
+      computerId: "computer_test",
+      status: "online",
+      desiredStatus: "running",
+      launchId: null,
+      pid: null,
+      workspacePath: "",
+      createdAt: "",
+      updatedAt: ""
+    },
+    workspace: {
+      workspaceDir: "/workspace/trae",
+      dir: "/workspace/trae-pool-0",
+      runtimeCwd: "/workspace/trae",
+      internal: "/workspace/trae-pool-0/.iteam",
+      memoryPath: "",
+      systemPromptPath: "",
+      claudeMcpConfigPath: "",
+      traeMcpConfigPath: "",
+      bridgePath: "",
+      bridgeArgs: [],
+      bridgeCommand: "node",
+      runtimeAuthEnv: {},
+      wrapperPath: "",
+      promptPath: ""
+    },
+    timeoutMs: 1000
+  });
+  if (!renderedTraeArgs.includes("-c") || !renderedTraeArgs.includes("model=\"Gemini-3-Flash-Preview\"")) {
+    throw new Error("built-in Traex ACP profile did not render the selected model override");
+  }
   const workspaceAgent: Agent = {
     id: "agent_workspace",
     spaceId: "space_workspace",
@@ -468,6 +512,7 @@ try {
   await verifyOneShotProfileCwd(home, profileCwd);
   await verifyAcpDriverParallelism(home);
   await verifyAcpQueuedPromotion(home);
+  await verifyStuckDeliveryCancellation(home);
   verifySqliteSpacePersistence(home);
   const mysqlSpaceBackfillSql = MYSQL_SPACE_BACKFILL_QUERIES.join("\n");
   for (const table of ["iteam_channels", "iteam_deliveries", "iteam_messages", "iteam_tasks", "iteam_scheduled_tasks"]) {
@@ -1362,11 +1407,14 @@ async function verifySpaceIsolation(
   const beta = await post(port, "/api/spaces", { name: "Space Beta" });
   if (!beta.id || beta.slug !== "space-beta") throw new Error("space beta was not created");
 
-  // Legacy SQL schemas still enforce UNIQUE(target). Use distinct targets per
-  // space until the schema migrates to (space_id, target) uniqueness.
   const alphaChannel = await post(port, "/api/channels", { name: "sales-alpha", spaceId: alpha.id });
   const betaChannel = await post(port, "/api/channels", { name: "sales-beta", spaceId: beta.id });
-  if (alphaChannel.spaceId !== alpha.id || betaChannel.spaceId !== beta.id) {
+  const betaMatchingChannel = await post(port, "/api/channels", { name: "sales-alpha", spaceId: beta.id });
+  if (
+    alphaChannel.spaceId !== alpha.id ||
+    betaChannel.spaceId !== beta.id ||
+    betaMatchingChannel.target !== alphaChannel.target
+  ) {
     throw new Error("channel spaceId not persisted");
   }
 
@@ -1472,6 +1520,14 @@ async function verifySpaceIsolation(
   const alphaDelivery = (await getWithSpace(port, "/api/deliveries", alpha.id))
     .find((delivery: any) => delivery.messageId === alphaMention.id);
   if (!alphaDelivery) throw new Error("alpha mention did not create a delivery");
+  const crossSpaceChannelDelete = await deleteStatus(
+    port,
+    `/api/channels/${encodeURIComponent(alphaChannel.id)}`,
+    computerAuth
+  );
+  if (crossSpaceChannelDelete !== 403) {
+    throw new Error(`cross-space channel delete should be 403, got ${crossSpaceChannelDelete}`);
+  }
   const crossSpaceChannelPatch = await patchStatus(
     port,
     `/api/channels/${encodeURIComponent(alphaChannel.id)}`,
@@ -1499,6 +1555,143 @@ async function verifySpaceIsolation(
   if (crossSpaceDeliveryCancel !== 403) {
     throw new Error(`cross-space delivery cancel should be 403, got ${crossSpaceDeliveryCancel}`);
   }
+
+  const alphaChannelsBeforeDelete = await getWithSpace(port, "/api/channels", alpha.id);
+  const alphaAll = alphaChannelsBeforeDelete.find((channel: any) => channel.target === "#all");
+  if (!alphaAll) throw new Error("alpha #all channel missing before delete protection test");
+  const protectedRenameStatus = await patchStatus(
+    port,
+    `/api/channels/${encodeURIComponent(alphaAll.id)}`,
+    { name: "renamed-all" }
+  );
+  if (protectedRenameStatus !== 400) {
+    throw new Error(`default #all channel rename should be 400, got ${protectedRenameStatus}`);
+  }
+  const protectedDeleteStatus = await deleteStatus(
+    port,
+    `/api/channels/${encodeURIComponent(alphaAll.id)}`
+  );
+  if (protectedDeleteStatus !== 400) {
+    throw new Error(`default #all channel delete should be 400, got ${protectedDeleteStatus}`);
+  }
+
+  const alphaDm = await post(
+    port,
+    `/api/direct-messages/agents/${encodeURIComponent(alphaAgent.id)}`,
+    {}
+  );
+  const dmDeleteStatus = await deleteStatus(
+    port,
+    `/api/channels/${encodeURIComponent(alphaDm.id)}`
+  );
+  if (dmDeleteStatus !== 400) {
+    throw new Error(`DM channel delete should be 400, got ${dmDeleteStatus}`);
+  }
+
+  const alphaTask = await post(port, "/api/tasks", {
+    spaceId: alpha.id,
+    target: alphaChannel.target,
+    title: "delete channel task",
+    assigneeId: alphaAgent.id
+  });
+  const alphaThreadMessage = await post(port, "/api/messages", {
+    spaceId: alpha.id,
+    target: alphaTask.threadTarget,
+    text: "delete channel thread reply",
+    authorId: "human-local"
+  });
+  const alphaSchedule = await post(port, "/api/scheduled-tasks", {
+    spaceId: alpha.id,
+    target: alphaChannel.target,
+    agentId: alphaAgent.id,
+    prompt: "delete channel schedule",
+    intervalMs: 600_000,
+    nextRunAt: new Date(Date.now() + 600_000).toISOString()
+  });
+  const alphaPairing = await post(port, "/api/ingress/pairing-codes", {
+    spaceId: alpha.id,
+    target: alphaChannel.target,
+    agentId: alphaAgent.id,
+    label: "delete channel pairing"
+  });
+  const alphaPolicy = await post(port, "/api/ingress/pair", {
+    pairCode: alphaPairing.pairCode,
+    source: "delete-channel-smoke"
+  });
+  const alphaBinding = await post(port, "/api/external/bot-bindings", {
+    spaceId: alpha.id,
+    provider: "delete-channel-smoke",
+    tenantKey: "tenant-alpha",
+    chatId: "chat-alpha",
+    defaultTarget: alphaChannel.target,
+    defaultAgentId: alphaAgent.id
+  });
+  const alphaExternal = await post(port, "/api/external/routed-messages", {
+    spaceId: alpha.id,
+    provider: "delete-channel-smoke",
+    tenantKey: "tenant-alpha",
+    chatId: "chat-alpha",
+    externalMessageId: "delete-channel-message",
+    target: alphaChannel.target,
+    text: `@${alphaAgent.handle} delete channel external message`
+  });
+  const betaMatchingMessage = await post(port, "/api/messages", {
+    spaceId: beta.id,
+    target: betaMatchingChannel.target,
+    text: "same target in beta must survive",
+    authorId: "human-local"
+  });
+
+  await del(port, `/api/channels/${encodeURIComponent(alphaChannel.id)}`);
+  const alphaAfterDelete = await getWithSpace(port, "/api/state", alpha.id);
+  if (alphaAfterDelete.channels.some((channel: any) => channel.id === alphaChannel.id)) {
+    throw new Error("deleted channel remained in alpha state");
+  }
+  if (alphaAfterDelete.messages.some((message: any) =>
+    message.target === alphaChannel.target ||
+    String(message.target || "").startsWith(`${alphaChannel.target}:`)
+  )) {
+    throw new Error("deleted channel messages or thread messages remained");
+  }
+  if (alphaAfterDelete.tasks.some((task: any) => task.id === alphaTask.id)) {
+    throw new Error("deleted channel task remained");
+  }
+  if (alphaAfterDelete.scheduledTasks.some((task: any) => task.id === alphaSchedule.id)) {
+    throw new Error("deleted channel scheduled task remained");
+  }
+  if (alphaAfterDelete.deliveries.some((delivery: any) =>
+    delivery.target === alphaChannel.target ||
+    String(delivery.target || "").startsWith(`${alphaChannel.target}:`)
+  )) {
+    throw new Error("deleted channel delivery remained");
+  }
+  if (alphaAfterDelete.externalIngressPairings.some((pairing: any) => pairing.id === alphaPairing.id)) {
+    throw new Error("deleted channel ingress pairing remained");
+  }
+  if (alphaAfterDelete.externalIngressPolicies.some((policy: any) => policy.id === alphaPolicy.id)) {
+    throw new Error("deleted channel ingress policy remained");
+  }
+  const clearedBinding = alphaAfterDelete.externalBotBindings.find((binding: any) => binding.id === alphaBinding.id);
+  if (!clearedBinding || clearedBinding.defaultTarget !== null) {
+    throw new Error("deleted channel external binding target was not cleared");
+  }
+  if (alphaAfterDelete.externalMessageLinks.some((link: any) =>
+    link.messageId === alphaExternal.message.id ||
+    link.rootMessageId === alphaExternal.message.id
+  )) {
+    throw new Error("deleted channel external message links remained");
+  }
+  if (alphaAfterDelete.messages.some((message: any) => message.id === alphaThreadMessage.id)) {
+    throw new Error("deleted channel explicit thread reply remained");
+  }
+
+  const betaAfterDelete = await getWithSpace(port, "/api/state", beta.id);
+  if (!betaAfterDelete.channels.some((channel: any) => channel.id === betaMatchingChannel.id)) {
+    throw new Error("same-target beta channel was deleted with alpha channel");
+  }
+  if (!betaAfterDelete.messages.some((message: any) => message.id === betaMatchingMessage.id)) {
+    throw new Error("same-target beta message was deleted with alpha channel");
+  }
 }
 
 async function getWithSpace(port: number, path: string, spaceId: string): Promise<any> {
@@ -1507,6 +1700,116 @@ async function getWithSpace(port: number, path: string, spaceId: string): Promis
   });
   if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`);
   return res.json();
+}
+
+async function verifyStuckDeliveryCancellation(home: string): Promise<void> {
+  const testHome = join(home, "stuck-delivery");
+  mkdirSync(testHome, { recursive: true });
+  const store = new SqliteStore(testHome, join(testHome, "state.db"));
+  const now = "2026-01-01T00:20:00.000Z";
+  const old = "2026-01-01T00:00:00.000Z";
+  const computerId = "computer_stuck";
+  const agentId = "agent_stuck";
+  const messageId = "msg_stuck";
+  const deliveryId = "delivery_stuck";
+  const core = await IteamCore.create({
+    store,
+    serverInviteRoot: "http://127.0.0.1:4318",
+    clock: () => now
+  });
+  core.store.mutate(state => {
+    state.computers.push({
+      id: computerId,
+      spaceId: "space_default",
+      name: "stuck-computer",
+      fingerprint: { id: "STUCK", hostname: "stuck-computer", os: "linux", arch: "x64" },
+      status: "online",
+      daemonVersion: "0.1.0",
+      runtimes: [],
+      agentIds: [agentId],
+      connectionId: "computer_invite_stuck",
+      connectToken: "connect_stuck",
+      createdAt: old,
+      firstConnectedAt: old,
+      lastSeenAt: now
+    });
+    state.agents.push({
+      id: agentId,
+      spaceId: "space_default",
+      name: "stuck-agent",
+      handle: "stuck-agent",
+      description: "",
+      runtime: "traex",
+      model: null,
+      computerId,
+      status: "online",
+      desiredStatus: "running",
+      launchId: "launch_stuck",
+      pid: null,
+      workspacePath: join(testHome, "agents", agentId),
+      createdAt: old,
+      updatedAt: now
+    });
+    state.messages.push({
+      id: messageId,
+      spaceId: "space_default",
+      target: "#all",
+      authorId: "human-local",
+      type: "human",
+      text: "@stuck-agent hello",
+      mentions: [{ id: agentId, kind: "agent", name: "stuck-agent", handle: "stuck-agent" }],
+      createdAt: old,
+      threadId: null
+    });
+    state.deliveries.push({
+      id: deliveryId,
+      spaceId: "space_default",
+      messageId,
+      rootMessageId: messageId,
+      parentDeliveryId: null,
+      depth: 0,
+      agentId,
+      computerId,
+      target: "#all",
+      sessionKey: "channel-root:#all:msg_stuck",
+      source: "message",
+      status: "delivering",
+      attempts: 0,
+      createdAt: old,
+      updatedAt: old,
+      error: null,
+      lifecycle: []
+    });
+  });
+
+  const pushed: any[] = [];
+  const unsubscribe = core.subscribeComputerPush(computerId, event => pushed.push(event));
+  const swept = core.sweepStuckDeliveries(60_000);
+  if (swept !== 1) throw new Error(`expected one stuck delivery sweep, got ${swept}`);
+  const afterSweep = core.snapshot();
+  const failed = afterSweep.deliveries.find(delivery => delivery.id === deliveryId);
+  if (
+    failed?.status !== "failed" ||
+    !failed.lifecycle?.some(item => item.intent === "delivery.result" && item.message === "Delivery timed out")
+  ) {
+    throw new Error("stuck delivery was not persisted as failed");
+  }
+  const cancel = pushed.find(event =>
+    event.type === "cancel_delivery" &&
+    event.payload?.deliveryId === deliveryId &&
+    event.payload?.agentId === agentId
+  );
+  if (!cancel) throw new Error("stuck delivery sweep did not push runtime cancellation");
+
+  const messageCount = afterSweep.messages.length;
+  const late = core.applyDeliveryResult(deliveryId, { ok: true, text: "late success" });
+  const afterLate = core.snapshot();
+  if (late.status !== "failed" || afterLate.messages.length !== messageCount) {
+    throw new Error("late result overwrote a terminal failed delivery");
+  }
+
+  unsubscribe();
+  store.close();
 }
 
 async function verifyAcpDriverWithFakeRuntime(

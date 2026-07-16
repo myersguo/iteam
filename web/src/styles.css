@@ -1849,6 +1849,18 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
   display: grid; place-items: center;
 }
 .modal-close:hover { background: var(--surface-soft); }
+.modal-delete {
+  right: 62px;
+  color: var(--danger);
+  border-color: rgba(198, 69, 69, 0.3);
+}
+.modal-delete:hover:not(:disabled) {
+  background: rgba(198, 69, 69, 0.12);
+}
+.modal-delete:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 .modal-actions {
   display: flex;
   justify-content: flex-end;

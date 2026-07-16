@@ -21,6 +21,7 @@ import type { IStore, StateListener } from "./store/types.js";
 import type {
   ActiveDeliveryContext,
   Agent,
+  Channel,
   ConnectComputerResult,
   ContextMessage,
   Delivery,
@@ -403,6 +404,12 @@ export class IteamCore {
    */
   sweepStuckDeliveries(staleAfterMs: number): number {
     const cutoff = Date.now() - staleAfterMs;
+    const cancellations: Array<{
+      deliveryId: string;
+      agentId: string;
+      computerId: string;
+      reason: string;
+    }> = [];
     let swept = 0;
     this.store.mutate<void>(s => {
       const now = this.clock();
@@ -414,6 +421,12 @@ export class IteamCore {
         delivery.error = delivery.error || "delivery timed out without a result";
         delivery.updatedAt = now;
         pushDeliveryLifecycle(delivery, "delivery.result", now, "Delivery timed out", { ok: false, reason: delivery.error });
+        cancellations.push({
+          deliveryId: delivery.id,
+          agentId: delivery.agentId,
+          computerId: delivery.computerId,
+          reason: delivery.error
+        });
         const agent = s.agents.find(a => a.id === delivery.agentId);
         const label = agent ? `@${agent.handle || slugHandle(agent.name)}` : delivery.agentId;
         s.messages.push({
@@ -430,6 +443,16 @@ export class IteamCore {
         swept++;
       }
     });
+    for (const cancellation of cancellations) {
+      this.publishComputerPush(cancellation.computerId, {
+        type: "cancel_delivery",
+        payload: {
+          deliveryId: cancellation.deliveryId,
+          agentId: cancellation.agentId,
+          reason: cancellation.reason
+        }
+      });
+    }
     if (swept > 0) {
       console.log(`[core] sweepStuckDeliveries: marked ${swept} stuck delivery(ies) as failed`);
     }
@@ -790,6 +813,9 @@ export class IteamCore {
       if (input.name?.trim()) {
         const name = slugChannelName(input.name);
         const target = `#${name}`;
+        if (oldTarget === "#all" && target !== oldTarget) {
+          throw new HttpError(400, "cannot rename the default #all channel");
+        }
         if (target !== oldTarget && s.channels.some(channel =>
           channel.id !== current.id && channel.spaceId === current.spaceId && channel.target === target
         )) {
@@ -809,6 +835,112 @@ export class IteamCore {
       }
       return current;
     });
+  }
+
+  deleteChannel(channelId: string): Channel {
+    const result = this.store.mutate<{
+      channel: Channel;
+      cancellations: Array<{ deliveryId: string; agentId: string; computerId: string }>;
+    }>(s => {
+      const current = (s.channels || []).find(channel => channel.id === channelId);
+      if (!current) throw new HttpError(404, "channel not found");
+      if (current.target === "#all") throw new HttpError(400, "cannot delete the default #all channel");
+      if (current.kind === "dm") {
+        throw new HttpError(400, "direct message channels can only be removed by deleting their agent");
+      }
+
+      const removed = { ...current };
+      const spaceId = current.spaceId;
+      const target = current.target;
+      const threadPrefix = `${target}:`;
+      const belongsToChannel = (candidate: string | null | undefined) =>
+        candidate === target || Boolean(candidate?.startsWith(threadPrefix));
+      const removedMessageIds = new Set(
+        (s.messages || [])
+          .filter(message => message.spaceId === spaceId && belongsToChannel(message.target))
+          .map(message => message.id)
+      );
+
+      for (const task of s.tasks || []) {
+        if (
+          task.spaceId === spaceId &&
+          (belongsToChannel(task.target) || belongsToChannel(task.threadTarget))
+        ) {
+          removedMessageIds.add(task.messageId);
+        }
+      }
+      for (const delivery of s.deliveries || []) {
+        if (delivery.spaceId === spaceId && belongsToChannel(delivery.target)) {
+          removedMessageIds.add(delivery.messageId);
+          removedMessageIds.add(delivery.rootMessageId);
+        }
+      }
+
+      const cancellations = (s.deliveries || [])
+        .filter(delivery =>
+          delivery.spaceId === spaceId &&
+          belongsToChannel(delivery.target) &&
+          !["done", "failed", "cancelled"].includes(delivery.status)
+        )
+        .map(delivery => ({
+          deliveryId: delivery.id,
+          agentId: delivery.agentId,
+          computerId: delivery.computerId
+        }));
+      const now = this.clock();
+
+      s.channels = (s.channels || []).filter(channel => channel.id !== channelId);
+      s.messages = (s.messages || []).filter(message =>
+        !(message.spaceId === spaceId && belongsToChannel(message.target))
+      );
+      s.tasks = (s.tasks || []).filter(task =>
+        !(
+          task.spaceId === spaceId &&
+          (belongsToChannel(task.target) || belongsToChannel(task.threadTarget))
+        )
+      );
+      s.scheduledTasks = (s.scheduledTasks || []).filter(task =>
+        !(task.spaceId === spaceId && belongsToChannel(task.target))
+      );
+      s.deliveries = (s.deliveries || []).filter(delivery =>
+        !(delivery.spaceId === spaceId && belongsToChannel(delivery.target))
+      );
+      s.externalIngressPairings = (s.externalIngressPairings || []).filter(pairing =>
+        !(pairing.spaceId === spaceId && belongsToChannel(pairing.target))
+      );
+      s.externalIngressPolicies = (s.externalIngressPolicies || []).filter(policy =>
+        !(policy.spaceId === spaceId && belongsToChannel(policy.target))
+      );
+      for (const binding of s.externalBotBindings || []) {
+        if (binding.spaceId === spaceId && belongsToChannel(binding.defaultTarget)) {
+          binding.defaultTarget = null;
+          binding.updatedAt = now;
+        }
+      }
+      s.externalMessageLinks = (s.externalMessageLinks || []).filter(link =>
+        !(
+          link.spaceId === spaceId &&
+          (
+            removedMessageIds.has(link.messageId) ||
+            Boolean(link.rootMessageId && removedMessageIds.has(link.rootMessageId))
+          )
+        )
+      );
+
+      return { channel: removed, cancellations };
+    });
+
+    for (const cancellation of result.cancellations) {
+      this.publishComputerPush(cancellation.computerId, {
+        type: "cancel_delivery",
+        payload: {
+          deliveryId: cancellation.deliveryId,
+          agentId: cancellation.agentId,
+          reason: `channel ${result.channel.target} was deleted`
+        }
+      });
+    }
+    return result.channel;
   }
 
   ensureAgentDmChannel(agentId: string) {
@@ -1395,7 +1527,7 @@ export class IteamCore {
       const now = this.clock();
       const delivery = (s.deliveries || []).find(item => item.id === deliveryId);
       if (!delivery) throw new HttpError(404, "delivery not found");
-      if (delivery.status === "cancelled") {
+      if (["done", "failed", "cancelled"].includes(delivery.status)) {
         return delivery;
       }
       delivery.status = input.ok ? "done" : "failed";

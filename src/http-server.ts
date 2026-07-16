@@ -327,6 +327,12 @@ async function route(
     requireResourceSpaceIfAuthenticated(core, req, "channel", channelId);
     return sendJson(res, 200, core.patchChannel(channelId, body));
   }
+  if (req.method === "DELETE" && channelPatch) {
+    const channelId = decodeURIComponent(channelPatch[1]);
+    requireResourceSpaceIfAuthenticated(core, req, "channel", channelId);
+    const channel = core.deleteChannel(channelId);
+    return sendJson(res, 200, { ok: true, channelId: channel.id });
+  }
 
   if (req.method === "POST" && url.pathname === "/api/computers/connect-command") {
     const body = await parseJsonBody<any>(req);

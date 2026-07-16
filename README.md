@@ -247,6 +247,7 @@ ITEAM_MYSQL_DATABASE=iteam
 | GET | `/api/health` | health check |
 | GET | `/api/events` | SSE event stream |
 | GET | `/api/channels` | channels |
+| DELETE | `/api/channels/:id` | delete a channel and its scoped data (`#all` and DMs are protected) |
 | GET | `/api/messages/channel/:channelId` | paginated channel messages |
 | GET | `/api/messages?target=...` | paginated messages by target |
 | GET | `/api/agents` | agents |

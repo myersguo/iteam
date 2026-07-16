@@ -16,17 +16,24 @@ export interface ResolvedAcpRuntimeProfile extends AcpRuntimeProfile {
   name: string;
 }
 
+const TRAEX_ACP_RUNTIME_PROFILE: AcpRuntimeProfile = {
+  command: "traex",
+  args: [
+    "{{modelConfigArgs}}",
+    "--add-dir", "{{workspaceDir}}",
+    "acp", "serve",
+    "--yolo",
+    "--disallowed-tool", "EnterPlanMode",
+    "--disallowed-tool", "ExitPlanMode"
+  ]
+};
+
 const BUILTIN_ACP_RUNTIME_PROFILES: Record<string, AcpRuntimeProfile> = {
   trae: {
-    command: "traecli",
-    args: [
-      "acp", "serve",
-      "--add-dir", "{{workspaceDir}}",
-      "--yolo",
-      "--disallowed-tool", "EnterPlanMode",
-      "--disallowed-tool", "ExitPlanMode"
-    ]
+    ...TRAEX_ACP_RUNTIME_PROFILE,
+    command: "traecli"
   },
+  traex: TRAEX_ACP_RUNTIME_PROFILE,
   gemini: {
     command: "gemini",
     args: ["{{modelArgs}}", "--acp", "--yolo", "--skip-trust", "--include-directories", "{{workspaceDir}}"]
@@ -65,6 +72,9 @@ export function renderAcpProfileArgs(
   return (profile.args || []).flatMap(arg => {
     if (/^\{\{\s*modelArgs\s*\}\}$/.test(arg)) {
       return params.agent.model ? ["-m", params.agent.model] : [];
+    }
+    if (/^\{\{\s*modelConfigArgs\s*\}\}$/.test(arg)) {
+      return params.agent.model ? ["-c", `model=${JSON.stringify(params.agent.model)}`] : [];
     }
     const rendered = renderAcpProfileValue(arg, params);
     return rendered ? [rendered] : [];
@@ -108,6 +118,8 @@ function renderAcpProfileValue(
         return params.agent.model || "";
       case "modelArgs":
         return params.agent.model ? `-m ${params.agent.model}` : "";
+      case "modelConfigArgs":
+        return params.agent.model ? `-c model=${JSON.stringify(params.agent.model)}` : "";
       case "timeoutSeconds":
         return String(Math.floor(params.timeoutMs / 1000));
       default:
