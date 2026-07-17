@@ -817,6 +817,26 @@ try {
     payload: { command: "echo secret connect_should_mask connect_abc123" }
   }, computerAuth);
   await post(port, `/api/deliveries/${encodeURIComponent(dmDelivery.id)}/events`, {
+    kind: "tool_result",
+    title: "Tool completed",
+    toolName: "shell",
+    toolCallId: "tool_smoke",
+    status: "completed",
+    payload: {
+      command: ["echo", "artifact"],
+      cwd: "/tmp",
+      stdout: "artifact stdout\n",
+      stderr: "",
+      exit_code: 0,
+      changes: {
+        "/tmp/bytedcli-common-commands.md": {
+          kind: "update",
+          diff: "--- a/bytedcli-common-commands.md\n+++ b/bytedcli-common-commands.md\n@@\n-old\n+new\n"
+        }
+      }
+    }
+  }, computerAuth);
+  await post(port, `/api/deliveries/${encodeURIComponent(dmDelivery.id)}/events`, {
     kind: "message_delta",
     title: "Draft reply",
     text: "partial reply"
@@ -844,6 +864,19 @@ try {
     thinkingEvents[0].text !== "token stream"
   ) {
     throw new Error("delivery event timeline did not persist runtime events");
+  }
+  const deliveryArtifacts = await get(port, `/api/delivery-artifacts?deliveryId=${encodeURIComponent(dmDelivery.id)}&limit=20`);
+  const stdoutArtifact = deliveryArtifacts.find((artifact: any) => artifact.kind === "command_stdout");
+  const diffArtifact = deliveryArtifacts.find((artifact: any) =>
+    artifact.kind === "file_diff" &&
+    String(artifact.relativePath || "").includes("bytedcli-common-commands.md")
+  );
+  if (!stdoutArtifact || !diffArtifact) {
+    throw new Error("delivery artifacts did not capture command stdout and file diff");
+  }
+  const stdoutContent = await getText(port, `/api/delivery-artifacts/${encodeURIComponent(stdoutArtifact.id)}/content`);
+  if (!stdoutContent.includes("artifact stdout")) {
+    throw new Error("delivery artifact content endpoint did not return stdout");
   }
   const savedBotConfig = await post(port, "/api/external/bot-configs", {
     provider: "lark",
@@ -2209,6 +2242,7 @@ function verifySqliteSpacePersistence(home: string): void {
   const taskId = "task_persisted";
   const scheduleId = "schedule_persisted";
   const deliveryEventId = "delivery_event_persisted";
+  const deliveryArtifactId = "artifact_persisted";
   const now = new Date().toISOString();
   const first = new SqliteStore(sqliteHome, sqliteFile);
   first.mutate(state => {
@@ -2340,6 +2374,26 @@ function verifySqliteSpacePersistence(home: string): void {
       createdAt: now,
       payload: { command: "echo persisted" }
     });
+    state.deliveryArtifacts.push({
+      id: deliveryArtifactId,
+      spaceId: "space_default",
+      deliveryId,
+      eventId: deliveryEventId,
+      agentId,
+      target: "#persisted",
+      kind: "command_stdout",
+      title: "stdout: echo persisted",
+      summary: "persisted artifact",
+      mime: "text/plain; charset=utf-8",
+      size: 19,
+      sha256: "sha256-persisted",
+      storage: "db",
+      path: null,
+      relativePath: null,
+      content: "persisted artifact\n",
+      metadata: { command: "echo persisted" },
+      createdAt: now
+    });
     state.tasks.push({
       id: taskId,
       spaceId: "space_default",
@@ -2407,6 +2461,15 @@ function verifySqliteSpacePersistence(home: string): void {
     (deliveryEvent.payload as any)?.command !== "echo persisted"
   ) {
     throw new Error("SQLite delivery event was not persisted and backfilled");
+  }
+  const deliveryArtifact = state.deliveryArtifacts.find(item => item.id === deliveryArtifactId);
+  if (
+    deliveryArtifact?.spaceId !== spaceId ||
+    deliveryArtifact.deliveryId !== deliveryId ||
+    deliveryArtifact.content !== "persisted artifact\n" ||
+    (deliveryArtifact.metadata as any)?.command !== "echo persisted"
+  ) {
+    throw new Error("SQLite delivery artifact was not persisted and backfilled");
   }
   if (state.tasks.find(item => item.id === taskId)?.spaceId !== spaceId) {
     throw new Error("SQLite task spaceId was lost after reopen");
@@ -2500,6 +2563,12 @@ async function get(port: number, path: string): Promise<any> {
   const response = await fetch(`http://127.0.0.1:${port}${path}`);
   if (!response.ok) throw new Error(`${response.status} ${path}`);
   return response.json();
+}
+
+async function getText(port: number, path: string): Promise<string> {
+  const response = await fetch(`http://127.0.0.1:${port}${path}`);
+  if (!response.ok) throw new Error(`${response.status} ${path}`);
+  return response.text();
 }
 
 async function execFileText(command: string, args: string[], env: Record<string, string>): Promise<string> {

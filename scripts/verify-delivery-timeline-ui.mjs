@@ -33,14 +33,20 @@ try {
   await client.send("Page.navigate", { url });
 
   let text = "";
+  let hasArtifactButton = false;
   for (let attempt = 0; attempt < 80; attempt += 1) {
     await delay(250);
     const result = await client.send("Runtime.evaluate", {
-      expression: "document.body.innerText",
+      expression: "({ text: document.body.innerText, hasArtifactButton: !!document.querySelector('.artifact-pills button, .delivery-event.has-artifacts') })",
       returnByValue: true
     });
-    text = String(result?.result?.value || "");
-    if (/(Working|Completed|Failed|Cancelled)/.test(text) && text.includes("Draft reply")) break;
+    text = String(result?.result?.value?.text || "");
+    hasArtifactButton = !!result?.result?.value?.hasArtifactButton;
+    if (
+      /(Working|Completed|Failed|Cancelled)/.test(text) &&
+      text.includes("Draft reply") &&
+      hasArtifactButton
+    ) break;
   }
   if (!/(Working|Completed|Failed|Cancelled)/.test(text)) {
     throw new Error(`timeline UI did not render timeline status; body starts with: ${text.slice(0, 500)}`);
@@ -50,6 +56,9 @@ try {
   }
   if (!/Run command|pwd|Tool completed|Thinking/.test(text)) {
     throw new Error(`timeline UI rendered without runtime process details: ${text.slice(0, 800)}`);
+  }
+  if (!hasArtifactButton) {
+    throw new Error(`timeline UI rendered without artifact summary: ${text.slice(0, 800)}`);
   }
   const structure = await client.send("Runtime.evaluate", {
     expression: `Array.from(document.querySelectorAll('.delivery-timeline')).map(timeline => ({
@@ -64,6 +73,31 @@ try {
     if (timeline.hasMessageDeltaItem || /\bDraft reply\b/.test(timeline.listText || "")) {
       throw new Error("Draft reply is rendered inside the timeline event list");
     }
+  }
+  const drawerCheck = await client.send("Runtime.evaluate", {
+    expression: `(async () => {
+      const buttons = Array.from(document.querySelectorAll('.artifact-pills button, .delivery-event.has-artifacts'));
+      if (!buttons.length) return { clicked: false, text: document.body.innerText.slice(0, 800) };
+      for (const button of buttons.reverse()) {
+        button.scrollIntoView({ block: 'center' });
+        button.click();
+        await new Promise(resolve => setTimeout(resolve, 250));
+        const drawer = document.querySelector('.artifact-drawer');
+        if (drawer) return { clicked: true, text: button.innerText, drawerText: drawer.innerText };
+      }
+      return { clicked: true, text: buttons[0]?.innerText || '', body: document.body.innerText.slice(0, 800) };
+    })()`,
+    returnByValue: true,
+    awaitPromise: true
+  });
+  await delay(250);
+  const drawerTextResult = await client.send("Runtime.evaluate", {
+    expression: "document.querySelector('.artifact-drawer')?.innerText || document.body.innerText",
+    returnByValue: true
+  });
+  const drawerText = String(drawerTextResult?.result?.value || drawerCheck?.result?.value?.drawerText || drawerCheck?.result?.value?.text || "");
+  if (!drawerCheck?.result?.value?.clicked || !/delivery event/i.test(drawerText) || !/Inputs|Outputs|stdout|Raw JSON/.test(drawerText)) {
+    throw new Error(`artifact drawer did not open with details: ${drawerText.slice(0, 800)}`);
   }
   const lines = text.split("\n").map(line => line.trim()).filter(Boolean);
 

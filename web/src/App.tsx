@@ -12,6 +12,7 @@ import {
   Computer,
   Copy,
   ExternalLink,
+  FileText,
   Hash,
   Kanban,
   List,
@@ -199,6 +200,26 @@ interface DeliveryEvent {
   payload?: unknown;
 }
 
+interface DeliveryArtifact {
+  id: string;
+  deliveryId: string;
+  eventId?: string | null;
+  agentId: string;
+  target: string;
+  kind: string;
+  title: string;
+  summary?: string | null;
+  mime: string;
+  size: number;
+  sha256?: string | null;
+  storage: string;
+  path?: string | null;
+  relativePath?: string | null;
+  content?: string | null;
+  metadata?: unknown;
+  createdAt: string;
+}
+
 interface AppState {
   humans: Human[];
   agents: Agent[];
@@ -211,6 +232,7 @@ interface AppState {
   externalBotBindings: ExternalBotBinding[];
   deliveries: Delivery[];
   deliveryEvents: DeliveryEvent[];
+  deliveryArtifacts: DeliveryArtifact[];
   events: unknown[];
   spaces: Space[];
 }
@@ -301,7 +323,8 @@ const api = {
       ? await apiFetch(`/api/messages/channel/${encodeURIComponent(selectedChannel.id)}?limit=10`).then(r => r.json())
       : [];
     const deliveryEvents = await fetchDeliveryEventsForMessages(deliveries, messages, selectedChannel?.target);
-    return { humans, agents, channels, messages, tasks, scheduledTasks, computers, externalBotConfigs, externalBotBindings, deliveries, deliveryEvents, events: [], spaces };
+    const deliveryArtifacts = await fetchDeliveryArtifactsForMessages(deliveries, messages, selectedChannel?.target);
+    return { humans, agents, channels, messages, tasks, scheduledTasks, computers, externalBotConfigs, externalBotBindings, deliveries, deliveryEvents, deliveryArtifacts, events: [], spaces };
   },
   async post<T = any>(path: string, body: Record<string, unknown> = {}): Promise<T> {
     const res = await apiFetch(path, {
@@ -351,6 +374,34 @@ async function fetchDeliveryEventsForMessages(
   for (const group of eventGroups) {
     for (const event of group as DeliveryEvent[]) {
       byId.set(event.id, event);
+    }
+  }
+  return [...byId.values()];
+}
+
+async function fetchDeliveryArtifactsForMessages(
+  deliveries: Delivery[],
+  messages: Message[],
+  target?: string
+): Promise<DeliveryArtifact[]> {
+  const messageIds = new Set(messages.map(message => message.id));
+  const deliveryIds = deliveries
+    .filter(delivery => messageIds.has(delivery.messageId || ""))
+    .map(delivery => delivery.id);
+  if (deliveryIds.length === 0 && !target) return [];
+
+  const artifactGroups = await Promise.all([
+    ...deliveryIds.map(deliveryId =>
+      apiFetch(`/api/delivery-artifacts?deliveryId=${encodeURIComponent(deliveryId)}&limit=300`).then(r => r.json())
+    ),
+    target
+      ? apiFetch(`/api/delivery-artifacts?target=${encodeURIComponent(target)}&limit=300`).then(r => r.json())
+      : Promise.resolve([])
+  ]);
+  const byId = new Map<string, DeliveryArtifact>();
+  for (const group of artifactGroups) {
+    for (const artifact of group as DeliveryArtifact[]) {
+      byId.set(artifact.id, artifact);
     }
   }
   return [...byId.values()];
@@ -2066,6 +2117,7 @@ function MessageRow({
   const replyCount = countThreadReplies(state, message);
   const deliveryRecords = deliveryRecordsForMessage(state, message);
   const activity = deliveryActivityForMessage(state, message);
+  const artifacts = deliveryArtifactsForMessage(state, message);
   return (
     <article className={`msg ${message.type || "chat"}`} data-message-id={message.id}>
       <Avatar name={author.name} agent={!!agent} />
@@ -2081,7 +2133,7 @@ function MessageRow({
         </header>
         <MessageContent text={message.text} agent={!!agent} />
         {(activity.length > 0 || deliveryRecords.length > 0) && (
-          <DeliveryTimeline events={activity} deliveries={deliveryRecords} agents={state.agents} />
+          <DeliveryTimeline events={activity} deliveries={deliveryRecords} artifacts={artifacts} agents={state.agents} />
         )}
         <div className="msg-actions">
           {task && (
@@ -2101,8 +2153,9 @@ function MessageRow({
   );
 }
 
-function DeliveryTimeline({ events, deliveries, agents }: { events: DeliveryEvent[]; deliveries: Delivery[]; agents: Agent[] }) {
+function DeliveryTimeline({ events, deliveries, artifacts, agents }: { events: DeliveryEvent[]; deliveries: Delivery[]; artifacts: DeliveryArtifact[]; agents: Agent[] }) {
   const [expanded, setExpanded] = useState(false);
+  const [selectedEvent, setSelectedEvent] = useState<DeliveryEvent | null>(null);
   const ordered = [...events].sort((left, right) =>
     left.sequence - right.sequence ||
     left.createdAt.localeCompare(right.createdAt) ||
@@ -2123,7 +2176,13 @@ function DeliveryTimeline({ events, deliveries, agents }: { events: DeliveryEven
       </button>
       <div className="delivery-event-list">
         {visible.map(event => (
-          <DeliveryTimelineItem key={event.id} event={event} agent={agents.find(agent => agent.id === event.agentId)} />
+          <DeliveryTimelineItem
+            key={event.id}
+            event={event}
+            artifacts={artifacts.filter(artifact => artifact.eventId === event.id)}
+            agent={agents.find(agent => agent.id === event.agentId)}
+            onOpen={() => setSelectedEvent(event)}
+          />
         ))}
       </div>
       {draft && (
@@ -2132,24 +2191,39 @@ function DeliveryTimeline({ events, deliveries, agents }: { events: DeliveryEven
           <p>{draft}</p>
         </div>
       )}
+      {artifacts.length > 0 && (
+        <DeliveryArtifactSummary artifacts={artifacts} onOpen={artifact => {
+          const event = ordered.find(item => item.id === artifact.eventId) || null;
+          setSelectedEvent(event || syntheticEventForArtifact(artifact));
+        }} />
+      )}
+      {selectedEvent && (
+        <DeliveryEventDrawer
+          event={selectedEvent}
+          artifacts={artifacts.filter(artifact => artifact.eventId === selectedEvent.id)}
+          agent={agents.find(agent => agent.id === selectedEvent.agentId)}
+          onClose={() => setSelectedEvent(null)}
+        />
+      )}
     </div>
   );
 }
 
-function DeliveryTimelineItem({ event, agent }: { event: DeliveryEvent; agent?: Agent }) {
+function DeliveryTimelineItem({ event, artifacts, agent, onOpen }: { event: DeliveryEvent; artifacts: DeliveryArtifact[]; agent?: Agent; onOpen: () => void }) {
   return (
-    <div className={`delivery-event is-${event.kind}`}>
+    <button type="button" className={`delivery-event is-${event.kind} ${artifacts.length ? "has-artifacts" : ""}`} onClick={onOpen}>
       <span className="delivery-event-dot" />
       <div>
         <strong>{deliveryEventTitle(event)}</strong>
         {event.text && event.kind !== "message_delta" && <p>{event.text}</p>}
+        {artifacts.length > 0 && <em>{artifacts.length} artifact{artifacts.length === 1 ? "" : "s"}</em>}
         <small>
           {agent?.name || event.agentId}
           {" · "}
           {new Date(event.createdAt).toLocaleTimeString()}
         </small>
       </div>
-    </div>
+    </button>
   );
 }
 
@@ -2175,6 +2249,174 @@ function deliveryActivityForMessage(state: AppState, message: Message): Delivery
   );
   if (deliveryIds.size === 0) return [];
   return state.deliveryEvents.filter(event => deliveryIds.has(event.deliveryId));
+}
+
+function deliveryArtifactsForMessage(state: AppState, message: Message): DeliveryArtifact[] {
+  const deliveryIds = new Set(
+    deliveryRecordsForMessage(state, message)
+      .map(delivery => delivery.id)
+  );
+  if (deliveryIds.size === 0) return [];
+  return state.deliveryArtifacts.filter(artifact => deliveryIds.has(artifact.deliveryId));
+}
+
+function DeliveryArtifactSummary({ artifacts, onOpen }: { artifacts: DeliveryArtifact[]; onOpen: (artifact: DeliveryArtifact) => void }) {
+  const sources = artifacts.filter(artifact => artifact.kind === "source_read" || artifact.kind === "tool_input");
+  const outputs = artifacts.filter(artifact => !sources.includes(artifact));
+  return (
+    <div className="delivery-artifacts">
+      {sources.length > 0 && (
+        <div>
+          <small>Sources used</small>
+          <div className="artifact-pills">
+            {sources.slice(0, 6).map(artifact => (
+              <button key={artifact.id} type="button" onClick={() => onOpen(artifact)}>
+                <FileText size={13} /> {artifact.relativePath || artifact.title}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {outputs.length > 0 && (
+        <div>
+          <small>Outputs produced</small>
+          <div className="artifact-pills">
+            {outputs.slice(0, 8).map(artifact => (
+              <button key={artifact.id} type="button" onClick={() => onOpen(artifact)}>
+                <FileText size={13} /> {artifact.relativePath || artifact.title}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DeliveryEventDrawer({ event, artifacts, agent, onClose }: {
+  event: DeliveryEvent;
+  artifacts: DeliveryArtifact[];
+  agent?: Agent;
+  onClose: () => void;
+}) {
+  const [activeId, setActiveId] = useState<string>(artifacts[0]?.id || "raw");
+  const active = artifacts.find(artifact => artifact.id === activeId) || artifacts[0] || null;
+  return createPortal(
+    <aside className="artifact-drawer" role="dialog" aria-modal="true" aria-label="Delivery event details">
+      <header>
+        <div>
+          <p className="eyebrow">Delivery event</p>
+          <h2>{deliveryEventTitle(event)}</h2>
+          <small>{agent?.name || event.agentId} · {new Date(event.createdAt).toLocaleString()}</small>
+        </div>
+        <button className="icon-btn" onClick={onClose} title="Close"><X size={16} /></button>
+      </header>
+      <div className="artifact-drawer-body">
+        <section className="artifact-meta">
+          <dl>
+            <div><dt>Kind</dt><dd>{event.kind}</dd></div>
+            <div><dt>Status</dt><dd>{event.status || "—"}</dd></div>
+            <div><dt>Tool</dt><dd>{event.toolName || "—"}</dd></div>
+            <div><dt>Call id</dt><dd>{event.toolCallId || "—"}</dd></div>
+          </dl>
+          {event.text && <p>{event.text}</p>}
+        </section>
+        {artifacts.length > 0 && (
+          <div className="artifact-tabs">
+            {artifacts.map(artifact => (
+              <button
+                key={artifact.id}
+                type="button"
+                className={artifact.id === activeId ? "is-active" : ""}
+                onClick={() => setActiveId(artifact.id)}
+              >
+                {artifactLabel(artifact)}
+              </button>
+            ))}
+            <button type="button" className={activeId === "raw" ? "is-active" : ""} onClick={() => setActiveId("raw")}>Raw JSON</button>
+          </div>
+        )}
+        {active && activeId !== "raw" ? (
+          <ArtifactPreview artifact={active} />
+        ) : (
+          <ArtifactCode title="Raw event payload" content={formatUnknown(event.payload ?? event)} />
+        )}
+      </div>
+    </aside>,
+    document.body
+  );
+}
+
+function ArtifactPreview({ artifact }: { artifact: DeliveryArtifact }) {
+  const content = artifact.content || "";
+  return (
+    <section className="artifact-preview">
+      <header>
+        <div>
+          <h3>{artifact.title}</h3>
+          <small>{artifact.kind} · {formatBytes(artifact.size)} · {artifact.mime}</small>
+        </div>
+        {artifact.relativePath && <code>{artifact.relativePath}</code>}
+      </header>
+      {artifact.summary && <p>{artifact.summary}</p>}
+      {artifact.mime.includes("markdown") ? (
+        <div className="artifact-markdown">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+        </div>
+      ) : (
+        <ArtifactCode title={artifact.title} content={content || formatUnknown(artifact.metadata)} />
+      )}
+    </section>
+  );
+}
+
+function ArtifactCode({ title, content }: { title: string; content: string }) {
+  return (
+    <section className="artifact-code" aria-label={title}>
+      <pre>{content || "(empty)"}</pre>
+    </section>
+  );
+}
+
+function syntheticEventForArtifact(artifact: DeliveryArtifact): DeliveryEvent {
+  return {
+    id: artifact.eventId || `artifact:${artifact.id}`,
+    deliveryId: artifact.deliveryId,
+    agentId: artifact.agentId,
+    target: artifact.target,
+    kind: artifact.kind,
+    title: artifact.title,
+    text: artifact.summary || null,
+    sequence: 0,
+    createdAt: artifact.createdAt,
+    payload: artifact.metadata
+  };
+}
+
+function artifactLabel(artifact: DeliveryArtifact): string {
+  if (artifact.kind === "tool_input") return "Inputs";
+  if (artifact.kind === "tool_output") return "Outputs";
+  if (artifact.kind === "command_stdout") return "stdout";
+  if (artifact.kind === "command_stderr") return "stderr";
+  if (artifact.kind === "file_diff") return "Diff";
+  if (artifact.kind === "file_snapshot") return "File";
+  return artifact.kind;
+}
+
+function formatUnknown(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value ?? null, null, 2);
+  } catch {
+    return String(value ?? "");
+  }
+}
+
+function formatBytes(size: number): string {
+  if (!Number.isFinite(size) || size <= 0) return "0 B";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function deliveryTimelineStatus(deliveries: Delivery[]): { label: string; tone: "running" | "completed" | "failed" | "cancelled" } {

@@ -249,6 +249,40 @@ export interface DeliveryEvent {
   payload?: unknown;
 }
 
+export type DeliveryArtifactKind =
+  | "tool_input"
+  | "tool_output"
+  | "command_stdout"
+  | "command_stderr"
+  | "file_diff"
+  | "file_snapshot"
+  | "source_read"
+  | "transcript"
+  | "final_output"
+  | "raw_json"
+  | string;
+
+export interface DeliveryArtifact {
+  id: string;
+  spaceId: string;
+  deliveryId: string;
+  eventId?: string | null;
+  agentId: string;
+  target: string;
+  kind: DeliveryArtifactKind;
+  title: string;
+  summary?: string | null;
+  mime: string;
+  size: number;
+  sha256?: string | null;
+  storage: "db" | "file" | "blob" | string;
+  path?: string | null;
+  relativePath?: string | null;
+  content?: string | null;
+  metadata?: unknown;
+  createdAt: string;
+}
+
 export interface ExternalIngressPairing {
   id: string;
   spaceId: string;
@@ -342,6 +376,7 @@ export interface State {
   messages: Message[];
   deliveries: Delivery[];
   deliveryEvents: DeliveryEvent[];
+  deliveryArtifacts: DeliveryArtifact[];
   tasks: Task[];
   scheduledTasks: ScheduledTask[];
   externalIngressPairings: ExternalIngressPairing[];

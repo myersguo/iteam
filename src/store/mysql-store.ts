@@ -4,6 +4,7 @@ import type {
   Channel,
   Computer,
   Delivery,
+  DeliveryArtifact,
   DeliveryEvent,
   ExternalBotBinding,
   ExternalBotConfig,
@@ -98,6 +99,16 @@ export const MYSQL_SPACE_BACKFILL_QUERIES = [
      'space_default'
    )
    WHERE event.space_id = 'space_default'`,
+  `UPDATE iteam_delivery_artifacts artifact
+   LEFT JOIN iteam_deliveries delivery ON delivery.id = artifact.delivery_id
+   LEFT JOIN iteam_agents agent ON agent.id = artifact.agent_id
+   SET artifact.space_id = COALESCE(
+     NULLIF(delivery.space_id, 'space_default'),
+     NULLIF(agent.space_id, ''),
+     NULLIF(artifact.space_id, 'space_default'),
+     'space_default'
+   )
+   WHERE artifact.space_id = 'space_default'`,
   `UPDATE iteam_messages message
    LEFT JOIN (
      SELECT
@@ -638,6 +649,27 @@ export class MysqlStore extends BaseStore {
       payload: string | unknown | null;
     }>>("SELECT * FROM iteam_delivery_events ORDER BY created_at ASC, sequence ASC");
 
+    const [deliveryArtifactRows] = await this.pool.query<Array<{
+      id: string;
+      space_id: string | null;
+      delivery_id: string;
+      event_id: string | null;
+      agent_id: string;
+      target: string;
+      kind: string;
+      title: string;
+      summary: string | null;
+      mime: string;
+      size: number;
+      sha256: string | null;
+      storage: string;
+      path: string | null;
+      relative_path: string | null;
+      content: string | null;
+      metadata: string | unknown | null;
+      created_at: string;
+    }>>("SELECT * FROM iteam_delivery_artifacts ORDER BY created_at ASC");
+
     const [scheduledTaskRows] = await this.pool.query<Array<{
       id: string;
       space_id: string | null;
@@ -877,6 +909,27 @@ export class MysqlStore extends BaseStore {
       payload: parseJsonField<unknown>(row.payload, null)
     }));
 
+    const deliveryArtifacts: DeliveryArtifact[] = deliveryArtifactRows.map(row => ({
+      id: row.id,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
+      deliveryId: row.delivery_id,
+      eventId: row.event_id,
+      agentId: row.agent_id,
+      target: row.target,
+      kind: row.kind,
+      title: row.title,
+      summary: row.summary,
+      mime: row.mime,
+      size: Number(row.size) || 0,
+      sha256: row.sha256,
+      storage: row.storage || "db",
+      path: row.path,
+      relativePath: row.relative_path,
+      content: row.content,
+      metadata: parseJsonField<unknown>(row.metadata, null),
+      createdAt: row.created_at
+    }));
+
     const scheduledTasks: ScheduledTask[] = scheduledTaskRows.map(row => ({
       id: row.id,
       spaceId: row.space_id || DEFAULT_SPACE_ID,
@@ -996,6 +1049,7 @@ export class MysqlStore extends BaseStore {
       messages,
       deliveries,
       deliveryEvents,
+      deliveryArtifacts,
       tasks,
       scheduledTasks,
       externalIngressPairings,
@@ -1251,6 +1305,35 @@ export class MysqlStore extends BaseStore {
               event.sequence ?? 0,
               event.createdAt,
               JSON.stringify(event.payload ?? null)
+            ])
+          ]
+        );
+      }
+
+      await conn.query("DELETE FROM iteam_delivery_artifacts");
+      if (state.deliveryArtifacts.length) {
+        await conn.query(
+          "INSERT INTO iteam_delivery_artifacts (id, space_id, delivery_id, event_id, agent_id, target, kind, title, summary, mime, size, sha256, storage, path, relative_path, content, metadata, created_at) VALUES ?",
+          [
+            state.deliveryArtifacts.map(artifact => [
+              artifact.id,
+              artifact.spaceId || DEFAULT_SPACE_ID,
+              artifact.deliveryId,
+              artifact.eventId ?? null,
+              artifact.agentId,
+              artifact.target,
+              artifact.kind,
+              artifact.title,
+              artifact.summary ?? null,
+              artifact.mime,
+              artifact.size ?? 0,
+              artifact.sha256 ?? null,
+              artifact.storage || "db",
+              artifact.path ?? null,
+              artifact.relativePath ?? null,
+              artifact.content ?? null,
+              JSON.stringify(artifact.metadata ?? null),
+              artifact.createdAt
             ])
           ]
         );

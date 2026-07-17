@@ -238,6 +238,32 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
   },
   {
+    name: "iteam_delivery_artifacts",
+    ddl: `CREATE TABLE IF NOT EXISTS iteam_delivery_artifacts (
+      id            VARCHAR(64)  NOT NULL PRIMARY KEY,
+      space_id      VARCHAR(64)  NOT NULL DEFAULT 'space_default',
+      delivery_id   VARCHAR(64)  NOT NULL,
+      event_id      VARCHAR(64)  DEFAULT NULL,
+      agent_id      VARCHAR(64)  NOT NULL,
+      target        VARCHAR(255) NOT NULL,
+      kind          VARCHAR(64)  NOT NULL,
+      title         VARCHAR(255) NOT NULL,
+      summary       TEXT         DEFAULT NULL,
+      mime          VARCHAR(128) NOT NULL,
+      size          INT          NOT NULL DEFAULT 0,
+      sha256        VARCHAR(64)  DEFAULT NULL,
+      storage       VARCHAR(32)  NOT NULL DEFAULT 'db',
+      path          TEXT         DEFAULT NULL,
+      relative_path TEXT         DEFAULT NULL,
+      content       MEDIUMTEXT   DEFAULT NULL,
+      metadata      JSON         DEFAULT NULL,
+      created_at    VARCHAR(40)  NOT NULL,
+      KEY idx_delivery_created (delivery_id, created_at),
+      KEY idx_event (event_id),
+      KEY idx_target_created (space_id, target, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+  },
+  {
     name: "iteam_external_ingress_pairings",
     ddl: `CREATE TABLE IF NOT EXISTS iteam_external_ingress_pairings (
       id            VARCHAR(64)  NOT NULL PRIMARY KEY,

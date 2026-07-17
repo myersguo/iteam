@@ -7,6 +7,7 @@
 // testable without booting an HTTP server.
 
 import { CronExpressionParser } from "cron-parser";
+import { createHash } from "node:crypto";
 import {
   createId as defaultCreateId,
   deriveAgentAuthToken,
@@ -25,6 +26,7 @@ import type {
   ConnectComputerResult,
   ContextMessage,
   Delivery,
+  DeliveryArtifact,
   DeliveryEvent,
   DeliveryEventKind,
   DeliveryLifecycleIntent,
@@ -553,6 +555,7 @@ export class IteamCore {
       s.messages = (s.messages || []).filter(m => m.spaceId !== spaceId);
       s.deliveries = (s.deliveries || []).filter(d => d.spaceId !== spaceId);
       s.deliveryEvents = (s.deliveryEvents || []).filter(e => e.spaceId !== spaceId);
+      s.deliveryArtifacts = (s.deliveryArtifacts || []).filter(e => e.spaceId !== spaceId);
       s.tasks = (s.tasks || []).filter(t => t.spaceId !== spaceId);
       s.scheduledTasks = (s.scheduledTasks || []).filter(t => t.spaceId !== spaceId);
       s.externalIngressPairings = (s.externalIngressPairings || []).filter(p => p.spaceId !== spaceId);
@@ -581,6 +584,7 @@ export class IteamCore {
       messages: (raw.messages || []).filter(item => item.spaceId === spaceId),
       deliveries: (raw.deliveries || []).filter(item => item.spaceId === spaceId),
       deliveryEvents: (raw.deliveryEvents || []).filter(item => item.spaceId === spaceId),
+      deliveryArtifacts: (raw.deliveryArtifacts || []).filter(item => item.spaceId === spaceId),
       tasks: (raw.tasks || []).filter(item => item.spaceId === spaceId),
       scheduledTasks: (raw.scheduledTasks || []).filter(item => item.spaceId === spaceId),
       externalIngressPairings: (raw.externalIngressPairings || []).filter(item => item.spaceId === spaceId),
@@ -659,6 +663,39 @@ export class IteamCore {
         left.id.localeCompare(right.id)
       )
       .slice(-limit);
+  }
+
+  listDeliveryArtifacts(filter: {
+    spaceId?: string | null;
+    target?: string | null;
+    deliveryId?: string | null;
+    eventId?: string | null;
+    limit?: number | string | null;
+  } = {}): DeliveryArtifact[] {
+    let artifacts = this.store.snapshot().deliveryArtifacts || [];
+    if (filter.spaceId !== undefined) {
+      const spaceId = this.resolveSpaceId(filter.spaceId);
+      artifacts = artifacts.filter(artifact => artifact.spaceId === spaceId);
+    }
+    if (filter.target) artifacts = artifacts.filter(artifact => artifact.target === filter.target);
+    if (filter.deliveryId) artifacts = artifacts.filter(artifact => artifact.deliveryId === filter.deliveryId);
+    if (filter.eventId) artifacts = artifacts.filter(artifact => artifact.eventId === filter.eventId);
+    const limit = parseMessageLimit(filter.limit);
+    return [...artifacts]
+      .sort((left, right) =>
+        left.createdAt.localeCompare(right.createdAt) ||
+        left.id.localeCompare(right.id)
+      )
+      .slice(-limit);
+  }
+
+  getDeliveryArtifact(artifactId: string, spaceId?: string | null): DeliveryArtifact {
+    const resolved = spaceId !== undefined ? this.resolveSpaceId(spaceId) : null;
+    const artifact = (this.store.snapshot().deliveryArtifacts || []).find(item =>
+      item.id === artifactId && (!resolved || item.spaceId === resolved)
+    );
+    if (!artifact) throw new HttpError(404, "delivery artifact not found");
+    return artifact;
   }
 
   listIngressPairings(spaceId?: string | null) {
@@ -952,6 +989,9 @@ export class IteamCore {
       s.deliveryEvents = (s.deliveryEvents || []).filter(event =>
         !(event.spaceId === spaceId && belongsToChannel(event.target))
       );
+      s.deliveryArtifacts = (s.deliveryArtifacts || []).filter(artifact =>
+        !(artifact.spaceId === spaceId && belongsToChannel(artifact.target))
+      );
       s.scheduledTasks = (s.scheduledTasks || []).filter(task =>
         !(task.spaceId === spaceId && belongsToChannel(task.target))
       );
@@ -1185,6 +1225,9 @@ export class IteamCore {
       s.deliveryEvents = (s.deliveryEvents || []).filter(event =>
         !removedAgentIds.includes(event.agentId)
       );
+      s.deliveryArtifacts = (s.deliveryArtifacts || []).filter(artifact =>
+        !removedAgentIds.includes(artifact.agentId)
+      );
       s.pendingComputerConnections = (s.pendingComputerConnections || [])
         .filter(p => p.connectedComputerId !== computerId);
       if (removedAgentIds.length > 0) {
@@ -1407,6 +1450,7 @@ export class IteamCore {
         }));
       s.deliveries = (s.deliveries || []).filter(delivery => delivery.agentId !== agentId);
       s.deliveryEvents = (s.deliveryEvents || []).filter(event => event.agentId !== agentId);
+      s.deliveryArtifacts = (s.deliveryArtifacts || []).filter(artifact => artifact.agentId !== agentId);
       for (const task of s.tasks || []) {
         if (task.assigneeId === agentId) {
           task.assigneeId = null;
@@ -3258,6 +3302,7 @@ function createDeliveryEventRecord(
     payload: sanitizeDeliveryEventPayload(input.payload)
   };
   state.deliveryEvents.push(event);
+  createDeliveryArtifactsForEvent(state, event, input.payload, input.newId);
   trimDeliveryEvents(state, input.delivery.id);
   return event;
 }
@@ -3345,13 +3390,271 @@ function mergeStreamText(existing: string, next: string, maxLength: number): str
   return `${existing}${separator}${next}`.slice(-maxLength);
 }
 
+function createDeliveryArtifactsForEvent(
+  state: State,
+  event: DeliveryEvent,
+  rawPayload: unknown,
+  newId: (prefix: string) => string
+): void {
+  state.deliveryArtifacts ||= [];
+  const payload = sanitizeArtifactPayload(rawPayload);
+  const artifacts: Array<Omit<DeliveryArtifact, "id" | "spaceId" | "deliveryId" | "eventId" | "agentId" | "target" | "createdAt">> = [];
+
+  if (event.kind === "tool_call") {
+    const command = commandTextFromPayload(payload);
+    artifacts.push({
+      kind: "tool_input",
+      title: command ? `Input: ${truncateMiddle(command, 160)}` : `Input: ${event.title || event.toolName || "tool"}`,
+      summary: command || compactJson(payload, 300),
+      mime: "application/json",
+      size: byteSize(stableStringify(payload)),
+      sha256: hashText(stableStringify(payload)),
+      storage: "db",
+      content: stableStringify(payload),
+      metadata: artifactMetadataFromPayload(payload)
+    });
+  }
+
+  if (event.kind === "tool_result") {
+    const outputText = outputTextFromPayload(payload);
+    artifacts.push({
+      kind: "tool_output",
+      title: `Output: ${event.title || event.toolName || "tool"}`,
+      summary: outputText ? truncateMiddle(outputText.replace(/\s+/g, " ").trim(), 300) : compactJson(payload, 300),
+      mime: "application/json",
+      size: byteSize(stableStringify(payload)),
+      sha256: hashText(stableStringify(payload)),
+      storage: "db",
+      content: stableStringify(payload),
+      metadata: artifactMetadataFromPayload(payload)
+    });
+
+    const stdout = stringField(payload, "stdout") || stringField(payload, "formatted_output") || stringField(payload, "aggregated_output");
+    if (stdout) {
+      artifacts.push(textArtifact({
+        kind: "command_stdout",
+        title: `stdout: ${truncateMiddle(commandTextFromPayload(payload) || event.title || "command", 140)}`,
+        text: stdout,
+        metadata: artifactMetadataFromPayload(payload)
+      }));
+    }
+    const stderr = stringField(payload, "stderr");
+    if (stderr) {
+      artifacts.push(textArtifact({
+        kind: "command_stderr",
+        title: `stderr: ${truncateMiddle(commandTextFromPayload(payload) || event.title || "command", 140)}`,
+        text: stderr,
+        metadata: artifactMetadataFromPayload(payload)
+      }));
+    }
+  }
+
+  for (const change of fileChangesFromPayload(payload)) {
+    artifacts.push(textArtifact({
+      kind: "file_diff",
+      title: `Changed ${change.relativePath || change.path}`,
+      text: change.diff || change.content || compactJson(change, 2_000),
+      path: change.path,
+      relativePath: change.relativePath,
+      mime: guessMime(change.path || change.relativePath || "change.diff"),
+      metadata: {
+        ...artifactMetadataFromPayload(payload),
+        changeKind: change.kind || null
+      }
+    }));
+  }
+
+  for (const artifact of artifacts.slice(0, 12)) {
+    state.deliveryArtifacts.push({
+      id: newId("artifact"),
+      spaceId: event.spaceId,
+      deliveryId: event.deliveryId,
+      eventId: event.id,
+      agentId: event.agentId,
+      target: event.target,
+      createdAt: event.createdAt,
+      ...artifact
+    });
+  }
+}
+
+function textArtifact(input: {
+  kind: string;
+  title: string;
+  text: string;
+  path?: string | null;
+  relativePath?: string | null;
+  mime?: string;
+  metadata?: unknown;
+}): Omit<DeliveryArtifact, "id" | "spaceId" | "deliveryId" | "eventId" | "agentId" | "target" | "createdAt"> {
+  const text = maskSensitiveText(String(input.text || ""));
+  return {
+    kind: input.kind,
+    title: input.title,
+    summary: truncateMiddle(text.replace(/\s+/g, " ").trim(), 300),
+    mime: input.mime || "text/plain; charset=utf-8",
+    size: byteSize(text),
+    sha256: hashText(text),
+    storage: "db",
+    path: input.path || null,
+    relativePath: input.relativePath || null,
+    content: truncateArtifactContent(text),
+    metadata: input.metadata ?? null
+  };
+}
+
+function sanitizeArtifactPayload(value: unknown): unknown {
+  if (value === undefined || value === null) return null;
+  try {
+    return JSON.parse(maskSensitiveText(JSON.stringify(value)));
+  } catch {
+    return maskSensitiveText(String(value));
+  }
+}
+
 function sanitizeDeliveryEventPayload(value: unknown): unknown {
   if (value === undefined || value === null) return null;
   try {
-    return JSON.parse(maskSensitiveText(JSON.stringify(value)).slice(0, 8_000));
+    return truncateJsonValue(JSON.parse(maskSensitiveText(JSON.stringify(value))));
   } catch {
     return maskSensitiveText(String(value)).slice(0, 2_000);
   }
+}
+
+function truncateJsonValue(value: unknown, maxStringLength = 2_000): unknown {
+  if (typeof value === "string") {
+    return value.length > maxStringLength ? `${value.slice(0, maxStringLength)}…[truncated ${value.length - maxStringLength} chars]` : value;
+  }
+  if (Array.isArray(value)) return value.slice(0, 50).map(item => truncateJsonValue(item, maxStringLength));
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>).slice(0, 80)) {
+      out[key] = truncateJsonValue(item, maxStringLength);
+    }
+    return out;
+  }
+  return value;
+}
+
+function commandTextFromPayload(payload: unknown): string | null {
+  const record = asRecord(payload);
+  const command = record.command;
+  if (Array.isArray(command)) return command.map(part => String(part)).join(" ");
+  if (typeof command === "string") return command;
+  const parsed = Array.isArray(record.parsed_cmd) ? record.parsed_cmd[0] as Record<string, unknown> : null;
+  return typeof parsed?.cmd === "string" ? parsed.cmd : null;
+}
+
+function outputTextFromPayload(payload: unknown): string | null {
+  return stringField(payload, "stdout") ||
+    stringField(payload, "stderr") ||
+    stringField(payload, "formatted_output") ||
+    stringField(payload, "aggregated_output") ||
+    (typeof payload === "string" ? payload : null);
+}
+
+function artifactMetadataFromPayload(payload: unknown): Record<string, unknown> {
+  const record = asRecord(payload);
+  return {
+    callId: record.call_id || record.callId || null,
+    processId: record.process_id || null,
+    turnId: record.turn_id || null,
+    cwd: record.cwd || null,
+    command: commandTextFromPayload(payload),
+    exitCode: record.exit_code ?? null,
+    status: record.status || null,
+    duration: record.duration || null
+  };
+}
+
+function fileChangesFromPayload(payload: unknown): Array<Record<string, string | null>> {
+  const record = asRecord(payload);
+  const changes = record.changes;
+  const output: Array<Record<string, string | null>> = [];
+  if (changes && typeof changes === "object" && !Array.isArray(changes)) {
+    for (const [path, value] of Object.entries(changes as Record<string, unknown>)) {
+      const item = asRecord(value);
+      output.push({
+        path,
+        relativePath: relativeArtifactPath(path),
+        kind: typeof item.kind === "string" ? item.kind : null,
+        diff: typeof item.diff === "string" ? item.diff : null,
+        content: typeof item.content === "string" ? item.content : null
+      });
+    }
+  }
+  const filePath = stringField(payload, "file_path") || stringField(payload, "path");
+  if (filePath && (stringField(payload, "diff") || stringField(payload, "content"))) {
+    output.push({
+      path: filePath,
+      relativePath: relativeArtifactPath(filePath),
+      kind: stringField(payload, "kind"),
+      diff: stringField(payload, "diff"),
+      content: stringField(payload, "content")
+    });
+  }
+  return output;
+}
+
+function relativeArtifactPath(path: string | null | undefined): string | null {
+  if (!path) return null;
+  const marker = "/.iteam/agents/";
+  const index = path.indexOf(marker);
+  if (index === -1) return path.split("/").slice(-3).join("/");
+  const parts = path.slice(index + marker.length).split("/");
+  return parts.slice(1).join("/") || parts.join("/");
+}
+
+function stringField(value: unknown, key: string): string | null {
+  const item = asRecord(value)[key];
+  return typeof item === "string" && item ? item : null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? value as Record<string, unknown> : {};
+}
+
+function stableStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function compactJson(value: unknown, maxLength: number): string {
+  return truncateMiddle(stableStringify(value).replace(/\s+/g, " ").trim(), maxLength);
+}
+
+function truncateMiddle(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  const head = Math.max(20, Math.floor(maxLength * 0.6));
+  const tail = Math.max(10, maxLength - head - 16);
+  return `${value.slice(0, head)}…${value.slice(-tail)}`;
+}
+
+function truncateArtifactContent(value: string, maxLength = 120_000): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength)}\n\n[truncated ${value.length - maxLength} chars]`;
+}
+
+function byteSize(value: string): number {
+  return Buffer.byteLength(value, "utf8");
+}
+
+function hashText(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function guessMime(path: string): string {
+  const lower = path.toLowerCase();
+  if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "text/markdown; charset=utf-8";
+  if (lower.endsWith(".json")) return "application/json; charset=utf-8";
+  if (lower.endsWith(".html") || lower.endsWith(".htm")) return "text/html; charset=utf-8";
+  if (lower.endsWith(".css")) return "text/css; charset=utf-8";
+  if (lower.endsWith(".js") || lower.endsWith(".ts") || lower.endsWith(".tsx") || lower.endsWith(".jsx")) return "text/plain; charset=utf-8";
+  if (lower.endsWith(".diff") || lower.endsWith(".patch")) return "text/x-diff; charset=utf-8";
+  return "text/plain; charset=utf-8";
 }
 
 function maskSensitiveText(value: string): string {

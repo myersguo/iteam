@@ -6,6 +6,7 @@ import type {
   Channel,
   Computer,
   Delivery,
+  DeliveryArtifact,
   DeliveryEvent,
   ExternalBotBinding,
   ExternalBotConfig,
@@ -71,6 +72,7 @@ export function initialState(): State {
     messages: [],
     deliveries: [],
     deliveryEvents: [],
+    deliveryArtifacts: [],
     tasks: [],
     scheduledTasks: [],
     externalIngressPairings: [],
@@ -193,6 +195,19 @@ export function sanitizeState(state: State): State {
     status: event.status ?? null,
     sequence: Number(event.sequence) || index + 1,
     payload: event.payload ?? null
+  }));
+  state.deliveryArtifacts = (state.deliveryArtifacts || []).map((artifact: DeliveryArtifact) => ({
+    ...artifact,
+    spaceId: deliverySpaceIds.get(artifact.deliveryId) || ensureSpaceId(artifact.spaceId),
+    eventId: artifact.eventId ?? null,
+    summary: artifact.summary ?? null,
+    size: Number(artifact.size) || 0,
+    sha256: artifact.sha256 ?? null,
+    storage: artifact.storage || "db",
+    path: artifact.path ?? null,
+    relativePath: artifact.relativePath ?? null,
+    content: artifact.content ?? null,
+    metadata: artifact.metadata ?? null
   }));
   state.externalIngressPairings = (state.externalIngressPairings || []).map((pairing: ExternalIngressPairing) => ({
     ...pairing,

@@ -264,6 +264,30 @@ async function route(
       spaceId
     }));
   }
+  if (req.method === "GET" && url.pathname === "/api/delivery-artifacts") {
+    return sendJson(res, 200, core.listDeliveryArtifacts({
+      target: url.searchParams.get("target"),
+      deliveryId: url.searchParams.get("deliveryId"),
+      eventId: url.searchParams.get("eventId"),
+      limit: url.searchParams.get("limit"),
+      spaceId
+    }));
+  }
+  const artifactContent = url.pathname.match(/^\/api\/delivery-artifacts\/([^/]+)\/content$/);
+  if (req.method === "GET" && artifactContent) {
+    const artifact = core.getDeliveryArtifact(decodeURIComponent(artifactContent[1]), spaceId);
+    res.writeHead(200, {
+      "content-type": artifact.mime || "text/plain; charset=utf-8",
+      "cache-control": "no-store",
+      "x-iteam-artifact-kind": artifact.kind
+    });
+    res.end(artifact.content || "");
+    return;
+  }
+  const artifactDetail = url.pathname.match(/^\/api\/delivery-artifacts\/([^/]+)$/);
+  if (req.method === "GET" && artifactDetail) {
+    return sendJson(res, 200, core.getDeliveryArtifact(decodeURIComponent(artifactDetail[1]), spaceId));
+  }
   if (req.method === "GET" && url.pathname === "/api/ingress/pairing-codes") return sendJson(res, 200, core.listIngressPairings(spaceId));
   if (req.method === "GET" && url.pathname === "/api/ingress/policies") return sendJson(res, 200, core.listIngressPolicies(spaceId));
   if (req.method === "GET" && url.pathname === "/api/external/bot-configs") return sendJson(res, 200, core.listExternalBotConfigs(spaceId));

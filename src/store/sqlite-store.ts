@@ -5,6 +5,7 @@ import type {
   Channel,
   Computer,
   Delivery,
+  DeliveryArtifact,
   DeliveryEvent,
   ExternalBotBinding,
   ExternalBotConfig,
@@ -190,6 +191,16 @@ export class SqliteStore extends BaseStore {
       SET space_id = COALESCE(
         (SELECT delivery.space_id FROM iteam_deliveries delivery WHERE delivery.id = iteam_delivery_events.delivery_id),
         (SELECT agent.space_id FROM iteam_agents agent WHERE agent.id = iteam_delivery_events.agent_id),
+        NULLIF(space_id, 'space_default'),
+        'space_default'
+      )
+      WHERE space_id = 'space_default'
+    `);
+    this.db.exec(`
+      UPDATE iteam_delivery_artifacts
+      SET space_id = COALESCE(
+        (SELECT delivery.space_id FROM iteam_deliveries delivery WHERE delivery.id = iteam_delivery_artifacts.delivery_id),
+        (SELECT agent.space_id FROM iteam_agents agent WHERE agent.id = iteam_delivery_artifacts.agent_id),
         NULLIF(space_id, 'space_default'),
         'space_default'
       )
@@ -635,6 +646,29 @@ export class SqliteStore extends BaseStore {
         payload: string | null;
       }>;
 
+    const deliveryArtifactRows = this.db
+      .prepare("SELECT * FROM iteam_delivery_artifacts ORDER BY created_at ASC")
+      .all() as Array<{
+        id: string;
+        space_id: string | null;
+        delivery_id: string;
+        event_id: string | null;
+        agent_id: string;
+        target: string;
+        kind: string;
+        title: string;
+        summary: string | null;
+        mime: string;
+        size: number;
+        sha256: string | null;
+        storage: string;
+        path: string | null;
+        relative_path: string | null;
+        content: string | null;
+        metadata: string | null;
+        created_at: string;
+      }>;
+
     const scheduledTaskRows = this.db
       .prepare("SELECT * FROM iteam_scheduled_tasks ORDER BY created_at ASC")
       .all() as Array<{
@@ -883,6 +917,27 @@ export class SqliteStore extends BaseStore {
       payload: parseJsonField<unknown>(row.payload, null)
     }));
 
+    const deliveryArtifacts: DeliveryArtifact[] = deliveryArtifactRows.map(row => ({
+      id: row.id,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
+      deliveryId: row.delivery_id,
+      eventId: row.event_id,
+      agentId: row.agent_id,
+      target: row.target,
+      kind: row.kind,
+      title: row.title,
+      summary: row.summary,
+      mime: row.mime,
+      size: Number(row.size) || 0,
+      sha256: row.sha256,
+      storage: row.storage || "db",
+      path: row.path,
+      relativePath: row.relative_path,
+      content: row.content,
+      metadata: parseJsonField<unknown>(row.metadata, null),
+      createdAt: row.created_at
+    }));
+
     const scheduledTasks: ScheduledTask[] = scheduledTaskRows.map(row => ({
       id: row.id,
       spaceId: row.space_id || DEFAULT_SPACE_ID,
@@ -1001,6 +1056,7 @@ export class SqliteStore extends BaseStore {
       messages,
       deliveries,
       deliveryEvents,
+      deliveryArtifacts,
       tasks,
       scheduledTasks,
       externalIngressPairings,
@@ -1234,6 +1290,35 @@ export class SqliteStore extends BaseStore {
           event.sequence ?? 0,
           event.createdAt,
           event.payload !== undefined ? JSON.stringify(event.payload) : null
+        );
+      }
+    }
+
+    this.db.exec("DELETE FROM iteam_delivery_artifacts");
+    if (state.deliveryArtifacts.length) {
+      const stmt = this.db.prepare(
+        "INSERT INTO iteam_delivery_artifacts (id, space_id, delivery_id, event_id, agent_id, target, kind, title, summary, mime, size, sha256, storage, path, relative_path, content, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      );
+      for (const artifact of state.deliveryArtifacts) {
+        stmt.run(
+          artifact.id,
+          artifact.spaceId || DEFAULT_SPACE_ID,
+          artifact.deliveryId,
+          artifact.eventId ?? null,
+          artifact.agentId,
+          artifact.target,
+          artifact.kind,
+          artifact.title,
+          artifact.summary ?? null,
+          artifact.mime,
+          artifact.size ?? 0,
+          artifact.sha256 ?? null,
+          artifact.storage || "db",
+          artifact.path ?? null,
+          artifact.relativePath ?? null,
+          artifact.content ?? null,
+          artifact.metadata !== undefined ? JSON.stringify(artifact.metadata) : null,
+          artifact.createdAt
         );
       }
     }
