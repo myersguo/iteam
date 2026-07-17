@@ -2108,7 +2108,8 @@ function DeliveryTimeline({ events, deliveries, agents }: { events: DeliveryEven
     left.createdAt.localeCompare(right.createdAt) ||
     left.id.localeCompare(right.id)
   );
-  const withOutcomes = appendDeliveryOutcomeEvents(ordered, deliveries);
+  const timelineEvents = ordered.filter(event => event.kind !== "message_delta");
+  const withOutcomes = appendDeliveryOutcomeEvents(timelineEvents, deliveries);
   const grouped = groupDeliveryEvents(withOutcomes);
   const visible = expanded ? grouped : grouped.slice(-4);
   const draft = deliveryDraftText(ordered);
@@ -2247,7 +2248,7 @@ function groupDeliveryEvents(events: DeliveryEvent[]): DeliveryEvent[] {
     const previous = grouped[grouped.length - 1];
     if (
       previous &&
-      (event.kind === "thinking" || event.kind === "message_delta") &&
+      event.kind === "thinking" &&
       previous.kind === event.kind &&
       previous.deliveryId === event.deliveryId
     ) {

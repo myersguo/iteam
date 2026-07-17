@@ -40,10 +40,10 @@ try {
       returnByValue: true
     });
     text = String(result?.result?.value || "");
-    if (text.includes("Working") && text.includes("Draft reply")) break;
+    if (/(Working|Completed|Failed|Cancelled)/.test(text) && text.includes("Draft reply")) break;
   }
-  if (!text.includes("Working")) {
-    throw new Error(`timeline UI did not render Working; body starts with: ${text.slice(0, 500)}`);
+  if (!/(Working|Completed|Failed|Cancelled)/.test(text)) {
+    throw new Error(`timeline UI did not render timeline status; body starts with: ${text.slice(0, 500)}`);
   }
   if (!text.includes("Draft reply")) {
     throw new Error(`timeline UI did not render draft reply; body starts with: ${text.slice(0, 500)}`);
@@ -51,6 +51,21 @@ try {
   if (!/Run command|pwd|Tool completed|Thinking/.test(text)) {
     throw new Error(`timeline UI rendered without runtime process details: ${text.slice(0, 800)}`);
   }
+  const structure = await client.send("Runtime.evaluate", {
+    expression: `Array.from(document.querySelectorAll('.delivery-timeline')).map(timeline => ({
+      listText: timeline.querySelector('.delivery-event-list')?.innerText || '',
+      hasMessageDeltaItem: !!timeline.querySelector('.delivery-event-list .is-message_delta'),
+      hasDraft: !!timeline.querySelector('.delivery-draft')
+    }))`,
+    returnByValue: true
+  });
+  const timelines = structure?.result?.value || [];
+  for (const timeline of timelines) {
+    if (timeline.hasMessageDeltaItem || /\bDraft reply\b/.test(timeline.listText || "")) {
+      throw new Error("Draft reply is rendered inside the timeline event list");
+    }
+  }
+  const lines = text.split("\n").map(line => line.trim()).filter(Boolean);
 
   await client.send("Runtime.evaluate", {
     expression: "const pane=document.querySelector('.chat-pane'); if (pane) pane.scrollTop=0; window.scrollTo(0, 0)"
@@ -65,8 +80,8 @@ try {
     ok: true,
     url,
     screenshotPath,
-    statusText: text.split("\n").filter(line =>
-      /Working|Draft reply|Run command|Tool completed|Thinking|pwd/.test(line)
+    statusText: lines.filter(line =>
+      /Working|Completed|Failed|Cancelled|Draft reply|Run command|Tool completed|Thinking|pwd/.test(line)
     ).slice(0, 12)
   }));
   client.close();
