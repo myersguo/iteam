@@ -12,7 +12,6 @@ import {
   Computer,
   Copy,
   ExternalLink,
-  FileText,
   Hash,
   Kanban,
   List,
@@ -2191,12 +2190,6 @@ function DeliveryTimeline({ events, deliveries, artifacts, agents }: { events: D
           <p>{draft}</p>
         </div>
       )}
-      {artifacts.length > 0 && (
-        <DeliveryArtifactSummary artifacts={artifacts} onOpen={artifact => {
-          const event = ordered.find(item => item.id === artifact.eventId) || null;
-          setSelectedEvent(event || syntheticEventForArtifact(artifact));
-        }} />
-      )}
       {selectedEvent && (
         <DeliveryEventDrawer
           event={selectedEvent}
@@ -2258,39 +2251,6 @@ function deliveryArtifactsForMessage(state: AppState, message: Message): Deliver
   );
   if (deliveryIds.size === 0) return [];
   return state.deliveryArtifacts.filter(artifact => deliveryIds.has(artifact.deliveryId));
-}
-
-function DeliveryArtifactSummary({ artifacts, onOpen }: { artifacts: DeliveryArtifact[]; onOpen: (artifact: DeliveryArtifact) => void }) {
-  const sources = artifacts.filter(artifact => artifact.kind === "source_read" || artifact.kind === "tool_input");
-  const outputs = artifacts.filter(artifact => !sources.includes(artifact));
-  return (
-    <div className="delivery-artifacts">
-      {sources.length > 0 && (
-        <div>
-          <small>Sources used</small>
-          <div className="artifact-pills">
-            {sources.slice(0, 6).map(artifact => (
-              <button key={artifact.id} type="button" onClick={() => onOpen(artifact)}>
-                <FileText size={13} /> {artifact.relativePath || artifact.title}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-      {outputs.length > 0 && (
-        <div>
-          <small>Outputs produced</small>
-          <div className="artifact-pills">
-            {outputs.slice(0, 8).map(artifact => (
-              <button key={artifact.id} type="button" onClick={() => onOpen(artifact)}>
-                <FileText size={13} /> {artifact.relativePath || artifact.title}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
 }
 
 function DeliveryEventDrawer({ event, artifacts, agent, onClose }: {
@@ -2376,21 +2336,6 @@ function ArtifactCode({ title, content }: { title: string; content: string }) {
       <pre>{content || "(empty)"}</pre>
     </section>
   );
-}
-
-function syntheticEventForArtifact(artifact: DeliveryArtifact): DeliveryEvent {
-  return {
-    id: artifact.eventId || `artifact:${artifact.id}`,
-    deliveryId: artifact.deliveryId,
-    agentId: artifact.agentId,
-    target: artifact.target,
-    kind: artifact.kind,
-    title: artifact.title,
-    text: artifact.summary || null,
-    sequence: 0,
-    createdAt: artifact.createdAt,
-    payload: artifact.metadata
-  };
 }
 
 function artifactLabel(artifact: DeliveryArtifact): string {

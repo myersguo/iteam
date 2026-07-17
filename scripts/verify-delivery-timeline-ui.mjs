@@ -37,7 +37,7 @@ try {
   for (let attempt = 0; attempt < 80; attempt += 1) {
     await delay(250);
     const result = await client.send("Runtime.evaluate", {
-      expression: "({ text: document.body.innerText, hasArtifactButton: !!document.querySelector('.artifact-pills button, .delivery-event.has-artifacts') })",
+      expression: "({ text: document.body.innerText, hasArtifactButton: !!document.querySelector('.delivery-event.has-artifacts') })",
       returnByValue: true
     });
     text = String(result?.result?.value?.text || "");
@@ -58,7 +58,10 @@ try {
     throw new Error(`timeline UI rendered without runtime process details: ${text.slice(0, 800)}`);
   }
   if (!hasArtifactButton) {
-    throw new Error(`timeline UI rendered without artifact summary: ${text.slice(0, 800)}`);
+    throw new Error(`timeline UI rendered without an artifact-bearing event: ${text.slice(0, 800)}`);
+  }
+  if (/Sources used|Outputs produced/.test(text)) {
+    throw new Error("artifact summaries should not be displayed before opening an event");
   }
   const structure = await client.send("Runtime.evaluate", {
     expression: `Array.from(document.querySelectorAll('.delivery-timeline')).map(timeline => ({
@@ -76,7 +79,7 @@ try {
   }
   const drawerCheck = await client.send("Runtime.evaluate", {
     expression: `(async () => {
-      const buttons = Array.from(document.querySelectorAll('.artifact-pills button, .delivery-event.has-artifacts'));
+      const buttons = Array.from(document.querySelectorAll('.delivery-event.has-artifacts'));
       if (!buttons.length) return { clicked: false, text: document.body.innerText.slice(0, 800) };
       for (const button of buttons.reverse()) {
         button.scrollIntoView({ block: 'center' });

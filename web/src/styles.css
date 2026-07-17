@@ -863,32 +863,6 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
   font-size: 13px;
   color: var(--body);
 }
-.delivery-artifacts {
-  display: grid;
-  gap: 8px;
-}
-.delivery-artifacts small {
-  display: block;
-  color: var(--muted-soft);
-  margin-bottom: 4px;
-}
-.artifact-pills {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.artifact-pills button {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  border: 1px solid var(--hairline);
-  background: var(--surface-card);
-  color: var(--body-strong);
-  border-radius: var(--r-sm);
-  padding: 5px 8px;
-  font-size: 12px;
-}
-.artifact-pills button:hover { border-color: var(--primary-active); }
 .artifact-drawer {
   position: fixed;
   inset: 0 0 0 auto;
