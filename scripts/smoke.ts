@@ -1548,6 +1548,20 @@ async function verifySpaceIsolation(
     runtime: "codex",
     computerId: alphaComputer.id
   });
+  await patch(port, `/api/channels/${encodeURIComponent(alphaChannel.id)}`, {
+    defaultAgentId: alphaAgent.id
+  });
+  const alphaDefaultMessage = await post(port, "/api/messages", {
+    spaceId: alpha.id,
+    target: alphaChannel.target,
+    text: "alpha default agent delivery",
+    authorId: "human-local"
+  });
+  const alphaDefaultDelivery = (await getWithSpace(port, "/api/deliveries", alpha.id))
+    .find((delivery: any) => delivery.messageId === alphaDefaultMessage.id);
+  if (!alphaDefaultDelivery || alphaDefaultDelivery.agentId !== alphaAgent.id) {
+    throw new Error("channel default agent did not receive unmentioned message");
+  }
   const alphaMention = await post(port, "/api/messages", {
     spaceId: alpha.id,
     target: alphaChannel.target,

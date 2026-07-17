@@ -97,7 +97,7 @@ export interface MessageCreateInput extends SpaceContext {
   mentions?: MentionRef[];
   createdAt?: string;
   threadId?: string | null;
-  defaultAgentId?: string;
+  defaultAgentId?: string | null;
   sessionKey?: string | null;
   source?: string;
 }
@@ -1585,10 +1585,12 @@ export class IteamCore {
           });
         }
       } else {
-        // No explicit mention — only fall back when the caller passed an
-        // explicit defaultAgentId (e.g. channel default agent picker).
-        if (input.defaultAgentId) {
-          this.enqueueDefaultAgentDelivery(s, created, input.defaultAgentId, createdIds, {
+        const explicitDefaultAgentId = normalizeOptionalString(input.defaultAgentId);
+        const channelDefaultAgentId = channelDefaultAgentForTarget(s, created.target, spaceId);
+        if (explicitDefaultAgentId || channelDefaultAgentId) {
+          // No explicit mention — a caller-provided id overrides the channel
+          // default, otherwise the channel's configured default agent handles it.
+          this.enqueueDefaultAgentDelivery(s, created, explicitDefaultAgentId || channelDefaultAgentId || undefined, createdIds, {
             sessionKey: normalizeOptionalString(input.sessionKey),
             source: input.source || "message"
           });
@@ -2814,12 +2816,12 @@ export class IteamCore {
     createdIds?: string[],
     options: { sessionKey?: string | null; source?: string | null } = {}
   ): number {
-    const channel = (state.channels || []).find(channel => channel.target === message.target);
+    const channel = findChannelForMessageTarget(state, message.target, message.spaceId);
     const channelMemberIds = new Set<string>(channel?.memberIds || []);
     // Priority: caller-supplied agent > channel default agent > first running
-    // member. This is where "channel default agent" (settable via
-    // PATCH /api/channels/:id) makes an untagged message go to a specific
-    // agent instead of whichever running one happens to be first.
+    // member. Callers that want only a channel default must check for it before
+    // invoking this helper; some external routes still intentionally use the
+    // first running member fallback for channel-wide bindings.
     const preferredId = defaultAgentId || channel?.defaultAgentId || null;
     const preferredAgent = preferredId ? state.agents.find(a => a.id === preferredId) : null;
     const fallbackAgent = state.agents.find(a =>
@@ -3104,6 +3106,16 @@ function sessionKeyFromMessage(target: string, messageId: string): string | null
   if (normalized.startsWith("dm:") || threadRootFromTarget(normalized)) return normalized;
   if (normalized.startsWith("#")) return `channel-root:${normalized}:${messageId}`;
   return normalized;
+}
+
+function channelDefaultAgentForTarget(state: State, target: string, spaceId: string): string | null {
+  return findChannelForMessageTarget(state, target, spaceId)?.defaultAgentId || null;
+}
+
+function findChannelForMessageTarget(state: State, target: string, spaceId: string): Channel | null {
+  const rootTarget = parentTargetFromThread(target);
+  if (!rootTarget || rootTarget.startsWith("dm:")) return null;
+  return findChannel(state, rootTarget, spaceId) || null;
 }
 
 function normalizeOptionalString(value: string | null | undefined): string | null {
