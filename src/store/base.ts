@@ -325,8 +325,15 @@ export abstract class BaseStore implements IStore {
     this.persist(this.state);
   }
 
-  snapshot(): State {
-    return clone(this.state);
+  snapshot(options: { includeArtifactContent?: boolean } = {}): State {
+    if (options.includeArtifactContent) return clone(this.state);
+    const artifacts = this.state.deliveryArtifacts || [];
+    this.state.deliveryArtifacts = artifacts.map(artifact => ({ ...artifact, content: null }));
+    try {
+      return clone(this.state);
+    } finally {
+      this.state.deliveryArtifacts = artifacts;
+    }
   }
 
   mutate<T>(fn: StateMutator<T>): T {

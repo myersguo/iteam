@@ -691,7 +691,7 @@ export class IteamCore {
 
   getDeliveryArtifact(artifactId: string, spaceId?: string | null): DeliveryArtifact {
     const resolved = spaceId !== undefined ? this.resolveSpaceId(spaceId) : null;
-    const artifact = (this.store.snapshot().deliveryArtifacts || []).find(item =>
+    const artifact = (this.store.snapshot({ includeArtifactContent: true }).deliveryArtifacts || []).find(item =>
       item.id === artifactId && (!resolved || item.spaceId === resolved)
     );
     if (!artifact) throw new HttpError(404, "delivery artifact not found");

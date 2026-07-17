@@ -2429,6 +2429,7 @@ function verifySqliteSpacePersistence(home: string): void {
 
   const reopened = new SqliteStore(sqliteHome, sqliteFile);
   const state = reopened.snapshot();
+  const stateWithArtifactContent = reopened.snapshot({ includeArtifactContent: true });
   if (state.computers.find(item => item.id === computerId)?.spaceId !== spaceId) {
     throw new Error("SQLite computer spaceId was lost after reopen");
   }
@@ -2462,7 +2463,11 @@ function verifySqliteSpacePersistence(home: string): void {
   ) {
     throw new Error("SQLite delivery event was not persisted and backfilled");
   }
-  const deliveryArtifact = state.deliveryArtifacts.find(item => item.id === deliveryArtifactId);
+  const deliveryArtifactSummary = state.deliveryArtifacts.find(item => item.id === deliveryArtifactId);
+  if (deliveryArtifactSummary?.content !== null) {
+    throw new Error("SQLite default snapshot should omit delivery artifact content");
+  }
+  const deliveryArtifact = stateWithArtifactContent.deliveryArtifacts.find(item => item.id === deliveryArtifactId);
   if (
     deliveryArtifact?.spaceId !== spaceId ||
     deliveryArtifact.deliveryId !== deliveryId ||

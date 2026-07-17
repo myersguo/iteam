@@ -15,7 +15,7 @@ export interface IStore {
   /** Per-agent workspace root, derived from `home`. */
   readonly agentRoot: string;
   /** Returns a deep-cloned snapshot, safe to hand to consumers. */
-  snapshot(): State;
+  snapshot(options?: { includeArtifactContent?: boolean }): State;
   /** Atomically run a state mutation. The returned value is forwarded as-is. */
   mutate<T>(fn: StateMutator<T>): T;
   /** Push an event into the state.events ring and notify subscribers. */
