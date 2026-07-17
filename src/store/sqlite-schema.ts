@@ -160,6 +160,22 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
 	    error              TEXT,
 	    lifecycle          TEXT
 	  )`,
+  `CREATE TABLE IF NOT EXISTS iteam_delivery_events (
+    id           TEXT NOT NULL PRIMARY KEY,
+    space_id     TEXT NOT NULL DEFAULT 'space_default',
+    delivery_id  TEXT NOT NULL,
+    agent_id     TEXT NOT NULL,
+    target       TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    title        TEXT,
+    text         TEXT,
+    tool_name    TEXT,
+    tool_call_id TEXT,
+    status       TEXT,
+    sequence     INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT NOT NULL,
+    payload      TEXT
+  )`,
   `CREATE TABLE IF NOT EXISTS iteam_external_ingress_pairings (
     id            TEXT NOT NULL PRIMARY KEY,
     pair_code     TEXT NOT NULL UNIQUE,
@@ -247,6 +263,8 @@ export const SQLITE_INDEXES: ReadonlyArray<string> = [
   "CREATE INDEX IF NOT EXISTS idx_deliveries_status_computer ON iteam_deliveries(status, computer_id)",
   "CREATE INDEX IF NOT EXISTS idx_deliveries_agent ON iteam_deliveries(agent_id)",
   "CREATE INDEX IF NOT EXISTS idx_deliveries_message ON iteam_deliveries(message_id)",
+  "CREATE INDEX IF NOT EXISTS idx_delivery_events_delivery_seq ON iteam_delivery_events(delivery_id, sequence)",
+  "CREATE INDEX IF NOT EXISTS idx_delivery_events_target_created ON iteam_delivery_events(space_id, target, created_at)",
   "CREATE INDEX IF NOT EXISTS idx_ingress_pairings_code ON iteam_external_ingress_pairings(pair_code)",
   "CREATE INDEX IF NOT EXISTS idx_ingress_policies_token ON iteam_external_ingress_policies(id, token)",
   "CREATE INDEX IF NOT EXISTS idx_external_bot_configs_enabled ON iteam_external_bot_configs(enabled)",

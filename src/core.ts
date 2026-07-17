@@ -25,6 +25,8 @@ import type {
   ConnectComputerResult,
   ContextMessage,
   Delivery,
+  DeliveryEvent,
+  DeliveryEventKind,
   DeliveryLifecycleIntent,
   DeliveryLifecycleRecord,
   DeliveryWithContext,
@@ -299,6 +301,18 @@ export interface RuntimeEventInput {
   createdAt?: string;
 }
 
+export interface DeliveryEventCreateInput {
+  deliveryId: string;
+  kind: DeliveryEventKind;
+  title?: string | null;
+  text?: string | null;
+  toolName?: string | null;
+  toolCallId?: string | null;
+  status?: string | null;
+  payload?: unknown;
+  createdAt?: string;
+}
+
 export interface MessageQuery extends SpaceContext {
   target?: string;
   limit?: number | string | null;
@@ -421,6 +435,17 @@ export class IteamCore {
         delivery.error = delivery.error || "delivery timed out without a result";
         delivery.updatedAt = now;
         pushDeliveryLifecycle(delivery, "delivery.result", now, "Delivery timed out", { ok: false, reason: delivery.error });
+        createDeliveryEventRecord(s, {
+          newId: this.newId,
+          clock: this.clock,
+          delivery,
+          kind: "error",
+          title: "Delivery timed out",
+          text: delivery.error,
+          status: "failed",
+          payload: { reason: delivery.error },
+          createdAt: now
+        });
         cancellations.push({
           deliveryId: delivery.id,
           agentId: delivery.agentId,
@@ -527,6 +552,7 @@ export class IteamCore {
       s.pendingComputerConnections = (s.pendingComputerConnections || []).filter(p => p.spaceId !== spaceId);
       s.messages = (s.messages || []).filter(m => m.spaceId !== spaceId);
       s.deliveries = (s.deliveries || []).filter(d => d.spaceId !== spaceId);
+      s.deliveryEvents = (s.deliveryEvents || []).filter(e => e.spaceId !== spaceId);
       s.tasks = (s.tasks || []).filter(t => t.spaceId !== spaceId);
       s.scheduledTasks = (s.scheduledTasks || []).filter(t => t.spaceId !== spaceId);
       s.externalIngressPairings = (s.externalIngressPairings || []).filter(p => p.spaceId !== spaceId);
@@ -554,6 +580,7 @@ export class IteamCore {
       channels: (raw.channels || []).filter(item => item.spaceId === spaceId),
       messages: (raw.messages || []).filter(item => item.spaceId === spaceId),
       deliveries: (raw.deliveries || []).filter(item => item.spaceId === spaceId),
+      deliveryEvents: (raw.deliveryEvents || []).filter(item => item.spaceId === spaceId),
       tasks: (raw.tasks || []).filter(item => item.spaceId === spaceId),
       scheduledTasks: (raw.scheduledTasks || []).filter(item => item.spaceId === spaceId),
       externalIngressPairings: (raw.externalIngressPairings || []).filter(item => item.spaceId === spaceId),
@@ -609,6 +636,29 @@ export class IteamCore {
 
   listDeliveries(spaceId?: string | null) {
     return this.snapshotForSpace(spaceId).deliveries || [];
+  }
+
+  listDeliveryEvents(filter: {
+    spaceId?: string | null;
+    target?: string | null;
+    deliveryId?: string | null;
+    limit?: number | string | null;
+  } = {}): DeliveryEvent[] {
+    let events = this.store.snapshot().deliveryEvents || [];
+    if (filter.spaceId !== undefined) {
+      const spaceId = this.resolveSpaceId(filter.spaceId);
+      events = events.filter(event => event.spaceId === spaceId);
+    }
+    if (filter.target) events = events.filter(event => event.target === filter.target);
+    if (filter.deliveryId) events = events.filter(event => event.deliveryId === filter.deliveryId);
+    const limit = parseMessageLimit(filter.limit);
+    return [...events]
+      .sort((left, right) =>
+        left.createdAt.localeCompare(right.createdAt) ||
+        left.sequence - right.sequence ||
+        left.id.localeCompare(right.id)
+      )
+      .slice(-limit);
   }
 
   listIngressPairings(spaceId?: string | null) {
@@ -899,6 +949,9 @@ export class IteamCore {
           (belongsToChannel(task.target) || belongsToChannel(task.threadTarget))
         )
       );
+      s.deliveryEvents = (s.deliveryEvents || []).filter(event =>
+        !(event.spaceId === spaceId && belongsToChannel(event.target))
+      );
       s.scheduledTasks = (s.scheduledTasks || []).filter(task =>
         !(task.spaceId === spaceId && belongsToChannel(task.target))
       );
@@ -1129,6 +1182,9 @@ export class IteamCore {
       s.computers = (s.computers || []).filter(c => c.id !== computerId);
       s.agents = (s.agents || []).filter(a => a.computerId !== computerId);
       s.deliveries = (s.deliveries || []).filter(d => d.computerId !== computerId);
+      s.deliveryEvents = (s.deliveryEvents || []).filter(event =>
+        !removedAgentIds.includes(event.agentId)
+      );
       s.pendingComputerConnections = (s.pendingComputerConnections || [])
         .filter(p => p.connectedComputerId !== computerId);
       if (removedAgentIds.length > 0) {
@@ -1350,6 +1406,7 @@ export class IteamCore {
           defaultAgentId: channel.defaultAgentId === agentId ? null : channel.defaultAgentId
         }));
       s.deliveries = (s.deliveries || []).filter(delivery => delivery.agentId !== agentId);
+      s.deliveryEvents = (s.deliveryEvents || []).filter(event => event.agentId !== agentId);
       for (const task of s.tasks || []) {
         if (task.assigneeId === agentId) {
           task.assigneeId = null;
@@ -1398,6 +1455,29 @@ export class IteamCore {
 
   recordRuntimeEvent(agentId: string, input: RuntimeEventInput): void {
     this.store.emit("agent:runtime_event", { agentId, ...input });
+  }
+
+  createDeliveryEvent(input: DeliveryEventCreateInput): DeliveryEvent {
+    const event = this.store.mutate<DeliveryEvent>(s => {
+      const delivery = (s.deliveries || []).find(item => item.id === input.deliveryId);
+      if (!delivery) throw new HttpError(404, "delivery not found");
+      const event = createDeliveryEventRecord(s, {
+        newId: this.newId,
+        clock: this.clock,
+        delivery,
+        kind: input.kind,
+        title: input.title,
+        text: input.text,
+        toolName: input.toolName,
+        toolCallId: input.toolCallId,
+        status: input.status,
+        payload: input.payload,
+        createdAt: input.createdAt
+      });
+      return event;
+    });
+    this.store.emit("delivery:event", { event });
+    return event;
   }
 
   setAgentDesiredStatus(agentId: string, action: "start" | "stop"): Agent {
@@ -1537,6 +1617,17 @@ export class IteamCore {
         ok: !!input.ok,
         ...(input.error ? { error: input.error } : {})
       });
+      createDeliveryEventRecord(s, {
+        newId: this.newId,
+        clock: this.clock,
+        delivery,
+        kind: input.ok ? "completed" : "error",
+        title: input.ok ? "Completed" : "Delivery failed",
+        text: input.ok ? null : input.error || "unknown error",
+        status: input.ok ? "done" : "failed",
+        payload: input.ok ? { ok: true } : { ok: false, error: input.error || null },
+        createdAt: now
+      });
       if (input.ok && input.text) {
         // Agents may prefix their reply with `<thread>` on its own first line to
         // signal that the conversation should move into a thread (see the
@@ -1644,6 +1735,17 @@ export class IteamCore {
       pushDeliveryLifecycle(delivery, "delivery.progress", now, text.slice(0, 240), {
         ...(input.elapsedMs !== undefined ? { elapsedMs: input.elapsedMs } : {})
       });
+      createDeliveryEventRecord(s, {
+        newId: this.newId,
+        clock: this.clock,
+        delivery,
+        kind: "progress",
+        title: "Progress",
+        text,
+        status: "running",
+        payload: input.elapsedMs !== undefined ? { elapsedMs: input.elapsedMs } : null,
+        createdAt: now
+      });
       if (task.status === "todo") {
         task.status = "in_progress";
         task.updatedAt = now;
@@ -1701,6 +1803,22 @@ export class IteamCore {
           ...(processSlot !== undefined ? { processSlot } : {})
         }
       );
+      createDeliveryEventRecord(s, {
+        newId: this.newId,
+        clock: this.clock,
+        delivery,
+        kind: phase,
+        title: phase === "queued" ? "Queued" : "Runtime started",
+        text: phase === "queued" && queuePosition !== undefined ? `Queue position ${queuePosition}` : null,
+        status: phase,
+        payload: {
+          phase,
+          ...(queuePosition !== undefined ? { queuePosition } : {}),
+          ...(input.sessionKey ? { sessionKey: input.sessionKey } : {}),
+          ...(processSlot !== undefined ? { processSlot } : {})
+        },
+        createdAt: now
+      });
       return delivery;
     });
   }
@@ -2761,6 +2879,17 @@ export class IteamCore {
       updatedAt: now,
       lifecycle: [deliveryLifecycleRecord("delivery.dispatch", now, "Delivery queued")]
     });
+    const delivery = state.deliveries[state.deliveries.length - 1];
+    createDeliveryEventRecord(state, {
+      newId: this.newId,
+      clock: this.clock,
+      delivery,
+      kind: "queued",
+      title: "Delivery queued",
+      status: "pending",
+      payload: { source: options.source || "message" },
+      createdAt: now
+    });
     if (options.createdIds) options.createdIds.push(id);
     return 1;
   }
@@ -3076,6 +3205,147 @@ function pushDeliveryLifecycle(
   if (delivery.lifecycle.length > 50) {
     delivery.lifecycle.splice(0, delivery.lifecycle.length - 50);
   }
+}
+
+function createDeliveryEventRecord(
+  state: State,
+  input: {
+    newId: (prefix: string) => string;
+    clock: () => string;
+    delivery: Delivery;
+    kind: DeliveryEventKind;
+    title?: string | null;
+    text?: string | null;
+    toolName?: string | null;
+    toolCallId?: string | null;
+    status?: string | null;
+    payload?: unknown;
+    createdAt?: string;
+  }
+): DeliveryEvent {
+  state.deliveryEvents ||= [];
+  const merged = mergeDeliveryStreamEvent(state, input);
+  if (merged) return merged;
+  const sequence = nextDeliveryEventSequence(state, input.delivery.id);
+  const event: DeliveryEvent = {
+    id: input.newId("delivery_event"),
+    spaceId: input.delivery.spaceId,
+    deliveryId: input.delivery.id,
+    agentId: input.delivery.agentId,
+    target: input.delivery.target,
+    kind: input.kind,
+    title: sanitizeDeliveryEventText(input.title, 240),
+    text: sanitizeDeliveryEventText(input.text, input.kind === "message_delta" || input.kind === "thinking" ? 8_000 : 2_000, {
+      preserveWhitespace: input.kind === "message_delta" || input.kind === "thinking"
+    }),
+    toolName: normalizeOptionalString(input.toolName),
+    toolCallId: normalizeOptionalString(input.toolCallId),
+    status: normalizeOptionalString(input.status),
+    sequence,
+    createdAt: input.createdAt || input.clock(),
+    payload: sanitizeDeliveryEventPayload(input.payload)
+  };
+  state.deliveryEvents.push(event);
+  trimDeliveryEvents(state, input.delivery.id);
+  return event;
+}
+
+function mergeDeliveryStreamEvent(
+  state: State,
+  input: {
+    delivery: Delivery;
+    kind: DeliveryEventKind;
+    title?: string | null;
+    text?: string | null;
+    toolName?: string | null;
+    toolCallId?: string | null;
+    status?: string | null;
+    payload?: unknown;
+    createdAt?: string;
+  }
+): DeliveryEvent | null {
+  if (input.kind !== "thinking" && input.kind !== "message_delta") return null;
+  const events = state.deliveryEvents || [];
+  const previous = [...events]
+    .filter(event => event.deliveryId === input.delivery.id)
+    .sort((left, right) =>
+      right.sequence - left.sequence ||
+      right.createdAt.localeCompare(left.createdAt) ||
+      right.id.localeCompare(left.id)
+    )[0];
+  if (!previous || previous.kind !== input.kind) return null;
+  previous.title = sanitizeDeliveryEventText(input.title, 240) || previous.title;
+  previous.text = mergeStreamText(
+    previous.text || "",
+    sanitizeDeliveryEventText(input.text, 8_000, { preserveWhitespace: true }) || "",
+    8_000
+  );
+  previous.status = normalizeOptionalString(input.status) || previous.status;
+  previous.payload = sanitizeDeliveryEventPayload(input.payload);
+  previous.createdAt = input.createdAt || previous.createdAt;
+  return previous;
+}
+
+function nextDeliveryEventSequence(state: State, deliveryId: string): number {
+  return 1 + Math.max(
+    0,
+    ...(state.deliveryEvents || [])
+      .filter(event => event.deliveryId === deliveryId)
+      .map(event => Number(event.sequence) || 0)
+  );
+}
+
+function trimDeliveryEvents(state: State, deliveryId: string, limit = 200): void {
+  const events = state.deliveryEvents || [];
+  const scoped = events
+    .filter(event => event.deliveryId === deliveryId)
+    .sort((left, right) => left.sequence - right.sequence || left.createdAt.localeCompare(right.createdAt));
+  if (scoped.length <= limit) return;
+  const keep = new Set(scoped.slice(scoped.length - limit).map(event => event.id));
+  state.deliveryEvents = events.filter(event => event.deliveryId !== deliveryId || keep.has(event.id));
+}
+
+function sanitizeDeliveryEventText(
+  value: unknown,
+  maxLength = 2_000,
+  options: { preserveWhitespace?: boolean } = {}
+): string | null {
+  const text = options.preserveWhitespace
+    ? (value === undefined || value === null ? "" : String(value))
+    : normalizeOptionalString(value === undefined || value === null ? "" : String(value));
+  if (!text) return null;
+  return maskSensitiveText(text).slice(0, maxLength);
+}
+
+function mergeStreamText(existing: string, next: string, maxLength: number): string {
+  if (!existing) return next.slice(0, maxLength);
+  if (!next) return existing.slice(0, maxLength);
+  const previousChar = existing[existing.length - 1];
+  const nextChar = next[0];
+  const separator = (
+    /\s/.test(previousChar) ||
+    /\s/.test(nextChar) ||
+    /^[.,;:!?，。；：！？）】}"']/.test(nextChar) ||
+    /[（【{"']$/.test(previousChar) ||
+    /[\u4e00-\u9fff]/.test(previousChar) ||
+    /[\u4e00-\u9fff]/.test(nextChar)
+  ) ? "" : " ";
+  return `${existing}${separator}${next}`.slice(-maxLength);
+}
+
+function sanitizeDeliveryEventPayload(value: unknown): unknown {
+  if (value === undefined || value === null) return null;
+  try {
+    return JSON.parse(maskSensitiveText(JSON.stringify(value)).slice(0, 8_000));
+  } catch {
+    return maskSensitiveText(String(value)).slice(0, 2_000);
+  }
+}
+
+function maskSensitiveText(value: string): string {
+  return String(value || "")
+    .replace(/connect_[A-Za-z0-9_-]+/g, "connect_...[redacted]")
+    .replace(/(api[_-]?key|authorization|bearer|token|secret)(["'\s:=]+)([^"'\s,}]+)/gi, "$1$2[redacted]");
 }
 
 function parseMentions(text: string, state: State, spaceId?: string | null): MentionRef[] {

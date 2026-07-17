@@ -37,6 +37,19 @@ export interface AgentLauncherOptions {
   serverUrl: string;
   report: StatusReporter;
   reportDeliveryProgress?: (deliveryId: string, text: string) => Promise<unknown>;
+  reportDeliveryEvent?: (
+    deliveryId: string,
+    event: {
+      kind: string;
+      title?: string | null;
+      text?: string | null;
+      toolName?: string | null;
+      toolCallId?: string | null;
+      status?: string | null;
+      payload?: unknown;
+      createdAt?: string;
+    }
+  ) => Promise<unknown>;
   reportDeliveryRuntimeState?: (
     deliveryId: string,
     state: { phase: "queued" | "running"; queuePosition?: number; sessionKey?: string; processSlot?: number }
@@ -52,6 +65,7 @@ export class AgentLauncher {
   serverUrl: string;
   report: StatusReporter;
   reportDeliveryProgress: (deliveryId: string, text: string) => Promise<unknown>;
+  reportDeliveryEvent: NonNullable<AgentLauncherOptions["reportDeliveryEvent"]>;
   reportDeliveryRuntimeState: (
     deliveryId: string,
     state: { phase: "queued" | "running"; queuePosition?: number; sessionKey?: string; processSlot?: number }
@@ -60,17 +74,20 @@ export class AgentLauncher {
   children: Map<string, ChildEntry>;
   drivers: Map<string, DriverEntry>;
   progressEventKeys: Map<string, number>;
+  messageDeltaBuffers: Map<string, { text: string; flushAt: number; timer: NodeJS.Timeout | null; createdAt?: string }>;
   runtimeStateReports: Map<string, Promise<unknown>>;
 
-  constructor({ serverUrl, report, reportDeliveryProgress, reportDeliveryRuntimeState, getCredentials }: AgentLauncherOptions) {
+  constructor({ serverUrl, report, reportDeliveryProgress, reportDeliveryEvent, reportDeliveryRuntimeState, getCredentials }: AgentLauncherOptions) {
     this.serverUrl = serverUrl.replace(/\/$/, "");
     this.report = report;
     this.reportDeliveryProgress = reportDeliveryProgress || (async () => {});
+    this.reportDeliveryEvent = reportDeliveryEvent || (async () => {});
     this.reportDeliveryRuntimeState = reportDeliveryRuntimeState || (async () => {});
     this.getCredentials = getCredentials || (() => ({}));
     this.children = new Map();
     this.drivers = new Map();
     this.progressEventKeys = new Map();
+    this.messageDeltaBuffers = new Map();
     this.runtimeStateReports = new Map();
   }
 
@@ -182,6 +199,7 @@ export class AgentLauncher {
         if (this.progressEventKeys.size > 1000) this.progressEventKeys.clear();
         this.reportDeliveryProgress(event.deliveryId, progress).catch(() => {});
       }
+      this.reportRuntimeEventForDelivery(event).catch(() => {});
       switch (event.type) {
         case "delivery_queued":
           this.queueRuntimeStateReport(event.deliveryId, {
@@ -224,6 +242,114 @@ export class AgentLauncher {
         default:
           return;
       }
+    });
+  }
+
+  private async reportRuntimeEventForDelivery(event: import("./runtime/events.js").AgentEvent): Promise<void> {
+    if (!event.deliveryId) return;
+    switch (event.type) {
+      case "delivery_queued":
+        return;
+      case "delivery_running":
+        return;
+      case "message_chunk": {
+        this.queueMessageDeltaEvent(event.deliveryId, event.text, event.at);
+        return;
+      }
+      case "thinking":
+        await this.reportDeliveryEvent(event.deliveryId, {
+          kind: "thinking",
+          title: "Thinking",
+          text: event.text,
+          status: "running",
+          createdAt: event.at
+        });
+        return;
+      case "tool_call":
+        await this.reportDeliveryEvent(event.deliveryId, {
+          kind: "tool_call",
+          title: formatToolTitle(event.toolName),
+          toolName: event.toolName,
+          toolCallId: event.toolCallId,
+          status: "started",
+          payload: event.arguments,
+          createdAt: event.at
+        });
+        return;
+      case "tool_result":
+        await this.reportDeliveryEvent(event.deliveryId, {
+          kind: "tool_result",
+          title: event.ok ? "Tool completed" : "Tool failed",
+          toolCallId: event.toolCallId,
+          status: event.ok ? "completed" : "failed",
+          payload: event.output,
+          createdAt: event.at
+        });
+        return;
+      case "plan":
+        await this.reportDeliveryEvent(event.deliveryId, {
+          kind: "plan",
+          title: "Plan updated",
+          text: event.items.map(item => item.content).filter(Boolean).slice(0, 5).join("\n"),
+          status: "running",
+          payload: { items: event.items },
+          createdAt: event.at
+        });
+        return;
+      case "error":
+        await this.reportDeliveryEvent(event.deliveryId, {
+          kind: "error",
+          title: "Runtime error",
+          text: event.message,
+          status: "failed",
+          payload: event.code !== undefined ? { code: event.code } : null,
+          createdAt: event.at
+        });
+        return;
+      case "turn_end":
+        await this.flushMessageDeltaEvent(event.deliveryId);
+        await this.reportDeliveryEvent(event.deliveryId, {
+          kind: "completed",
+          title: "Final response ready",
+          status: "completed",
+          payload: { reason: event.reason || null },
+          createdAt: event.at
+        });
+        return;
+      default:
+        return;
+    }
+  }
+
+  private queueMessageDeltaEvent(deliveryId: string, text: string, createdAt?: string): void {
+    const now = Date.now();
+    const buffer = this.messageDeltaBuffers.get(deliveryId) || { text: "", flushAt: 0, timer: null, createdAt };
+    buffer.text += text || "";
+    buffer.createdAt = createdAt || buffer.createdAt;
+    const previousFlushAt = this.progressEventKeys.get(`${deliveryId}:message_delta`) || buffer.flushAt;
+    const delay = Math.max(0, 500 - (now - previousFlushAt));
+    if (!buffer.timer) {
+      buffer.timer = setTimeout(() => {
+        this.flushMessageDeltaEvent(deliveryId).catch(() => {});
+      }, delay);
+    }
+    this.messageDeltaBuffers.set(deliveryId, buffer);
+  }
+
+  private async flushMessageDeltaEvent(deliveryId: string): Promise<void> {
+    const buffer = this.messageDeltaBuffers.get(deliveryId);
+    if (!buffer) return;
+    if (buffer.timer) clearTimeout(buffer.timer);
+    this.messageDeltaBuffers.delete(deliveryId);
+    if (!buffer.text) return;
+    buffer.flushAt = Date.now();
+    this.progressEventKeys.set(`${deliveryId}:message_delta`, buffer.flushAt);
+    await this.reportDeliveryEvent(deliveryId, {
+      kind: "message_delta",
+      title: "Draft reply",
+      text: buffer.text,
+      status: "streaming",
+      createdAt: buffer.createdAt
     });
   }
 
@@ -464,6 +590,15 @@ export function formatTaskRuntimeProgress(event: import("./runtime/events.js").A
     return summary ? `执行计划：${summary}` : "执行计划已更新。";
   }
   return null;
+}
+
+function formatToolTitle(toolName: string): string {
+  if (toolName === "shell") return "Run command";
+  if (toolName === "file_change") return "Edit file";
+  if (toolName === "web_search") return "Search web";
+  if (toolName.startsWith("subagent_")) return "Sub-agent";
+  if (toolName.startsWith("mcp_")) return "MCP tool";
+  return toolName || "Tool call";
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

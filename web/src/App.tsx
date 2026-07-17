@@ -174,11 +174,29 @@ interface DeliveryLifecycleRecord {
 interface Delivery {
   id: string;
   agentId: string;
+  messageId?: string;
   target: string;
   status: string;
+  error?: string | null;
   createdAt: string;
   updatedAt: string;
   lifecycle?: DeliveryLifecycleRecord[];
+}
+
+interface DeliveryEvent {
+  id: string;
+  deliveryId: string;
+  agentId: string;
+  target: string;
+  kind: string;
+  title?: string | null;
+  text?: string | null;
+  toolName?: string | null;
+  toolCallId?: string | null;
+  status?: string | null;
+  sequence: number;
+  createdAt: string;
+  payload?: unknown;
 }
 
 interface AppState {
@@ -192,6 +210,7 @@ interface AppState {
   externalBotConfigs: ExternalBotConfig[];
   externalBotBindings: ExternalBotBinding[];
   deliveries: Delivery[];
+  deliveryEvents: DeliveryEvent[];
   events: unknown[];
   spaces: Space[];
 }
@@ -281,7 +300,8 @@ const api = {
     const messages = selectedChannel
       ? await apiFetch(`/api/messages/channel/${encodeURIComponent(selectedChannel.id)}?limit=10`).then(r => r.json())
       : [];
-    return { humans, agents, channels, messages, tasks, scheduledTasks, computers, externalBotConfigs, externalBotBindings, deliveries, events: [], spaces };
+    const deliveryEvents = await fetchDeliveryEventsForMessages(deliveries, messages, selectedChannel?.target);
+    return { humans, agents, channels, messages, tasks, scheduledTasks, computers, externalBotConfigs, externalBotBindings, deliveries, deliveryEvents, events: [], spaces };
   },
   async post<T = any>(path: string, body: Record<string, unknown> = {}): Promise<T> {
     const res = await apiFetch(path, {
@@ -307,6 +327,34 @@ const api = {
     return res.json();
   }
 };
+
+async function fetchDeliveryEventsForMessages(
+  deliveries: Delivery[],
+  messages: Message[],
+  target?: string
+): Promise<DeliveryEvent[]> {
+  const messageIds = new Set(messages.map(message => message.id));
+  const deliveryIds = deliveries
+    .filter(delivery => messageIds.has(delivery.messageId || ""))
+    .map(delivery => delivery.id);
+  if (deliveryIds.length === 0 && !target) return [];
+
+  const eventGroups = await Promise.all([
+    ...deliveryIds.map(deliveryId =>
+      apiFetch(`/api/delivery-events?deliveryId=${encodeURIComponent(deliveryId)}&limit=300`).then(r => r.json())
+    ),
+    target
+      ? apiFetch(`/api/delivery-events?target=${encodeURIComponent(target)}&limit=300`).then(r => r.json())
+      : Promise.resolve([])
+  ]);
+  const byId = new Map<string, DeliveryEvent>();
+  for (const group of eventGroups) {
+    for (const event of group as DeliveryEvent[]) {
+      byId.set(event.id, event);
+    }
+  }
+  return [...byId.values()];
+}
 
 /**
  * Space-aware fetch. Injects the currently selected space as `X-Iteam-Space`
@@ -673,6 +721,7 @@ function App() {
     refresh(channel);
     const events = new EventSource("/api/events");
     events.addEventListener("state:changed", () => debouncedRefresh(channel));
+    events.addEventListener("delivery:event", () => debouncedRefresh(channel));
     events.addEventListener("agent:activity", () => debouncedRefresh(channel));
     events.addEventListener("agent:started", () => debouncedRefresh(channel));
     events.addEventListener("agent:stopped", () => debouncedRefresh(channel));
@@ -2015,6 +2064,8 @@ function MessageRow({
   const author = agent || human || ingressBot || { name: message.authorId, role: "system" };
   const task = state.tasks.find(t => t.id === message.taskId || t.messageId === message.id);
   const replyCount = countThreadReplies(state, message);
+  const deliveryRecords = deliveryRecordsForMessage(state, message);
+  const activity = deliveryActivityForMessage(state, message);
   return (
     <article className={`msg ${message.type || "chat"}`} data-message-id={message.id}>
       <Avatar name={author.name} agent={!!agent} />
@@ -2029,6 +2080,9 @@ function MessageRow({
           </Tooltip>
         </header>
         <MessageContent text={message.text} agent={!!agent} />
+        {(activity.length > 0 || deliveryRecords.length > 0) && (
+          <DeliveryTimeline events={activity} deliveries={deliveryRecords} agents={state.agents} />
+        )}
         <div className="msg-actions">
           {task && (
             <button className="chip chip-task" onClick={() => openThread?.(message.id)}>
@@ -2047,6 +2101,57 @@ function MessageRow({
   );
 }
 
+function DeliveryTimeline({ events, deliveries, agents }: { events: DeliveryEvent[]; deliveries: Delivery[]; agents: Agent[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const ordered = [...events].sort((left, right) =>
+    left.sequence - right.sequence ||
+    left.createdAt.localeCompare(right.createdAt) ||
+    left.id.localeCompare(right.id)
+  );
+  const withOutcomes = appendDeliveryOutcomeEvents(ordered, deliveries);
+  const grouped = groupDeliveryEvents(withOutcomes);
+  const visible = expanded ? grouped : grouped.slice(-4);
+  const draft = deliveryDraftText(ordered);
+  const status = deliveryTimelineStatus(deliveries);
+  return (
+    <div className="delivery-timeline">
+      <button className={`delivery-timeline-head is-${status.tone}`} onClick={() => setExpanded(value => !value)}>
+        <CircleGauge size={14} />
+        <span>{status.label}</span>
+        <small>{ordered.length} events</small>
+      </button>
+      <div className="delivery-event-list">
+        {visible.map(event => (
+          <DeliveryTimelineItem key={event.id} event={event} agent={agents.find(agent => agent.id === event.agentId)} />
+        ))}
+      </div>
+      {draft && (
+        <div className="delivery-draft">
+          <small>Draft reply</small>
+          <p>{draft}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DeliveryTimelineItem({ event, agent }: { event: DeliveryEvent; agent?: Agent }) {
+  return (
+    <div className={`delivery-event is-${event.kind}`}>
+      <span className="delivery-event-dot" />
+      <div>
+        <strong>{deliveryEventTitle(event)}</strong>
+        {event.text && event.kind !== "message_delta" && <p>{event.text}</p>}
+        <small>
+          {agent?.name || event.agentId}
+          {" · "}
+          {new Date(event.createdAt).toLocaleTimeString()}
+        </small>
+      </div>
+    </div>
+  );
+}
+
 function resolveIngressBotAuthor(state: AppState, authorId: string): { name: string; role: string } | null {
   if (!authorId.startsWith("ingress:")) return null;
   const provider = authorId.slice("ingress:".length);
@@ -2056,6 +2161,128 @@ function resolveIngressBotAuthor(state: AppState, authorId: string): { name: str
     name: config.alias || config.appId || config.provider,
     role: "external-bot"
   };
+}
+
+function deliveryRecordsForMessage(state: AppState, message: Message): Delivery[] {
+  return state.deliveries.filter(delivery => delivery.messageId === message.id);
+}
+
+function deliveryActivityForMessage(state: AppState, message: Message): DeliveryEvent[] {
+  const deliveryIds = new Set(
+    deliveryRecordsForMessage(state, message)
+      .map(delivery => delivery.id)
+  );
+  if (deliveryIds.size === 0) return [];
+  return state.deliveryEvents.filter(event => deliveryIds.has(event.deliveryId));
+}
+
+function deliveryTimelineStatus(deliveries: Delivery[]): { label: string; tone: "running" | "completed" | "failed" | "cancelled" } {
+  if (deliveries.some(delivery => delivery.status === "delivering" || delivery.status === "pending")) {
+    return { label: "Working", tone: "running" };
+  }
+  if (deliveries.some(delivery => delivery.status === "failed")) {
+    return { label: "Failed", tone: "failed" };
+  }
+  if (deliveries.some(delivery => delivery.status === "cancelled")) {
+    return { label: "Cancelled", tone: "cancelled" };
+  }
+  if (deliveries.length > 0 && deliveries.every(delivery => delivery.status === "done")) {
+    return { label: "Completed", tone: "completed" };
+  }
+  return { label: "Working", tone: "running" };
+}
+
+function deliveryEventTitle(event: DeliveryEvent): string {
+  if (event.title) return event.title;
+  if (event.kind === "tool_call") return event.toolName ? `Using ${event.toolName}` : "Tool call";
+  if (event.kind === "tool_result") return event.status === "failed" ? "Tool failed" : "Tool completed";
+  if (event.kind === "message_delta") return "Writing reply";
+  if (event.kind === "thinking") return "Thinking";
+  if (event.kind === "plan") return "Plan updated";
+  if (event.kind === "queued") return "Queued";
+  if (event.kind === "running") return "Runtime started";
+  return event.kind;
+}
+
+function appendDeliveryOutcomeEvents(events: DeliveryEvent[], deliveries: Delivery[]): DeliveryEvent[] {
+  if (deliveries.length === 0) return events;
+  const output = [...events];
+  let syntheticOffset = 1;
+  const maxSequence = Math.max(0, ...events.map(event => Number(event.sequence) || 0));
+  for (const delivery of deliveries) {
+    if (!["done", "failed", "cancelled"].includes(delivery.status)) continue;
+    const hasOutcome = output.some(event =>
+      event.deliveryId === delivery.id &&
+      (
+        (delivery.status === "done" && event.kind === "completed") ||
+        (delivery.status === "failed" && event.kind === "error" && event.status === "failed") ||
+        (delivery.status === "cancelled" && event.kind === "cancelled")
+      )
+    );
+    if (hasOutcome) continue;
+    output.push({
+      id: `synthetic:${delivery.id}:${delivery.status}`,
+      deliveryId: delivery.id,
+      agentId: delivery.agentId,
+      target: delivery.target,
+      kind: delivery.status === "done" ? "completed" : delivery.status === "failed" ? "error" : "cancelled",
+      title: delivery.status === "done" ? "Completed" : delivery.status === "failed" ? "Delivery failed" : "Cancelled",
+      text: delivery.status === "failed" ? delivery.error || null : null,
+      status: delivery.status,
+      sequence: maxSequence + syntheticOffset++,
+      createdAt: delivery.updatedAt,
+      payload: { synthetic: true }
+    });
+  }
+  return output.sort((left, right) =>
+    left.sequence - right.sequence ||
+    left.createdAt.localeCompare(right.createdAt) ||
+    left.id.localeCompare(right.id)
+  );
+}
+
+function groupDeliveryEvents(events: DeliveryEvent[]): DeliveryEvent[] {
+  const grouped: DeliveryEvent[] = [];
+  for (const event of events) {
+    const previous = grouped[grouped.length - 1];
+    if (
+      previous &&
+      (event.kind === "thinking" || event.kind === "message_delta") &&
+      previous.kind === event.kind &&
+      previous.deliveryId === event.deliveryId
+    ) {
+      previous.text = mergeStreamText(previous.text || "", event.text || "");
+      previous.createdAt = event.createdAt;
+      previous.sequence = event.sequence;
+      previous.id = event.id;
+      continue;
+    }
+    grouped.push({ ...event });
+  }
+  return grouped;
+}
+
+function deliveryDraftText(events: DeliveryEvent[]): string {
+  const chunks = events
+    .filter(event => event.kind === "message_delta" && event.text)
+    .map(event => String(event.text));
+  return chunks
+    .reduce((text, chunk) => mergeStreamText(text, chunk || ""), "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 900);
+}
+
+function mergeStreamText(existing: string, next: string): string {
+  if (!existing) return next;
+  if (!next) return existing;
+  const previousChar = existing[existing.length - 1];
+  const nextChar = next[0];
+  if (/\s/.test(previousChar) || /\s/.test(nextChar)) return existing + next;
+  if (/^[.,;:!?，。；：！？）】}"']/.test(nextChar)) return existing + next;
+  if (/[（【{"']$/.test(previousChar)) return existing + next;
+  if (/[\u4e00-\u9fff]/.test(previousChar) || /[\u4e00-\u9fff]/.test(nextChar)) return existing + next;
+  return `${existing} ${next}`;
 }
 
 // ---------- tasks ----------

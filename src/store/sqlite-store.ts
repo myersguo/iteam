@@ -5,6 +5,7 @@ import type {
   Channel,
   Computer,
   Delivery,
+  DeliveryEvent,
   ExternalBotBinding,
   ExternalBotConfig,
   ExternalIngressPairing,
@@ -179,6 +180,16 @@ export class SqliteStore extends BaseStore {
       UPDATE iteam_deliveries
       SET space_id = COALESCE(
         (SELECT agent.space_id FROM iteam_agents agent WHERE agent.id = iteam_deliveries.agent_id),
+        NULLIF(space_id, 'space_default'),
+        'space_default'
+      )
+      WHERE space_id = 'space_default'
+    `);
+    this.db.exec(`
+      UPDATE iteam_delivery_events
+      SET space_id = COALESCE(
+        (SELECT delivery.space_id FROM iteam_deliveries delivery WHERE delivery.id = iteam_delivery_events.delivery_id),
+        (SELECT agent.space_id FROM iteam_agents agent WHERE agent.id = iteam_delivery_events.agent_id),
         NULLIF(space_id, 'space_default'),
         'space_default'
       )
@@ -605,6 +616,25 @@ export class SqliteStore extends BaseStore {
         lifecycle: string | null;
       }>;
 
+    const deliveryEventRows = this.db
+      .prepare("SELECT * FROM iteam_delivery_events ORDER BY created_at ASC, sequence ASC")
+      .all() as Array<{
+        id: string;
+        space_id: string | null;
+        delivery_id: string;
+        agent_id: string;
+        target: string;
+        kind: string;
+        title: string | null;
+        text: string | null;
+        tool_name: string | null;
+        tool_call_id: string | null;
+        status: string | null;
+        sequence: number;
+        created_at: string;
+        payload: string | null;
+      }>;
+
     const scheduledTaskRows = this.db
       .prepare("SELECT * FROM iteam_scheduled_tasks ORDER BY created_at ASC")
       .all() as Array<{
@@ -836,6 +866,23 @@ export class SqliteStore extends BaseStore {
       lifecycle: parseJsonField(row.lifecycle, [])
     }));
 
+    const deliveryEvents: DeliveryEvent[] = deliveryEventRows.map(row => ({
+      id: row.id,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
+      deliveryId: row.delivery_id,
+      agentId: row.agent_id,
+      target: row.target,
+      kind: row.kind,
+      title: row.title,
+      text: row.text,
+      toolName: row.tool_name,
+      toolCallId: row.tool_call_id,
+      status: row.status,
+      sequence: row.sequence,
+      createdAt: row.created_at,
+      payload: parseJsonField<unknown>(row.payload, null)
+    }));
+
     const scheduledTasks: ScheduledTask[] = scheduledTaskRows.map(row => ({
       id: row.id,
       spaceId: row.space_id || DEFAULT_SPACE_ID,
@@ -953,6 +1000,7 @@ export class SqliteStore extends BaseStore {
       channels: channels.length ? channels : seed.channels,
       messages,
       deliveries,
+      deliveryEvents,
       tasks,
       scheduledTasks,
       externalIngressPairings,
@@ -1161,6 +1209,31 @@ export class SqliteStore extends BaseStore {
           d.updatedAt,
           d.error ?? null,
           JSON.stringify(d.lifecycle || [])
+        );
+      }
+    }
+
+    this.db.exec("DELETE FROM iteam_delivery_events");
+    if (state.deliveryEvents.length) {
+      const stmt = this.db.prepare(
+        "INSERT INTO iteam_delivery_events (id, space_id, delivery_id, agent_id, target, kind, title, text, tool_name, tool_call_id, status, sequence, created_at, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      );
+      for (const event of state.deliveryEvents) {
+        stmt.run(
+          event.id,
+          event.spaceId || DEFAULT_SPACE_ID,
+          event.deliveryId,
+          event.agentId,
+          event.target,
+          event.kind,
+          event.title ?? null,
+          event.text ?? null,
+          event.toolName ?? null,
+          event.toolCallId ?? null,
+          event.status ?? null,
+          event.sequence ?? 0,
+          event.createdAt,
+          event.payload !== undefined ? JSON.stringify(event.payload) : null
         );
       }
     }

@@ -6,6 +6,7 @@ import type {
   Channel,
   Computer,
   Delivery,
+  DeliveryEvent,
   ExternalBotBinding,
   ExternalBotConfig,
   ExternalIngressPairing,
@@ -69,6 +70,7 @@ export function initialState(): State {
     }],
     messages: [],
     deliveries: [],
+    deliveryEvents: [],
     tasks: [],
     scheduledTasks: [],
     externalIngressPairings: [],
@@ -179,6 +181,18 @@ export function sanitizeState(state: State): State {
     attempts: delivery.attempts ?? 0,
     error: delivery.error ?? null,
     lifecycle: delivery.lifecycle ?? []
+  }));
+  const deliverySpaceIds = new Map(state.deliveries.map(delivery => [delivery.id, delivery.spaceId]));
+  state.deliveryEvents = (state.deliveryEvents || []).map((event: DeliveryEvent, index: number) => ({
+    ...event,
+    spaceId: deliverySpaceIds.get(event.deliveryId) || ensureSpaceId(event.spaceId),
+    title: event.title ?? null,
+    text: event.text ?? null,
+    toolName: event.toolName ?? null,
+    toolCallId: event.toolCallId ?? null,
+    status: event.status ?? null,
+    sequence: Number(event.sequence) || index + 1,
+    payload: event.payload ?? null
   }));
   state.externalIngressPairings = (state.externalIngressPairings || []).map((pairing: ExternalIngressPairing) => ({
     ...pairing,

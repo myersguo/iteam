@@ -256,6 +256,14 @@ async function route(
   if (req.method === "GET" && url.pathname === "/api/computers") return sendJson(res, 200, core.listComputers(spaceId));
   if (req.method === "GET" && url.pathname === "/api/humans") return sendJson(res, 200, core.listHumans());
   if (req.method === "GET" && url.pathname === "/api/deliveries") return sendJson(res, 200, core.listDeliveries(spaceId));
+  if (req.method === "GET" && url.pathname === "/api/delivery-events") {
+    return sendJson(res, 200, core.listDeliveryEvents({
+      target: url.searchParams.get("target"),
+      deliveryId: url.searchParams.get("deliveryId"),
+      limit: url.searchParams.get("limit"),
+      spaceId
+    }));
+  }
   if (req.method === "GET" && url.pathname === "/api/ingress/pairing-codes") return sendJson(res, 200, core.listIngressPairings(spaceId));
   if (req.method === "GET" && url.pathname === "/api/ingress/policies") return sendJson(res, 200, core.listIngressPolicies(spaceId));
   if (req.method === "GET" && url.pathname === "/api/external/bot-configs") return sendJson(res, 200, core.listExternalBotConfigs(spaceId));
@@ -433,6 +441,16 @@ async function route(
     requireComputerAuth(core, req, deliveryRuntimeState[1], "delivery");
     const body = await parseJsonBody<any>(req);
     return sendJson(res, 200, core.applyDeliveryRuntimeState(deliveryRuntimeState[1], body));
+  }
+
+  const deliveryEvent = url.pathname.match(/^\/api\/deliveries\/([^/]+)\/events$/);
+  if (req.method === "POST" && deliveryEvent) {
+    requireComputerAuth(core, req, deliveryEvent[1], "delivery");
+    const body = await parseJsonBody<any>(req);
+    return sendJson(res, 201, core.createDeliveryEvent({
+      ...body,
+      deliveryId: deliveryEvent[1]
+    }));
   }
 
   const deliveryHelpNeeded = url.pathname.match(/^\/api\/deliveries\/([^/]+)\/help-needed$/);

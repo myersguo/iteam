@@ -808,6 +808,43 @@ try {
   ) {
     throw new Error("delivery queued/running lifecycle was not persisted for the UI");
   }
+  await post(port, `/api/deliveries/${encodeURIComponent(dmDelivery.id)}/events`, {
+    kind: "tool_call",
+    title: "Run command",
+    toolName: "shell",
+    toolCallId: "tool_smoke",
+    status: "started",
+    payload: { command: "echo secret connect_should_mask connect_abc123" }
+  }, computerAuth);
+  await post(port, `/api/deliveries/${encodeURIComponent(dmDelivery.id)}/events`, {
+    kind: "message_delta",
+    title: "Draft reply",
+    text: "partial reply"
+  }, computerAuth);
+  await post(port, `/api/deliveries/${encodeURIComponent(dmDelivery.id)}/events`, {
+    kind: "thinking",
+    title: "Thinking",
+    text: "token"
+  }, computerAuth);
+  await post(port, `/api/deliveries/${encodeURIComponent(dmDelivery.id)}/events`, {
+    kind: "thinking",
+    title: "Thinking",
+    text: " stream"
+  }, computerAuth);
+  const deliveryEvents = await get(port, `/api/delivery-events?deliveryId=${encodeURIComponent(dmDelivery.id)}&limit=20`);
+  const thinkingEvents = deliveryEvents.filter((event: any) => event.kind === "thinking");
+  if (
+    !deliveryEvents.some((event: any) =>
+      event.kind === "tool_call" &&
+      event.toolName === "shell" &&
+      !JSON.stringify(event.payload || {}).includes("connect_abc123")
+    ) ||
+    !deliveryEvents.some((event: any) => event.kind === "message_delta" && event.text === "partial reply") ||
+    thinkingEvents.length !== 1 ||
+    thinkingEvents[0].text !== "token stream"
+  ) {
+    throw new Error("delivery event timeline did not persist runtime events");
+  }
   const savedBotConfig = await post(port, "/api/external/bot-configs", {
     provider: "lark",
     alias: "Smoke Bot",
@@ -2157,6 +2194,7 @@ function verifySqliteSpacePersistence(home: string): void {
   const deliveryId = "delivery_persisted";
   const taskId = "task_persisted";
   const scheduleId = "schedule_persisted";
+  const deliveryEventId = "delivery_event_persisted";
   const now = new Date().toISOString();
   const first = new SqliteStore(sqliteHome, sqliteFile);
   first.mutate(state => {
@@ -2272,6 +2310,22 @@ function verifySqliteSpacePersistence(home: string): void {
       updatedAt: now,
       lifecycle: []
     });
+    state.deliveryEvents.push({
+      id: deliveryEventId,
+      spaceId: "space_default",
+      deliveryId,
+      agentId,
+      target: "#persisted",
+      kind: "tool_call",
+      title: "Run command",
+      text: null,
+      toolName: "shell",
+      toolCallId: "tool_persisted",
+      status: "started",
+      sequence: 1,
+      createdAt: now,
+      payload: { command: "echo persisted" }
+    });
     state.tasks.push({
       id: taskId,
       spaceId: "space_default",
@@ -2331,6 +2385,14 @@ function verifySqliteSpacePersistence(home: string): void {
   }
   if (state.deliveries.find(item => item.id === deliveryId)?.spaceId !== spaceId) {
     throw new Error("SQLite delivery spaceId was lost after reopen");
+  }
+  const deliveryEvent = state.deliveryEvents.find(item => item.id === deliveryEventId);
+  if (
+    deliveryEvent?.spaceId !== spaceId ||
+    deliveryEvent.toolName !== "shell" ||
+    (deliveryEvent.payload as any)?.command !== "echo persisted"
+  ) {
+    throw new Error("SQLite delivery event was not persisted and backfilled");
   }
   if (state.tasks.find(item => item.id === taskId)?.spaceId !== spaceId) {
     throw new Error("SQLite task spaceId was lost after reopen");

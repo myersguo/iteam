@@ -61,6 +61,7 @@ const launcher = new AgentLauncher({
   serverUrl: baseUrl,
   report: reportAgentStatus,
   reportDeliveryProgress: (deliveryId, text) => reportDeliveryProgress(deliveryId, text, 0),
+  reportDeliveryEvent,
   reportDeliveryRuntimeState,
   getCredentials: () => ({ computerId, connectToken })
 });
@@ -296,6 +297,26 @@ async function reportDeliveryProgress(deliveryId: string, text: string, elapsedM
     method: "POST",
     headers: buildAuthHeader(),
     body: { text, elapsedMs }
+  });
+}
+
+async function reportDeliveryEvent(
+  deliveryId: string,
+  event: {
+    kind: string;
+    title?: string | null;
+    text?: string | null;
+    toolName?: string | null;
+    toolCallId?: string | null;
+    status?: string | null;
+    payload?: unknown;
+    createdAt?: string;
+  }
+): Promise<unknown> {
+  return requestJson(`${baseUrl}/api/deliveries/${deliveryId}/events`, {
+    method: "POST",
+    headers: buildAuthHeader(),
+    body: event
   });
 }
 

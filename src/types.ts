@@ -219,6 +219,36 @@ export interface Delivery {
   lifecycle?: DeliveryLifecycleRecord[];
 }
 
+export type DeliveryEventKind =
+  | "queued"
+  | "running"
+  | "thinking"
+  | "message_delta"
+  | "tool_call"
+  | "tool_result"
+  | "plan"
+  | "progress"
+  | "error"
+  | "completed"
+  | string;
+
+export interface DeliveryEvent {
+  id: string;
+  spaceId: string;
+  deliveryId: string;
+  agentId: string;
+  target: string;
+  kind: DeliveryEventKind;
+  title?: string | null;
+  text?: string | null;
+  toolName?: string | null;
+  toolCallId?: string | null;
+  status?: string | null;
+  sequence: number;
+  createdAt: string;
+  payload?: unknown;
+}
+
 export interface ExternalIngressPairing {
   id: string;
   spaceId: string;
@@ -311,6 +341,7 @@ export interface State {
   channels: Channel[];
   messages: Message[];
   deliveries: Delivery[];
+  deliveryEvents: DeliveryEvent[];
   tasks: Task[];
   scheduledTasks: ScheduledTask[];
   externalIngressPairings: ExternalIngressPairing[];

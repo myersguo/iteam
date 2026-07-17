@@ -4,6 +4,7 @@ import type {
   Channel,
   Computer,
   Delivery,
+  DeliveryEvent,
   ExternalBotBinding,
   ExternalBotConfig,
   ExternalIngressPairing,
@@ -87,6 +88,16 @@ export const MYSQL_SPACE_BACKFILL_QUERIES = [
      'space_default'
    )
    WHERE delivery.space_id = 'space_default'`,
+  `UPDATE iteam_delivery_events event
+   LEFT JOIN iteam_deliveries delivery ON delivery.id = event.delivery_id
+   LEFT JOIN iteam_agents agent ON agent.id = event.agent_id
+   SET event.space_id = COALESCE(
+     NULLIF(delivery.space_id, 'space_default'),
+     NULLIF(agent.space_id, ''),
+     NULLIF(event.space_id, 'space_default'),
+     'space_default'
+   )
+   WHERE event.space_id = 'space_default'`,
   `UPDATE iteam_messages message
    LEFT JOIN (
      SELECT
@@ -610,6 +621,23 @@ export class MysqlStore extends BaseStore {
       lifecycle: string | unknown | null;
     }>>("SELECT * FROM iteam_deliveries ORDER BY created_at ASC");
 
+    const [deliveryEventRows] = await this.pool.query<Array<{
+      id: string;
+      space_id: string | null;
+      delivery_id: string;
+      agent_id: string;
+      target: string;
+      kind: string;
+      title: string | null;
+      text: string | null;
+      tool_name: string | null;
+      tool_call_id: string | null;
+      status: string | null;
+      sequence: number;
+      created_at: string;
+      payload: string | unknown | null;
+    }>>("SELECT * FROM iteam_delivery_events ORDER BY created_at ASC, sequence ASC");
+
     const [scheduledTaskRows] = await this.pool.query<Array<{
       id: string;
       space_id: string | null;
@@ -832,6 +860,23 @@ export class MysqlStore extends BaseStore {
       lifecycle: parseJsonField(row.lifecycle, [])
     }));
 
+    const deliveryEvents: DeliveryEvent[] = deliveryEventRows.map(row => ({
+      id: row.id,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
+      deliveryId: row.delivery_id,
+      agentId: row.agent_id,
+      target: row.target,
+      kind: row.kind,
+      title: row.title,
+      text: row.text,
+      toolName: row.tool_name,
+      toolCallId: row.tool_call_id,
+      status: row.status,
+      sequence: row.sequence,
+      createdAt: row.created_at,
+      payload: parseJsonField<unknown>(row.payload, null)
+    }));
+
     const scheduledTasks: ScheduledTask[] = scheduledTaskRows.map(row => ({
       id: row.id,
       spaceId: row.space_id || DEFAULT_SPACE_ID,
@@ -950,6 +995,7 @@ export class MysqlStore extends BaseStore {
       channels: channels.length ? channels : seed.channels,
       messages,
       deliveries,
+      deliveryEvents,
       tasks,
       scheduledTasks,
       externalIngressPairings,
@@ -1180,6 +1226,31 @@ export class MysqlStore extends BaseStore {
               d.updatedAt,
               d.error ?? null,
               JSON.stringify(d.lifecycle || [])
+            ])
+          ]
+        );
+      }
+
+      await conn.query("DELETE FROM iteam_delivery_events");
+      if (state.deliveryEvents.length) {
+        await conn.query(
+          "INSERT INTO iteam_delivery_events (id, space_id, delivery_id, agent_id, target, kind, title, text, tool_name, tool_call_id, status, sequence, created_at, payload) VALUES ?",
+          [
+            state.deliveryEvents.map(event => [
+              event.id,
+              event.spaceId || DEFAULT_SPACE_ID,
+              event.deliveryId,
+              event.agentId,
+              event.target,
+              event.kind,
+              event.title ?? null,
+              event.text ?? null,
+              event.toolName ?? null,
+              event.toolCallId ?? null,
+              event.status ?? null,
+              event.sequence ?? 0,
+              event.createdAt,
+              JSON.stringify(event.payload ?? null)
             ])
           ]
         );
