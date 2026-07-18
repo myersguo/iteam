@@ -25,10 +25,17 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
     updated_at  TEXT NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS iteam_humans (
-    id      TEXT NOT NULL PRIMARY KEY,
-    name    TEXT NOT NULL,
-    handle  TEXT NOT NULL UNIQUE,
-    role    TEXT
+    id             TEXT NOT NULL PRIMARY KEY,
+    name           TEXT NOT NULL,
+    handle         TEXT NOT NULL UNIQUE,
+    role           TEXT,
+    source         TEXT,
+    username       TEXT,
+    email          TEXT,
+    avatar_url     TEXT,
+    tenant_alias   TEXT,
+    operator_type  TEXT,
+    external_id    TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS iteam_computers (
     id                   TEXT NOT NULL PRIMARY KEY,

@@ -97,6 +97,13 @@ export class SqliteStore extends BaseStore {
   // ---------------------------------------------------------------------------
   private runColumnMigrations(): void {
     this.addColumnIfMissing("iteam_computers", "connect_token", "TEXT");
+    this.addColumnIfMissing("iteam_humans", "source", "TEXT");
+    this.addColumnIfMissing("iteam_humans", "username", "TEXT");
+    this.addColumnIfMissing("iteam_humans", "email", "TEXT");
+    this.addColumnIfMissing("iteam_humans", "avatar_url", "TEXT");
+    this.addColumnIfMissing("iteam_humans", "tenant_alias", "TEXT");
+    this.addColumnIfMissing("iteam_humans", "operator_type", "TEXT");
+    this.addColumnIfMissing("iteam_humans", "external_id", "TEXT");
     this.addColumnIfMissing("iteam_computers", "space_id", "TEXT NOT NULL DEFAULT 'space_default'");
     this.addColumnIfMissing("iteam_pending_connections", "space_id", "TEXT NOT NULL DEFAULT 'space_default'");
     this.addColumnIfMissing("iteam_agents", "space_id", "TEXT NOT NULL DEFAULT 'space_default'");
@@ -502,8 +509,20 @@ export class SqliteStore extends BaseStore {
       }>;
 
     const humanRows = this.db
-      .prepare("SELECT id, name, handle, role FROM iteam_humans")
-      .all() as Array<{ id: string; name: string; handle: string; role: string | null }>;
+      .prepare("SELECT id, name, handle, role, source, username, email, avatar_url, tenant_alias, operator_type, external_id FROM iteam_humans")
+      .all() as Array<{
+        id: string;
+        name: string;
+        handle: string;
+        role: string | null;
+        source: string | null;
+        username: string | null;
+        email: string | null;
+        avatar_url: string | null;
+        tenant_alias: string | null;
+        operator_type: string | null;
+        external_id: string | null;
+      }>;
 
     const computerRows = this.db.prepare("SELECT * FROM iteam_computers").all() as Array<{
       id: string;
@@ -773,7 +792,14 @@ export class SqliteStore extends BaseStore {
       id: row.id,
       name: row.name,
       handle: row.handle,
-      ...(row.role ? { role: row.role } : {})
+      ...(row.role ? { role: row.role } : {}),
+      ...(row.source ? { source: row.source } : {}),
+      ...(row.username ? { username: row.username } : {}),
+      ...(row.email ? { email: row.email } : {}),
+      ...(row.avatar_url ? { avatarUrl: row.avatar_url } : {}),
+      ...(row.tenant_alias ? { tenantAlias: row.tenant_alias } : {}),
+      ...(row.operator_type ? { operatorType: row.operator_type } : {}),
+      ...(row.external_id ? { externalId: row.external_id } : {})
     }));
 
     const channelMemberMap = new Map<string, string[]>();
@@ -1089,9 +1115,23 @@ export class SqliteStore extends BaseStore {
     this.db.exec("DELETE FROM iteam_humans");
     if (state.humans.length) {
       const stmt = this.db.prepare(
-        "INSERT INTO iteam_humans (id, name, handle, role) VALUES (?, ?, ?, ?)"
+        "INSERT INTO iteam_humans (id, name, handle, role, source, username, email, avatar_url, tenant_alias, operator_type, external_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       );
-      for (const h of state.humans) stmt.run(h.id, h.name, h.handle, h.role ?? null);
+      for (const h of state.humans) {
+        stmt.run(
+          h.id,
+          h.name,
+          h.handle,
+          h.role ?? null,
+          h.source ?? null,
+          h.username ?? null,
+          h.email ?? null,
+          h.avatarUrl ?? null,
+          h.tenantAlias ?? null,
+          h.operatorType ?? null,
+          h.externalId ?? null
+        );
+      }
     }
 
     this.db.exec("DELETE FROM iteam_computers");

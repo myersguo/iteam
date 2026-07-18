@@ -274,6 +274,13 @@ export class MysqlStore extends BaseStore {
       "connect_token",
       "VARCHAR(128) DEFAULT NULL"
     );
+    await this.addColumnIfMissing("iteam_humans", "source", "VARCHAR(32) DEFAULT NULL");
+    await this.addColumnIfMissing("iteam_humans", "username", "VARCHAR(255) DEFAULT NULL");
+    await this.addColumnIfMissing("iteam_humans", "email", "VARCHAR(255) DEFAULT NULL");
+    await this.addColumnIfMissing("iteam_humans", "avatar_url", "TEXT DEFAULT NULL");
+    await this.addColumnIfMissing("iteam_humans", "tenant_alias", "VARCHAR(128) DEFAULT NULL");
+    await this.addColumnIfMissing("iteam_humans", "operator_type", "VARCHAR(64) DEFAULT NULL");
+    await this.addColumnIfMissing("iteam_humans", "external_id", "VARCHAR(255) DEFAULT NULL");
     await this.addColumnIfMissing(
       "iteam_computers",
       "space_id",
@@ -513,7 +520,14 @@ export class MysqlStore extends BaseStore {
       name: string;
       handle: string;
       role: string | null;
-    }>>("SELECT id, name, handle, role FROM iteam_humans");
+      source: string | null;
+      username: string | null;
+      email: string | null;
+      avatar_url: string | null;
+      tenant_alias: string | null;
+      operator_type: string | null;
+      external_id: string | null;
+    }>>("SELECT id, name, handle, role, source, username, email, avatar_url, tenant_alias, operator_type, external_id FROM iteam_humans");
 
     const [computerRows] = await this.pool.query<Array<{
       id: string;
@@ -765,7 +779,14 @@ export class MysqlStore extends BaseStore {
       id: row.id,
       name: row.name,
       handle: row.handle,
-      ...(row.role ? { role: row.role } : {})
+      ...(row.role ? { role: row.role } : {}),
+      ...(row.source ? { source: row.source } : {}),
+      ...(row.username ? { username: row.username } : {}),
+      ...(row.email ? { email: row.email } : {}),
+      ...(row.avatar_url ? { avatarUrl: row.avatar_url } : {}),
+      ...(row.tenant_alias ? { tenantAlias: row.tenant_alias } : {}),
+      ...(row.operator_type ? { operatorType: row.operator_type } : {}),
+      ...(row.external_id ? { externalId: row.external_id } : {})
     }));
 
     const channelMemberMap = new Map<string, string[]>();
@@ -1098,8 +1119,20 @@ export class MysqlStore extends BaseStore {
       await conn.query("DELETE FROM iteam_humans");
       if (state.humans.length) {
         await conn.query(
-          "INSERT INTO iteam_humans (id, name, handle, role) VALUES ?",
-          [state.humans.map(h => [h.id, h.name, h.handle, h.role ?? null])]
+          "INSERT INTO iteam_humans (id, name, handle, role, source, username, email, avatar_url, tenant_alias, operator_type, external_id) VALUES ?",
+          [state.humans.map(h => [
+            h.id,
+            h.name,
+            h.handle,
+            h.role ?? null,
+            h.source ?? null,
+            h.username ?? null,
+            h.email ?? null,
+            h.avatarUrl ?? null,
+            h.tenantAlias ?? null,
+            h.operatorType ?? null,
+            h.externalId ?? null
+          ])]
         );
       }
 

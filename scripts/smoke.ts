@@ -1,3 +1,4 @@
+import { createServer, type Server } from "node:http";
 import { spawn } from "node:child_process";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -7,9 +8,11 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Agent } from "../src/types.js";
 import { IteamCore } from "../src/core.js";
+import { startHttpServer } from "../src/http-server.js";
 import { deriveAgentAuthToken } from "../src/lib.js";
 import { formatTaskRuntimeProgress } from "../src/agent-launcher.js";
 import { AcpDriver } from "../src/runtime/acp-driver.js";
+import { JsonStore } from "../src/store/json-store.js";
 import { SqliteStore } from "../src/store/sqlite-store.js";
 import {
   MYSQL_SPACE_BACKFILL_QUERIES,
@@ -514,6 +517,7 @@ try {
   await verifyAcpQueuedPromotion(home);
   await verifyStuckDeliveryCancellation(home);
   verifySqliteSpacePersistence(home);
+  await verifySsoLoginFlow(home);
   const mysqlSpaceBackfillSql = MYSQL_SPACE_BACKFILL_QUERIES.join("\n");
   for (const table of ["iteam_channels", "iteam_deliveries", "iteam_messages", "iteam_tasks", "iteam_scheduled_tasks"]) {
     if (!mysqlSpaceBackfillSql.includes(`UPDATE ${table}`)) {
@@ -1462,6 +1466,268 @@ async function waitForChildExit(child: ReturnType<typeof spawn>, timeoutMs: numb
     new Promise<void>(resolvePromise => child.once("exit", () => resolvePromise())),
     new Promise<void>(resolvePromise => setTimeout(resolvePromise, timeoutMs))
   ]);
+}
+
+async function verifySsoLoginFlow(home: string): Promise<void> {
+  const sso = createServer((req, res) => {
+    const url = new URL(req.url || "/", "http://127.0.0.1");
+    if (req.method === "GET" && url.pathname === "/oauth2/authorize") {
+      const redirectUri = url.searchParams.get("redirect_uri") || "";
+      const state = url.searchParams.get("state") || "";
+      if (url.searchParams.get("client_id") !== "client_smoke") {
+        res.writeHead(400).end("bad client");
+        return;
+      }
+      res.writeHead(302, { location: `${redirectUri}?code=code_smoke&state=${state}` });
+      res.end();
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/oauth2/access_token") {
+      const expected = `Basic ${Buffer.from("client_smoke:secret_smoke").toString("base64")}`;
+      if (req.headers.authorization !== expected) {
+        res.writeHead(401).end("bad auth");
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ access_token: "access_smoke", refresh_token: "refresh_smoke", token_type: "Bearer", expires_in: 3600, scope: "read" }));
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/oauth2/userinfo") {
+      if (req.headers.authorization !== "Bearer access_smoke") {
+        res.writeHead(401).end("bad bearer");
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        username: "alice",
+        name: "alice",
+        nickname: "Alice Smoke",
+        email: "alice@example.com",
+        picture: "https://example.com/alice.png",
+        tenant_alias: "bytedance",
+        operator_type: "BDEE"
+      }));
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/oauth2/logout") {
+      res.writeHead(302, { location: url.searchParams.get("post_logout_redirect_uri") || "/" });
+      res.end();
+      return;
+    }
+    res.writeHead(404).end("not found");
+  });
+  const github = createServer((req, res) => {
+    const url = new URL(req.url || "/", "http://127.0.0.1");
+    if (req.method === "GET" && url.pathname === "/login/oauth/authorize") {
+      const redirectUri = url.searchParams.get("redirect_uri") || "";
+      const state = url.searchParams.get("state") || "";
+      if (url.searchParams.get("client_id") !== "github_client_smoke") {
+        res.writeHead(400).end("bad github client");
+        return;
+      }
+      if (!String(url.searchParams.get("scope") || "").includes("user:email")) {
+        res.writeHead(400).end("missing email scope");
+        return;
+      }
+      res.writeHead(302, { location: `${redirectUri}?code=github_code_smoke&state=${state}` });
+      res.end();
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/login/oauth/access_token") {
+      let raw = "";
+      req.on("data", chunk => raw += chunk);
+      req.on("end", () => {
+        const body = new URLSearchParams(raw);
+        if (body.get("client_id") !== "github_client_smoke" || body.get("client_secret") !== "github_secret_smoke") {
+          res.writeHead(401).end("bad github token auth");
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ access_token: "github_access_smoke", token_type: "bearer", scope: "read:user,user:email" }));
+      });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/user") {
+      if (req.headers.authorization !== "Bearer github_access_smoke") {
+        res.writeHead(401).end("bad github bearer");
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: 42, login: "octocat", name: "Octo Cat", email: null, avatar_url: "https://example.com/octo.png" }));
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/user/emails") {
+      if (req.headers.authorization !== "Bearer github_access_smoke") {
+        res.writeHead(401).end("bad github email bearer");
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify([{ email: "octo@example.com", primary: true, verified: true }]));
+      return;
+    }
+    res.writeHead(404).end("not found");
+  });
+  const ssoPort = await listenOnRandomPort(sso);
+  const githubPort = await listenOnRandomPort(github);
+  const ssoBase = `http://127.0.0.1:${ssoPort}`;
+  const githubBase = `http://127.0.0.1:${githubPort}`;
+  const appHome = join(home, "sso-flow");
+  mkdirSync(appHome, { recursive: true });
+  const core = await IteamCore.create({
+    store: new JsonStore(appHome),
+    serverInviteRoot: root
+  });
+  const appPort = 18000 + Math.floor(Math.random() * 10000);
+  const app = startHttpServer({
+    core,
+    port: appPort,
+    host: "127.0.0.1",
+    serveWeb: false,
+    authConfig: {
+      mode: "oauth",
+      publicUrl: `http://127.0.0.1:${appPort}`,
+      sessionSecret: "session_secret_smoke",
+      sessionTtlMs: 60 * 60 * 1000,
+      stateTtlMs: 10 * 60 * 1000,
+      cookieSecure: false,
+      providers: [{
+        id: "bytedance",
+        label: "ByteDance SSO",
+        type: "bytedance",
+        clientId: "client_smoke",
+        clientSecret: "secret_smoke",
+        authorizeUrl: `${ssoBase}/oauth2/authorize`,
+        tokenUrl: `${ssoBase}/oauth2/access_token`,
+        userinfoUrl: `${ssoBase}/oauth2/userinfo`,
+        logoutUrl: `${ssoBase}/oauth2/logout`,
+        scope: "read",
+        tokenAuth: "basic",
+        extraAuthorizeParams: { access_type: "online" }
+      }, {
+        id: "github",
+        label: "GitHub",
+        type: "github",
+        clientId: "github_client_smoke",
+        clientSecret: "github_secret_smoke",
+        authorizeUrl: `${githubBase}/login/oauth/authorize`,
+        tokenUrl: `${githubBase}/login/oauth/access_token`,
+        userinfoUrl: `${githubBase}/user`,
+        emailsUrl: `${githubBase}/user/emails`,
+        scope: "read:user user:email",
+        tokenAuth: "body"
+      }]
+    }
+  });
+
+  try {
+    const unauth = await fetch(`http://127.0.0.1:${appPort}/api/me`, { redirect: "manual" });
+    if (unauth.status !== 401) throw new Error(`OAuth /api/me should require login, got ${unauth.status}`);
+    const unauthBody = await unauth.json() as any;
+    if (!Array.isArray(unauthBody.providers) || unauthBody.providers.length !== 2) {
+      throw new Error("OAuth /api/me did not list both configured providers");
+    }
+
+    const jar = new Map<string, string>();
+    const login = await fetch(`http://127.0.0.1:${appPort}/auth/login?provider=bytedance&return_to=%2Fchat`, { redirect: "manual" });
+    if (login.status !== 302) throw new Error(`ByteDance SSO login should redirect, got ${login.status}`);
+    rememberCookies(jar, login.headers);
+    const authorizeLocation = login.headers.get("location") || "";
+    if (!authorizeLocation.includes("/oauth2/authorize") || !authorizeLocation.includes("client_id=client_smoke")) {
+      throw new Error("ByteDance SSO login did not redirect to the configured authorize URL");
+    }
+
+    const authorize = await fetch(authorizeLocation, { redirect: "manual" });
+    if (authorize.status !== 302) throw new Error(`fake SSO authorize should redirect, got ${authorize.status}`);
+    const callbackLocation = authorize.headers.get("location") || "";
+    const callback = await fetch(callbackLocation, {
+      redirect: "manual",
+      headers: { cookie: cookieHeader(jar) }
+    });
+    if (callback.status !== 302 || callback.headers.get("location") !== "/chat") {
+      throw new Error("SSO callback did not return to the original path");
+    }
+    rememberCookies(jar, callback.headers);
+
+    const me = await fetch(`http://127.0.0.1:${appPort}/api/me`, { headers: { cookie: cookieHeader(jar) } }).then(r => r.json()) as any;
+    if (!me.authenticated || me.human?.name !== "Alice Smoke" || me.human?.email !== "alice@example.com" || me.human?.source !== "bytedance") {
+      throw new Error("SSO session did not expose the logged-in human");
+    }
+
+    const posted = await fetch(`http://127.0.0.1:${appPort}/api/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader(jar) },
+      body: JSON.stringify({ target: "#all", text: "hello from sso", authorId: "human-local" })
+    }).then(r => r.json()) as any;
+    if (posted.authorId !== me.human.id) throw new Error("SSO message author was not forced to the logged-in human");
+
+    const impersonation = await fetch(`http://127.0.0.1:${appPort}/api/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader(jar) },
+      body: JSON.stringify({ target: "#all", text: "bad", authorId: "human_sso_someone_else" })
+    });
+    if (impersonation.status !== 403) throw new Error(`OAuth human impersonation should be 403, got ${impersonation.status}`);
+
+    const githubJar = new Map<string, string>();
+    const githubLogin = await fetch(`http://127.0.0.1:${appPort}/auth/login?provider=github&return_to=%2F`, { redirect: "manual" });
+    if (githubLogin.status !== 302) throw new Error(`GitHub login should redirect, got ${githubLogin.status}`);
+    rememberCookies(githubJar, githubLogin.headers);
+    const githubAuthorizeLocation = githubLogin.headers.get("location") || "";
+    if (!githubAuthorizeLocation.includes("/login/oauth/authorize") || !githubAuthorizeLocation.includes("client_id=github_client_smoke")) {
+      throw new Error("GitHub login did not redirect to the configured authorize URL");
+    }
+    const githubAuthorize = await fetch(githubAuthorizeLocation, { redirect: "manual" });
+    if (githubAuthorize.status !== 302) throw new Error(`fake GitHub authorize should redirect, got ${githubAuthorize.status}`);
+    const githubCallback = await fetch(githubAuthorize.headers.get("location") || "", {
+      redirect: "manual",
+      headers: { cookie: cookieHeader(githubJar) }
+    });
+    if (githubCallback.status !== 302 || githubCallback.headers.get("location") !== "/") {
+      throw new Error("GitHub callback did not return to the original path");
+    }
+    rememberCookies(githubJar, githubCallback.headers);
+    const githubMe = await fetch(`http://127.0.0.1:${appPort}/api/me`, { headers: { cookie: cookieHeader(githubJar) } }).then(r => r.json()) as any;
+    if (!githubMe.authenticated || githubMe.human?.name !== "Octo Cat" || githubMe.human?.email !== "octo@example.com" || githubMe.human?.source !== "github") {
+      throw new Error("GitHub session did not expose the normalized GitHub human");
+    }
+  } finally {
+    await app.close();
+    await new Promise<void>(resolve => sso.close(() => resolve()));
+    await new Promise<void>(resolve => github.close(() => resolve()));
+  }
+}
+
+function listenOnRandomPort(server: Server): Promise<number> {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      const address = server.address();
+      if (!address || typeof address === "string") reject(new Error("server did not bind to a TCP port"));
+      else resolve(address.port);
+    });
+  });
+}
+
+function rememberCookies(jar: Map<string, string>, headers: Headers): void {
+  const getSetCookie = (headers as any).getSetCookie?.bind(headers) as (() => string[]) | undefined;
+  const values = getSetCookie ? getSetCookie() : splitSetCookie(headers.get("set-cookie") || "");
+  for (const value of values) {
+    const first = value.split(";", 1)[0];
+    const index = first.indexOf("=");
+    if (index <= 0) continue;
+    const name = first.slice(0, index);
+    const cookieValue = first.slice(index + 1);
+    if (!cookieValue) jar.delete(name);
+    else jar.set(name, cookieValue);
+  }
+}
+
+function splitSetCookie(value: string): string[] {
+  return value ? value.split(/,\s*(?=[^;,]+=)/g) : [];
+}
+
+function cookieHeader(jar: Map<string, string>): string {
+  return [...jar.entries()].map(([key, value]) => `${key}=${value}`).join("; ");
 }
 
 async function verifySpaceIsolation(

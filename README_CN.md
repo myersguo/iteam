@@ -250,6 +250,47 @@ npm run smoke        # 端到端冒烟测试
 - **无构建运行**：`tsx` 直接执行 TypeScript，开发即生产
 - **编辑式美学**：参见 [`DESIGN.md`](./DESIGN.md)，向 Anthropic Editorial 设计语言致敬
 
+## 登录 Provider（可选）
+
+iTeam 默认仍然是本地优先、无需登录。单人本地工作区可以保持 `ITEAM_AUTH_MODE=none`。如果部署成多人共享 Web 工作区，可以启用 OAuth Provider，让不同浏览器用户显示为不同 Human。
+
+GitHub OAuth App 示例：
+
+```bash
+ITEAM_AUTH_MODE=oauth \
+ITEAM_AUTH_PROVIDERS=github \
+ITEAM_PUBLIC_URL=http://127.0.0.1:5199 \
+ITEAM_SESSION_SECRET=<random-session-secret> \
+ITEAM_GITHUB_CLIENT_ID=<github-client-id> \
+ITEAM_GITHUB_CLIENT_SECRET=<github-client-secret> \
+iteam daemon start
+```
+
+内部部署可使用同一套 provider 模型接入 ByteDance SSO：
+
+```bash
+ITEAM_AUTH_MODE=oauth \
+ITEAM_AUTH_PROVIDERS=bytedance \
+ITEAM_PUBLIC_URL=https://your-iteam.example.com \
+ITEAM_SESSION_SECRET=<random-session-secret> \
+ITEAM_SSO_CLIENT_ID=<client-id> \
+ITEAM_SSO_CLIENT_SECRET=<client-secret> \
+ITEAM_SSO_AUTHORIZE_URL=https://sso.bytedance.com/oauth2/authorize \
+ITEAM_SSO_TOKEN_URL=https://sso.bytedance.com/oauth2/access_token \
+ITEAM_SSO_USERINFO_URL=https://sso.bytedance.com/oauth2/userinfo \
+ITEAM_SSO_REFRESH_URL=https://sso.bytedance.com/oauth2/access_token \
+ITEAM_SSO_LOGOUT_URL=https://sso.bytedance.com/oauth2/logout \
+iteam daemon start
+```
+
+可以通过 `ITEAM_AUTH_PROVIDERS=github,bytedance` 同时启用多个 provider，登录页会展示多个按钮。兼容旧配置：`ITEAM_AUTH_MODE=sso` 仍视为 ByteDance SSO 快捷方式。
+
+注意：
+
+- 不要把 OAuth client secret 或 `ITEAM_SESSION_SECRET` 提交到仓库；应通过环境变量或进程管理器注入。
+- 每个 OAuth App 都需要登记回调地址 `{ITEAM_PUBLIC_URL}/auth/callback`。
+- 启用 OAuth 后，Web 创建的消息和任务会归因到当前登录用户；Agent、Computer、外部入口仍继续使用原有 token 鉴权。
+
 ## 存储后端
 
 `Store` 已被抽象成 `IStore` 接口（见 `src/store/`），通过环境变量 `ITEAM_STORE` 切换底层实现。所有后端共享 `snapshot / mutate / emit / subscribe` 语义，业务代码无需改动。

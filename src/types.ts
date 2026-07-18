@@ -36,6 +36,13 @@ export interface Human {
   name: string;
   handle: string;
   role?: string;
+  source?: "local" | "sso" | string;
+  username?: string;
+  email?: string;
+  avatarUrl?: string;
+  tenantAlias?: string;
+  operatorType?: string;
+  externalId?: string;
 }
 
 export interface Space {

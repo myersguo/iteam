@@ -218,6 +218,47 @@ regular text. Route agents with the `handle:` prefix, channels with `/channel`.
 The integration records inbound/outbound external message links so agent replies
 can be mirrored back to the originating Lark/Feishu chat.
 
+## Auth providers (optional)
+
+iTeam stays local-first by default. Keep `ITEAM_AUTH_MODE=none` for a single-user local workspace. For a shared deployment, enable OAuth providers so browser users get distinct Human identities.
+
+GitHub OAuth App example:
+
+```bash
+ITEAM_AUTH_MODE=oauth \
+ITEAM_AUTH_PROVIDERS=github \
+ITEAM_PUBLIC_URL=http://127.0.0.1:5199 \
+ITEAM_SESSION_SECRET=<random-session-secret> \
+ITEAM_GITHUB_CLIENT_ID=<github-client-id> \
+ITEAM_GITHUB_CLIENT_SECRET=<github-client-secret> \
+iteam daemon start
+```
+
+ByteDance SSO can use the same provider model for internal deployments:
+
+```bash
+ITEAM_AUTH_MODE=oauth \
+ITEAM_AUTH_PROVIDERS=bytedance \
+ITEAM_PUBLIC_URL=https://your-iteam.example.com \
+ITEAM_SESSION_SECRET=<random-session-secret> \
+ITEAM_SSO_CLIENT_ID=<client-id> \
+ITEAM_SSO_CLIENT_SECRET=<client-secret> \
+ITEAM_SSO_AUTHORIZE_URL=https://sso.bytedance.com/oauth2/authorize \
+ITEAM_SSO_TOKEN_URL=https://sso.bytedance.com/oauth2/access_token \
+ITEAM_SSO_USERINFO_URL=https://sso.bytedance.com/oauth2/userinfo \
+ITEAM_SSO_REFRESH_URL=https://sso.bytedance.com/oauth2/access_token \
+ITEAM_SSO_LOGOUT_URL=https://sso.bytedance.com/oauth2/logout \
+iteam daemon start
+```
+
+Multiple providers can be enabled with `ITEAM_AUTH_PROVIDERS=github,bytedance`; the login screen will show one button per provider. Legacy `ITEAM_AUTH_MODE=sso` is still accepted as a ByteDance SSO shortcut.
+
+Notes:
+
+- Do not commit OAuth client secrets or `ITEAM_SESSION_SECRET`; provide them via environment or your process manager.
+- Register the callback URL `{ITEAM_PUBLIC_URL}/auth/callback` in each provider's OAuth app.
+- When OAuth is enabled, Web-created messages and tasks are attributed to the logged-in Human. Agent, computer, and external-ingress authentication continue to use their existing tokens.
+
 ## Storage backends
 
 `IStore` abstraction lives in `src/store/`; switch backend via `ITEAM_STORE`:

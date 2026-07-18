@@ -11,6 +11,7 @@ import { dirname, extname, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseJsonBody, sendJson, sendText } from "./lib.js";
 import { HttpError, type IteamCore } from "./core.js";
+import { handleAuthRoute, readAuthConfig, requireSsoSession, type AuthConfig } from "./auth.js";
 import type { StoreEvent } from "./types.js";
 
 // Locate <pkg>/dist regardless of whether this file runs from source
@@ -66,6 +67,7 @@ export interface HttpServerOptions {
     sync(provider: string, spaceId: string): void | Promise<void>;
     remove(provider: string, spaceId: string): void | Promise<void>;
   };
+  authConfig?: AuthConfig;
 }
 
 export interface RunningHttpServer {
@@ -80,6 +82,7 @@ export function startHttpServer(options: HttpServerOptions): RunningHttpServer {
   const { core, port, host = "127.0.0.1" } = options;
   const serveWeb = options.serveWeb ?? true;
   const webRoot = serveWeb ? resolve(options.webRoot || DEFAULT_STATIC_DIR) : null;
+  const authConfig = options.authConfig || readAuthConfig();
   const sseClients = new Set<ServerResponse>();
 
   if (serveWeb && webRoot && !existsSync(webRoot)) {
@@ -107,7 +110,12 @@ export function startHttpServer(options: HttpServerOptions): RunningHttpServer {
       console.log(`[http] ${method} ${pathname} -> ${res.statusCode} (${ms}ms)`);
     });
     try {
-      await route(core, sseClients, req, res, { serveWeb, webRoot, externalBotRuntime: options.externalBotRuntime });
+      await route(core, sseClients, req, res, {
+        serveWeb,
+        webRoot,
+        externalBotRuntime: options.externalBotRuntime,
+        authConfig
+      });
     } catch (error) {
       if (error instanceof HttpError) {
         sendJson(res, error.status, { error: error.message });
@@ -164,6 +172,7 @@ interface StaticConfig {
   serveWeb: boolean;
   webRoot: string | null;
   externalBotRuntime?: HttpServerOptions["externalBotRuntime"];
+  authConfig: AuthConfig;
 }
 
 async function route(
@@ -174,6 +183,9 @@ async function route(
   staticConfig: StaticConfig
 ): Promise<void> {
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
+
+  if (await handleAuthRoute(staticConfig.authConfig, core, req, res, url)) return;
+
   const spaceId = resolveAuthenticatedSpace(core, req, resolveSpaceIdHeader(req, url));
 
   if (req.method === "GET" && url.pathname === "/api/health") {
@@ -414,7 +426,12 @@ async function route(
   const humanPatch = url.pathname.match(/^\/api\/humans\/([^/]+)$/);
   if (req.method === "PATCH" && humanPatch) {
     const body = await parseJsonBody<any>(req);
-    return sendJson(res, 200, core.patchHuman(decodeURIComponent(humanPatch[1]), body));
+    const humanId = decodeURIComponent(humanPatch[1]);
+    if (staticConfig.authConfig.mode === "oauth") {
+      const session = requireSsoSession(staticConfig.authConfig, req);
+      if (session.humanId !== humanId) throw new HttpError(403, "cannot update another human profile");
+    }
+    return sendJson(res, 200, core.patchHuman(humanId, body));
   }
 
   const runtimeStatus = url.pathname.match(/^\/api\/agents\/([^/]+)\/runtime-status$/);
@@ -442,8 +459,8 @@ async function route(
   if (req.method === "POST" && url.pathname === "/api/messages") {
     const body = await parseJsonBody<any>(req);
     const messageSpaceId = resolveAuthenticatedSpace(core, req, body?.spaceId || spaceId);
-    requireAgentAuthorAuthIfNeeded(core, req, body?.authorId);
-    return sendJson(res, 201, core.createMessage({ ...body, spaceId: messageSpaceId }));
+    const authorId = resolveMessageAuthorId(core, staticConfig.authConfig, req, body?.authorId);
+    return sendJson(res, 201, core.createMessage({ ...body, authorId, spaceId: messageSpaceId }));
   }
 
   const deliveryResult = url.pathname.match(/^\/api\/deliveries\/([^/]+)\/result$/);
@@ -560,8 +577,10 @@ async function route(
 
   if (req.method === "POST" && url.pathname === "/api/tasks") {
     const body = await parseJsonBody<any>(req);
+    const createdBy = resolveHumanAuthorId(staticConfig.authConfig, req, body?.createdBy);
     return sendJson(res, 201, core.createTask({
       ...body,
+      ...(createdBy ? { createdBy } : {}),
       spaceId: resolveAuthenticatedSpace(core, req, body?.spaceId || spaceId)
     }));
   }
@@ -752,6 +771,35 @@ function resolveAuthenticatedSpace(
     throw new HttpError(403, "computer cannot access a different space");
   }
   return computer.spaceId;
+}
+
+function resolveMessageAuthorId(
+  core: IteamCore,
+  authConfig: AuthConfig,
+  req: IncomingMessage,
+  authorId: string | null | undefined
+): string | undefined {
+  const requested = String(authorId || "").trim();
+  const isAgent = requested && (core.snapshot().agents || []).some(item => item.id === requested);
+  if (isAgent) {
+    requireAgentAuthorAuthIfNeeded(core, req, requested);
+    return requested;
+  }
+  return resolveHumanAuthorId(authConfig, req, requested || undefined);
+}
+
+function resolveHumanAuthorId(
+  authConfig: AuthConfig,
+  req: IncomingMessage,
+  authorId: string | null | undefined
+): string | undefined {
+  if (authConfig.mode !== "oauth") return authorId || undefined;
+  const session = requireSsoSession(authConfig, req);
+  const requested = String(authorId || "").trim();
+  if (requested && requested !== "human-local" && requested !== session.humanId) {
+    throw new HttpError(403, "cannot impersonate another human");
+  }
+  return session.humanId;
 }
 
 function requireAgentAuthorAuthIfNeeded(

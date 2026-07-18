@@ -124,6 +124,20 @@ export interface HumanPatchInput {
   name?: string;
 }
 
+export interface SsoHumanInput {
+  id: string;
+  name: string;
+  handle: string;
+  role?: string;
+  source?: string;
+  username?: string;
+  email?: string;
+  avatarUrl?: string;
+  tenantAlias?: string;
+  operatorType?: string;
+  externalId?: string;
+}
+
 export interface ChannelCreateInput extends SpaceContext {
   name: string;
   description?: string;
@@ -634,6 +648,37 @@ export class IteamCore {
         if (!name) throw new HttpError(400, "name is required");
         current.name = name;
       }
+      return current;
+    });
+  }
+
+  upsertSsoHuman(input: SsoHumanInput): Human {
+    if (!input.id || !input.name || !input.handle) {
+      throw new HttpError(400, "id, name and handle are required");
+    }
+    return this.store.mutate<Human>(s => {
+      const nowHandle = uniqueHumanHandle(s, input.handle, input.id);
+      let current = (s.humans || []).find(human => human.id === input.id);
+      if (!current) {
+        current = {
+          id: input.id,
+          name: input.name,
+          handle: nowHandle,
+          role: input.role || "member"
+        };
+        s.humans ||= [];
+        s.humans.push(current);
+      }
+      current.name = input.name;
+      current.handle = nowHandle;
+      current.role = input.role || current.role || "member";
+      current.source = input.source || "sso";
+      current.username = input.username;
+      current.email = input.email;
+      current.avatarUrl = input.avatarUrl;
+      current.tenantAlias = input.tenantAlias;
+      current.operatorType = input.operatorType;
+      current.externalId = input.externalId;
       return current;
     });
   }
@@ -3845,6 +3890,18 @@ function migrateChannelTarget(state: State, oldTarget: string, newTarget: string
     }
     delivery.updatedAt = now;
   }
+}
+
+function uniqueHumanHandle(state: State, baseHandle: string, humanId: string): string {
+  const base = slugHandle(baseHandle);
+  let candidate = base;
+  let suffix = 2;
+  const humans = state.humans || [];
+  while (humans.some(human => human.id !== humanId && human.handle === candidate)) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
 }
 
 function slugHandle(value: string): string {

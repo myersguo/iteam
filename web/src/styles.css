@@ -143,6 +143,69 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
 }
 .boot-text { font-style: italic; }
 
+.auth-gate {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  background:
+    radial-gradient(circle at 20% 20%, rgba(204, 120, 92, 0.10), transparent 28%),
+    var(--canvas);
+}
+.auth-card {
+  width: min(460px, 100%);
+  padding: 40px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-xl);
+  background: var(--surface-soft);
+  box-shadow: var(--shadow-soft);
+}
+.auth-card .brand-spike { margin-bottom: 18px; }
+.auth-card h1 { margin-bottom: 12px; }
+.auth-card p:not(.eyebrow) { color: var(--muted); margin: 0 0 24px; }
+.auth-provider-list { display: grid; gap: 10px; }
+.auth-provider-list .btn { justify-content: center; }
+.auth-provider-card {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  background: var(--canvas);
+  color: var(--ink);
+  box-shadow: 0 1px 0 rgba(20, 20, 19, 0.03);
+  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+}
+.auth-provider-card:hover {
+  border-color: rgba(204, 120, 92, 0.45);
+  background: #fffdf8;
+  transform: translateY(-1px);
+}
+.auth-provider-card strong,
+.auth-provider-card small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.auth-provider-card small { color: var(--muted); font-size: 12px; }
+.auth-provider-icon {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-pill);
+  background: var(--surface-cream-strong);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.auth-provider-icon.github { background: var(--surface-dark); color: var(--on-dark); }
+.auth-provider-icon.bytedance { background: var(--primary); color: var(--on-primary); }
+
 /* ===========================================================
    App shell
    =========================================================== */
@@ -153,7 +216,7 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
   grid-template-columns: 76px var(--sidebar-width, 272px) minmax(0, 1fr);
   background: var(--canvas);
   position: relative;
-  overflow: hidden;
+  overflow: visible;
 }
 .app.is-sidebar-collapsed {
   grid-template-columns: 76px 52px minmax(0, 1fr);
@@ -176,6 +239,7 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
   align-items: center;
   position: sticky;
   top: 0;
+  z-index: 100;
   height: 100vh;
 }
 
@@ -232,7 +296,63 @@ h3 { font-size: 20px; line-height: 1.2; letter-spacing: -0.01em; }
   border-radius: 0 4px 4px 0;
 }
 
-.rail-foot { margin-top: auto; }
+.rail-foot {
+  margin-top: auto;
+  display: grid;
+  gap: 10px;
+}
+.current-user-menu {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+.current-user {
+  display: grid;
+  place-items: center;
+  gap: 6px;
+  color: var(--ink);
+  font-size: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+.current-user::-webkit-details-marker { display: none; }
+.current-user .avatar { width: 34px; height: 34px; }
+.current-user span:not(.avatar) {
+  display: none;
+  max-width: 62px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.current-user-popover {
+  position: absolute;
+  left: calc(100% + 12px);
+  bottom: 0;
+  width: 240px;
+  padding: 16px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  background: var(--canvas);
+  box-shadow: var(--shadow-strong);
+  z-index: 60;
+}
+.current-user-popover strong,
+.current-user-popover small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.current-user-popover small { color: var(--muted); }
+.current-user-logout {
+  display: block;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hairline);
+  color: var(--primary);
+  font-weight: 600;
+}
+.current-user-logout:hover { color: var(--primary-active); }
 .ghost-btn {
   display: inline-flex;
   justify-content: center;

@@ -39,6 +39,13 @@ interface Human {
   name: string;
   handle?: string;
   role?: string;
+  source?: string;
+  username?: string;
+  email?: string;
+  avatarUrl?: string;
+  tenantAlias?: string;
+  operatorType?: string;
+  externalId?: string;
 }
 
 interface Agent {
@@ -236,6 +243,22 @@ interface AppState {
   spaces: Space[];
 }
 
+interface AuthProviderOption {
+  id: string;
+  label: string;
+  type: string;
+  loginUrl: string;
+}
+
+interface AuthInfo {
+  authMode: "none" | "oauth" | "sso";
+  providers?: AuthProviderOption[];
+  authenticated: boolean;
+  human?: Human | null;
+  loginUrl?: string;
+  logoutUrl?: string;
+}
+
 interface ConnectInvite {
   id: string;
   command: string;
@@ -267,6 +290,13 @@ interface DeliveryActivity {
 // ---------- api ----------
 
 const api = {
+  async getAuth(): Promise<AuthInfo> {
+    const returnTo = `${window.location.pathname}${window.location.search}`;
+    const res = await apiFetch(`/api/me?return_to=${encodeURIComponent(returnTo)}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok && res.status !== 401) throw new Error(data.error || "Failed to load auth state");
+    return data as AuthInfo;
+  },
   async fetchTasks(filter: {
     target?: string;
     status?: string;
@@ -611,6 +641,7 @@ const SPACE_NAME_PATTERN = /^[A-Za-z0-9 _-]{1,40}$/;
 
 function App() {
   const [state, setState] = useState<AppState | null>(null);
+  const [auth, setAuth] = useState<AuthInfo | null>(null);
   const initialRoute = useMemo(() => parseLocation(window.location), []);
   const [activeSpaceId, setActiveSpaceIdState] = useState<string>(() =>
     resolveInitialSpaceId(initialRoute.spaceSlug)
@@ -645,7 +676,9 @@ function App() {
     return Number.isFinite(saved) && saved >= 200 && saved <= 600 ? saved : 272;
   });
   const [resizingSidebar, setResizingSidebar] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
   const sidebarRef = useRef<HTMLElement>(null);
+  const userMenuRef = useRef<HTMLDetailsElement>(null);
 
   useEffect(() => {
     if (!resizingSidebar) return;
@@ -675,6 +708,24 @@ function App() {
     if (typeof window === "undefined") return;
     window.localStorage.setItem("iteam-sidebar-width", String(sidebarWidth));
   }, [sidebarWidth]);
+
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    function onPointerDown(event: PointerEvent) {
+      const target = event.target as Node | null;
+      if (target && userMenuRef.current?.contains(target)) return;
+      setUserMenuOpen(false);
+    }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setUserMenuOpen(false);
+    }
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [userMenuOpen]);
 
   // ---- URL routing ----
   const setThreadRootId = (id: string | null) => setThreadRootIdState(id);
@@ -758,6 +809,12 @@ function App() {
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function refresh(channelTarget = channel) {
+    const nextAuth = await api.getAuth();
+    setAuth(nextAuth);
+    if (nextAuth.authMode !== "none" && !nextAuth.authenticated) {
+      setState(null);
+      return;
+    }
     setState(await api.getState(channelTarget));
   }
 
@@ -874,7 +931,6 @@ function App() {
       await api.post("/api/messages", {
         target: channel,
         text: message,
-        authorId: "human-local",
         mentions,
         defaultAgentId: selectedAgentId || null
       });
@@ -899,7 +955,6 @@ function App() {
     await api.post("/api/messages", {
       target,
       text,
-      authorId: "human-local",
       mentions,
       defaultAgentId: threadDefaultAgentId
     });
@@ -1027,6 +1082,12 @@ function App() {
 
   const connectedInvite =
     connectInvite && state ? state.computers.find(c => c.connectionId === connectInvite.id) || null : null;
+  const authenticatedAuth = auth && auth.authMode !== "none" && auth.authenticated ? auth : null;
+  const currentHuman = authenticatedAuth?.human || null;
+
+  if (auth && auth.authMode !== "none" && !auth.authenticated) {
+    return <AuthGate auth={auth} />;
+  }
 
   if (!state) {
     return (
@@ -1081,6 +1142,30 @@ function App() {
           />
         </div>
         <div className="rail-foot">
+          {currentHuman && (
+            <details className="current-user-menu" ref={userMenuRef} open={userMenuOpen}>
+              <summary
+                className="current-user"
+                title="User menu"
+                onClick={event => {
+                  event.preventDefault();
+                  setUserMenuOpen(open => !open);
+                }}
+              >
+                <Avatar name={currentHuman.name} />
+                <span>{currentHuman.name}</span>
+              </summary>
+              <div className="current-user-popover" role="menu">
+                <p className="eyebrow">用户信息</p>
+                <strong>{currentHuman.name}</strong>
+                <small>{currentHuman.email || currentHuman.username || `@${currentHuman.handle || "you"}`}</small>
+                {currentHuman.tenantAlias && <small>{currentHuman.tenantAlias}</small>}
+                <a className="current-user-logout" href={authenticatedAuth?.logoutUrl || "/auth/logout"} role="menuitem">
+                  登出
+                </a>
+              </div>
+            </details>
+          )}
           <button className="ghost-btn" title="Refresh" onClick={() => refresh()}>
             <RefreshCw size={16} />
             <span>Refresh</span>
@@ -1316,6 +1401,50 @@ function App() {
 }
 
 // ---------- shared bits ----------
+
+function AuthGate({ auth }: { auth: AuthInfo }) {
+  const providers = auth.providers || [];
+  const fallbackLoginUrl = auth.loginUrl || providers[0]?.loginUrl || "/auth/login";
+  const multiProvider = providers.length > 1;
+  return (
+    <div className="auth-gate">
+      <section className="auth-card">
+        <span className="brand-spike" aria-hidden />
+        <p className="eyebrow">Secure workspace</p>
+        <h1>{multiProvider ? "Choose how to sign in." : "Sign in to iTeam."}</h1>
+        <p>Identify yourself before posting messages, creating tasks, or coordinating agents.</p>
+        <div className="auth-provider-list">
+          {providers.length > 0 ? providers.map(provider => (
+            <a className="auth-provider-card" href={provider.loginUrl} key={provider.id}>
+              <span className={`auth-provider-icon ${provider.type}`}>{providerIcon(provider)}</span>
+              <span>
+                <strong>{provider.label}</strong>
+                <small>{providerDescription(provider)}</small>
+              </span>
+              <ChevronRight size={16} />
+            </a>
+          )) : (
+            <a className="btn btn-primary" href={fallbackLoginUrl}>
+              Sign in
+            </a>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function providerIcon(provider: AuthProviderOption): string {
+  if (provider.type === "github" || provider.id === "github") return "GH";
+  if (provider.type === "bytedance" || provider.id === "bytedance") return "BD";
+  return "OA";
+}
+
+function providerDescription(provider: AuthProviderOption): string {
+  if (provider.type === "github" || provider.id === "github") return "Use your GitHub OAuth identity.";
+  if (provider.type === "bytedance" || provider.id === "bytedance") return "Use ByteDance internal SSO.";
+  return "Use a configured OAuth provider.";
+}
 
 function RailButton({
   active,

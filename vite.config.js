@@ -8,7 +8,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": backendUrl
+      "/api": backendUrl,
+      "/auth": backendUrl
     }
   }
 });

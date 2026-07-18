@@ -36,6 +36,13 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
       name            VARCHAR(255) NOT NULL,
       handle          VARCHAR(64)  NOT NULL,
       role            VARCHAR(64)  DEFAULT NULL,
+      source          VARCHAR(32)  DEFAULT NULL,
+      username        VARCHAR(255) DEFAULT NULL,
+      email           VARCHAR(255) DEFAULT NULL,
+      avatar_url      TEXT DEFAULT NULL,
+      tenant_alias    VARCHAR(128) DEFAULT NULL,
+      operator_type   VARCHAR(64)  DEFAULT NULL,
+      external_id     VARCHAR(255) DEFAULT NULL,
       UNIQUE KEY uniq_handle (handle)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
   },
