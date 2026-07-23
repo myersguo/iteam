@@ -1,0 +1,63 @@
+{
+  "name": "@myersguo/iteam",
+  "version": "0.1.45",
+  "description": "iTeam client — CLI + agent daemon for the local-first multi-agent collaboration workspace",
+  "type": "module",
+  "license": "MIT",
+  "author": "myersguo",
+  "homepage": "https://github.com/myersguo/iteam#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/myersguo/iteam.git"
+  },
+  "bugs": {
+    "url": "https://github.com/myersguo/iteam/issues"
+  },
+  "keywords": [
+    "agent",
+    "ai",
+    "codex",
+    "claude",
+    "gemini",
+    "mcp",
+    "local-first",
+    "chat",
+    "multi-agent"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "iteam": "bin/iteam.mjs",
+    "iteam-agent": "bin/iteam-agent.mjs"
+  },
+  "files": [
+    "bin/iteam.mjs",
+    "bin/iteam-agent.mjs",
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx ./bin/iteam.ts",
+    "daemon": "tsx ./src/agent-daemon.ts",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@iteam/shared": "workspace:*",
+    "@types/node": "^25.9.1",
+    "tsup": "^8.5.1",
+    "tsx": "^4.22.3",
+    "typescript": "^5.8.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  }
+}

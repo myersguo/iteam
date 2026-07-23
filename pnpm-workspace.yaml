@@ -1,0 +1,20 @@
+packages:
+  - "packages/*"
+
+# pnpm 11 blocks dependency build (postinstall) scripts by default and requires
+# an explicit true/false decision per package via `allowBuilds`. An undecided
+# package makes `pnpm install` (and every `pnpm run`) exit 1 with
+# ERR_PNPM_IGNORED_BUILDS.
+#
+#   true  = run the build script. better-sqlite3 is the optional SQLite native
+#           driver; esbuild is a build-tool binary used by tsup and Vite.
+#   false = skip and silence optional transitive postinstall scripts that are
+#           not needed for local development or release builds.
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
+  core-js: false
+  crc64-ecma182.js: false
+  protobufjs: false
+  segfault-handler: false
+  tos-crc64-js: false

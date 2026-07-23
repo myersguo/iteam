@@ -15,47 +15,48 @@ iTeam 是一个完全跑在本地的多 Agent 协作平台。它把 Codex CLI、
 
 ## 技术栈
 
-- 后端：Node.js 内置 HTTP server + SSE，TypeScript 全量类型
-- 前端：React 19 + TypeScript + Vite，Cormorant Garamond / Inter / JetBrains Mono
-- 运行时：[`tsx`](https://github.com/privatenumber/tsx) 直接执行 `.ts`，无构建步骤
+pnpm workspace 单仓,四个可独立构建的包:
+
+- **shared**（`@iteam/shared`）：零依赖领域类型 + 工具函数,`tsc` 构建
+- **client**（`@myersguo/iteam`,即发布包）：CLI + agent daemon,`tsup` 打包
+- **server**（`@iteam/server`）：常驻 Node 服务 —— 原生 `node:http` + SSE，`tsup` 构建
+- **web**（`@iteam/web`）：React 19 + Vite 前端，纯 CSR
+- 运行时：[`tsx`](https://github.com/privatenumber/tsx) 开发态直接执行 `.ts`
 - Agent 通信：[Model Context Protocol](https://modelcontextprotocol.io/) Stdio Server
 
 ## 目录结构
 
 ```
 iteam/
-├── bin/                    # CLI 入口
-│   ├── iteam.mjs           # 用户 CLI shim（npm bin）
-│   ├── iteam.ts            # iteam 命令实现
-│   ├── iteam-agent.mjs     # Agent 内部 CLI shim
-│   └── iteam-agent.ts      # iteam-agent 命令实现
-├── src/                    # 后端 TypeScript 源码
-│   ├── types.ts            # 领域类型定义（State / Agent / Message / Task ...）
-│   ├── server.ts           # 远端 backend HTTP/SSE 入口
-│   ├── store.ts            # Store 兼容门面（re-export）
-│   ├── store/              # 存储抽象与多后端实现
-│   │   ├── types.ts        # IStore 接口
-│   │   ├── base.ts         # 公共状态机 + sanitize/initialState
-│   │   ├── json-store.ts   # 默认本地 JSON 文件后端
-│   │   ├── sqlite-store.ts # better-sqlite3 后端
-│   │   ├── mysql-store.ts  # mysql2 后端
-│   │   └── factory.ts      # createStore() / 后端选择
-│   ├── runtime.ts          # Agent 生命周期管理
-│   ├── runtimes.ts         # 运行时探测（codex/claude/gemini/opencode）
-│   ├── agent-launcher.ts   # 子进程拉起 + 一次性投递
-│   ├── chat-bridge.ts      # MCP Stdio Server，暴露 iteam_message_* 工具
-│   ├── agent-daemon.ts     # client 端 bridge：连 backend、拉起 agent
-│   ├── workspace.ts        # Agent 工作区初始化
-│   ├── http-client.ts      # 内部 HTTP 封装
-│   └── lib.ts              # 通用工具（id/时间/JSON/fingerprint）
-├── web/src/                # 前端
-│   ├── App.tsx             # 主组件（聊天 / 任务 / 成员 / 计算机）
-│   └── styles.css          # 编辑式设计 token
-├── scripts/
-│   └── smoke.ts            # 端到端冒烟测试
-├── DESIGN.md               # 视觉设计语言说明
-├── tsconfig.json
-└── package.json
+├── pnpm-workspace.yaml         # pnpm workspace（packages/*）
+├── package.json                # 根：聚合 build / typecheck 脚本
+├── packages/
+│   ├── shared/                 # @iteam/shared（tsc → dist/*.js + .d.ts）
+│   │   └── src/{types,lib,http-client,index}.ts   # 领域类型 / 工具 / HTTP 封装
+│   ├── client/                 # @myersguo/iteam（tsup → dist/cli/*.mjs）
+│   │   ├── bin/{iteam,iteam-agent}.{ts,mjs}        # CLI 入口 + shim
+│   │   └── src/
+│   │       ├── agent-daemon.ts     # client 端 bridge：连 backend、拉起 agent
+│   │       ├── chat-bridge.ts      # MCP Stdio Server，暴露 iteam_message_* 工具
+│   │       ├── agent-launcher.ts   # 子进程拉起 + 一次性投递
+│   │       ├── workspace.ts        # Agent 工作区初始化
+│   │       ├── runtimes.ts         # 运行时探测（codex/claude/gemini/...）
+│   │       ├── runtime/            # 各 driver（acp/claude/codex/oneshot）
+│   │       └── cli/                # iteam CLI 子命令实现
+│   ├── server/                 # @iteam/server（tsup → dist/cli/server.mjs）
+│   │   └── src/
+│   │       ├── server.ts           # 原生 HTTP/SSE 入口（稳定默认）
+│   │       ├── http-server.ts      # 路由 + 静态托管
+│   │       ├── core.ts             # 领域逻辑（IteamCore）
+│   │       ├── store/              # json / sqlite / mysql 多后端
+│   │       └── integrations/lark.ts
+│   └── web/                     # @iteam/web（Vite → dist/index.html + assets/）
+│       ├── vite.config.ts
+│       └── src/{App.tsx,styles.css,UrlChangeReporter.tsx}
+├── scripts/                    # smoke.ts / migrate-sqlite-to-mysql.ts ...
+├── DESIGN.md · RESTRUCTURE_DESIGN.md
+├── README.md                   # 英文文档
+└── README_CN.md                # 中文文档
 ```
 
 ## 快速开始
@@ -77,7 +78,7 @@ npx @myersguo/iteam@latest --help
 ```bash
 git clone https://github.com/myersguo/iteam.git
 cd iteam
-npm install
+corepack pnpm install
 ```
 
 ### 1. 启动 backend (server)
@@ -92,12 +93,11 @@ iteam daemon start --port 4400         # 指定端口
 源码方式：
 
 ```bash
-npm run server                         # 等价于上面
-npm run server -- --port 4400
-npm run server -- --no-serve-web       # 远端 backend 不托管 web
+corepack pnpm run build:shared
+corepack pnpm --filter @iteam/server dev
+corepack pnpm --filter @iteam/server dev -- --port 4400
+corepack pnpm --filter @iteam/server dev -- --no-serve-web
 ```
-
-> 兼容别名：`npm run daemon` 仍指向同一入口。
 
 启动选项：
 
@@ -105,20 +105,27 @@ npm run server -- --no-serve-web       # 远端 backend 不托管 web
 | --- | --- |
 | `--port` / `ITEAM_PORT` | 监听端口，默认 4318 |
 | `--host` | 监听 host，默认 127.0.0.1 |
-| `--serve-web` / `--no-serve-web` / `ITEAM_SERVE_WEB` | 是否托管 `dist/` 静态产物，默认开启 |
-| `--web-root` / `ITEAM_WEB_ROOT` | 自定义静态目录，仅在 serveWeb 开启时生效 |
+| `--serve-web` / `--no-serve-web` / `ITEAM_SERVE_WEB` | 是否托管静态 Web 产物，默认开启 |
+| `--web-root` / `ITEAM_WEB_ROOT` | 自定义静态目录，例如 `packages/web/dist` |
 
 数据持久化目录由环境变量 `ITEAM_HOME` 控制，默认为 `~/.iteam`。
 
 ### 2. 启动前端
 
 ```bash
-npm run dev                 # http://127.0.0.1:5173
+corepack pnpm run dev:web   # Vite dev server，通常是 http://127.0.0.1:5173
 ```
 
 打开浏览器即可看到三栏布局：导航 rail + 侧边栏 + 主面板。
 
-> backend 默认会托管 `dist/` 静态产物，全局安装后访问 `http://127.0.0.1:4318` 即可直接打开 Web UI（无需另起 dev server）。
+生产近似的本地方式是先构建 Web，再让 backend 托管它：
+
+```bash
+corepack pnpm run build:web
+ITEAM_WEB_ROOT=packages/web/dist corepack pnpm --filter @iteam/server dev
+```
+
+之后访问 `http://127.0.0.1:4318` 即可直接打开 Web UI（无需另起 dev server）。
 
 ### 3. 接入计算机（Connect command）
 
@@ -233,20 +240,42 @@ State {
 
 ## 开发命令
 
+本仓库是 **pnpm workspace**,统一用 `corepack pnpm`（pnpm 11+）。依赖从公共 npm registry 解析。
+
 ```bash
-npm run dev          # 启动 vite dev server (web)
-npm run server       # 启动远端 backend (别名：npm run daemon)
-npm run agent-daemon # 启动 client 端 agent-daemon
-npm run cli -- ...   # 调用 iteam CLI（用 tsx）
-npm run typecheck    # 全项目 tsc --noEmit
-npm run build        # 构建前端到 dist/
-npm run smoke        # 端到端冒烟测试
+# 一次性：安装全部 workspace 依赖
+corepack pnpm install
+
+# 全量构建（按依赖顺序：shared → client → server → web）
+corepack pnpm run build
+
+# 单独构建某个模块
+corepack pnpm run build:shared   # @iteam/shared   (tsc)
+corepack pnpm run build:client   # @myersguo/iteam (tsup → dist/cli/*.mjs)
+corepack pnpm run build:server   # @iteam/server   (tsup → dist/cli/server.mjs)
+corepack pnpm run build:web      # @iteam/web      (vite build → dist/index.html + assets/)
+
+# 全部包类型检查 / 清理
+corepack pnpm run typecheck
+corepack pnpm run clean
+# 开发态（免构建；tsx / Vite dev server 带 HMR）
+corepack pnpm run dev:web        # Vite dev server，代理 /api、/auth 到 :4318
+corepack pnpm run dev:server     # tsx 跑原生 server.ts
+
+# 端到端冒烟测试（拉起 server，跑 driver + 鉴权流程）
+corepack pnpm exec tsx scripts/smoke.ts
 ```
+
+> **先编 shared**：client/server 产物会内联 `@iteam/shared`,且 `typecheck` 需要
+> `packages/shared/dist` 已存在才能解析它 —— 全新 checkout 上先 `build`（或
+> `build:shared`）再 `typecheck`。
+>
+> 稳定生产入口是 `packages/server/dist/cli/server.mjs`（原生 `node:http`）。
 
 ## 设计哲学
 
 - **本地优先**：默认所有数据存于 `~/.iteam/state.json`，可手动备份与迁移
-- **类型驱动**：`src/types.ts` 是后端唯一事实源，前端按需镜像
+- **类型驱动**：`packages/shared/src/types.ts` 是领域唯一事实源，前端按需镜像
 - **无构建运行**：`tsx` 直接执行 TypeScript，开发即生产
 - **编辑式美学**：参见 [`DESIGN.md`](./DESIGN.md)，向 Anthropic Editorial 设计语言致敬
 
@@ -266,24 +295,7 @@ ITEAM_GITHUB_CLIENT_SECRET=<github-client-secret> \
 iteam daemon start
 ```
 
-内部部署可使用同一套 provider 模型接入 ByteDance SSO：
-
-```bash
-ITEAM_AUTH_MODE=oauth \
-ITEAM_AUTH_PROVIDERS=bytedance \
-ITEAM_PUBLIC_URL=https://your-iteam.example.com \
-ITEAM_SESSION_SECRET=<random-session-secret> \
-ITEAM_SSO_CLIENT_ID=<client-id> \
-ITEAM_SSO_CLIENT_SECRET=<client-secret> \
-ITEAM_SSO_AUTHORIZE_URL=https://sso.bytedance.com/oauth2/authorize \
-ITEAM_SSO_TOKEN_URL=https://sso.bytedance.com/oauth2/access_token \
-ITEAM_SSO_USERINFO_URL=https://sso.bytedance.com/oauth2/userinfo \
-ITEAM_SSO_REFRESH_URL=https://sso.bytedance.com/oauth2/access_token \
-ITEAM_SSO_LOGOUT_URL=https://sso.bytedance.com/oauth2/logout \
-iteam daemon start
-```
-
-可以通过 `ITEAM_AUTH_PROVIDERS=github,bytedance` 同时启用多个 provider，登录页会展示多个按钮。兼容旧配置：`ITEAM_AUTH_MODE=sso` 仍视为 ByteDance SSO 快捷方式。
+也可以通过 `ITEAM_AUTH_PROVIDERS=oauth2` 和 `ITEAM_OAUTH2_*` 环境变量配置通用 OAuth2 Provider。
 
 注意：
 
@@ -293,7 +305,7 @@ iteam daemon start
 
 ## 存储后端
 
-`Store` 已被抽象成 `IStore` 接口（见 `src/store/`），通过环境变量 `ITEAM_STORE` 切换底层实现。所有后端共享 `snapshot / mutate / emit / subscribe` 语义，业务代码无需改动。
+`Store` 已被抽象成 `IStore` 接口（见 `packages/server/src/store/`），通过环境变量 `ITEAM_STORE` 切换底层实现。所有后端共享 `snapshot / mutate / emit / subscribe` 语义，业务代码无需改动。
 
 | 后端 | 启用方式 | 数据位置 | 额外依赖 |
 |---|---|---|---|
@@ -324,9 +336,9 @@ iTeam 没有云端服务，部署本质上就是「在某台机器上把 daemon 
 ```bash
 git clone <repo>
 cd iteam
-npm install
-npm run server &           # 后端 http://127.0.0.1:4318
-npm run dev                # 前端 http://127.0.0.1:5173
+corepack pnpm install
+corepack pnpm run dev:server &    # 后端 http://127.0.0.1:4318
+corepack pnpm run dev:web         # Vite dev server
 ```
 
 数据落在 `~/.iteam/state.json`，备份直接拷贝该文件即可。
@@ -338,8 +350,8 @@ npm run dev                # 前端 http://127.0.0.1:5173
 1. **构建前端静态资源**
 
    ```bash
-   npm install
-   npm run build              # 输出到 dist/
+   corepack pnpm install
+   corepack pnpm run build    # server → packages/server/dist/cli/server.mjs; web → packages/web/dist/
    ```
 
 2. **配置环境变量**
@@ -368,8 +380,8 @@ npm run dev                # 前端 http://127.0.0.1:5173
    Environment=ITEAM_HOME=/var/lib/iteam
    Environment=ITEAM_STORE=sqlite
    Environment=ITEAM_PORT=4318
-   Environment=ITEAM_SERVE_WEB=false
-   ExecStart=/usr/bin/npx tsx ./src/server.ts --port 4318 --no-serve-web
+   Environment=ITEAM_WEB_ROOT=/opt/iteam/packages/web/dist
+   ExecStart=/usr/bin/node /opt/iteam/packages/server/dist/cli/server.mjs --port 4318
    Restart=on-failure
 
    [Install]
@@ -384,7 +396,7 @@ npm run dev                # 前端 http://127.0.0.1:5173
 
 4. **托管前端**
 
-   - 简易方案：用任意静态文件服务器把 `dist/` 跑起来（如 `npx serve dist -l 5173`）。
+   - 简易方案：server 直接托管 `packages/web/dist`（见上面的 `ITEAM_WEB_ROOT`）。
    - 反向代理方案（推荐）：用 Nginx 把前端和 API 合并到同一域名：
 
      ```nginx
@@ -392,7 +404,7 @@ npm run dev                # 前端 http://127.0.0.1:5173
        listen 80;
        server_name iteam.example.com;
 
-       root /opt/iteam/dist;
+       root /opt/iteam/packages/web/dist;
        index index.html;
 
        location /api/ {
@@ -439,7 +451,8 @@ npm run dev                # 前端 http://127.0.0.1:5173
    export ITEAM_PORT=4318
 
    npm install               # 含 mysql2
-   npx tsx ./src/server.ts --port 4318
+   corepack pnpm run build
+   ITEAM_WEB_ROOT=packages/web/dist node packages/server/dist/cli/server.mjs --port 4318
    ```
 
    或仍套用上面的 systemd unit，把 `Environment` 替换成 MySQL 配置即可。
@@ -475,7 +488,7 @@ ITEAM_SERVER_URL=http://<daemon-host>:4318 \
 
 ### 部署 Checklist
 
-- [ ] `npm run typecheck` / `npm run smoke` 在目标 Node.js 版本下通过
+- [ ] `corepack pnpm run typecheck` / `corepack pnpm exec tsx scripts/smoke.ts` 在目标 Node.js 版本下通过
 - [ ] `ITEAM_HOME` 指向持久化目录，进程用户可读写
 - [ ] 选定 `ITEAM_STORE` 与对应依赖已安装（SQLite/MySQL）
 - [ ] daemon 监听端口仅对可信网络开放（默认仅绑 `127.0.0.1`）
@@ -489,18 +502,23 @@ MIT © [myersguo](https://github.com/myersguo)
 ## 发布到 npm（仅维护者）
 
 ```bash
-# 0. 登录（一次性）
+# 从仓库根目录：检查、提交、bump packages/client、推送 main + tag
+make release MSG="chore: release" BUMP=patch
+
+# 手动 dry run / 发布单个 npm 包
+cd packages/client
+
+# 登录（一次性）
 npm login
 
-# 1. 本地预演 —— 看看哪些文件会被打进 tarball
+# 本地预演 —— 看看哪些文件会被打进 tarball
 npm pack --dry-run
 
-# 2. 发布（prepublishOnly 会自动 typecheck + build）
+# 发布
 npm publish
 
-# 3. 后续版本迭代
-npm version patch        # 0.1.0 -> 0.1.1
-git push --follow-tags
+# 后续版本迭代
+npm version patch
+git push origin main --follow-tags
 npm publish
 ```
-

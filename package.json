@@ -1,7 +1,8 @@
 {
-  "name": "@myersguo/iteam",
-  "version": "0.1.44",
-  "description": "A local-first multi-agent collaboration workspace — bringing humans, AI agents, computers, and tasks into the same chat room",
+  "name": "iteam-monorepo",
+  "version": "0.1.45",
+  "description": "iTeam monorepo - web, server, client, and shared code",
+  "private": true,
   "type": "module",
   "license": "MIT",
   "author": "myersguo",
@@ -13,72 +14,20 @@
   "bugs": {
     "url": "https://github.com/myersguo/iteam/issues"
   },
-  "keywords": [
-    "agent",
-    "ai",
-    "codex",
-    "claude",
-    "gemini",
-    "mcp",
-    "local-first",
-    "chat",
-    "multi-agent"
-  ],
   "engines": {
-    "node": ">=20"
+    "node": ">=20",
+    "pnpm": ">=9"
   },
-  "bin": {
-    "iteam": "bin/iteam.mjs",
-    "iteam-agent": "bin/iteam-agent.mjs"
-  },
-  "files": [
-    "bin/iteam.mjs",
-    "bin/iteam-agent.mjs",
-    "dist/",
-    "README.md",
-    "LICENSE"
-  ],
+  "packageManager": "pnpm@11.15.1",
   "scripts": {
-    "dev": "vite --host 127.0.0.1",
-    "server": "tsx ./src/server.ts",
-    "daemon": "tsx ./src/server.ts",
-    "agent-daemon": "tsx ./src/agent-daemon.ts",
-    "cli": "tsx ./bin/iteam.ts",
-    "build:web": "vite build",
-    "build:cli": "tsup",
-    "build": "npm run build:web && npm run build:cli",
-    "typecheck": "tsc --noEmit",
-    "smoke": "tsx ./scripts/smoke.ts",
-    "release": "npm version patch && npm run publish:npm",
-    "publish:npm": "npm publish --registry=https://registry.npmjs.org",
-    "prepublishOnly": "npm run typecheck && npm run build"
-  },
-  "dependencies": {
-    "@larksuiteoapi/node-sdk": "^1.67.0",
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "cron-parser": "^5.5.0",
-    "lucide-react": "^0.468.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1",
-    "zod": "^4.4.3"
-  },
-  "optionalDependencies": {
-    "better-sqlite3": "^12.10.0",
-    "mysql2": "^3.22.4"
-  },
-  "devDependencies": {
-    "@types/node": "^25.9.1",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^5.0.0",
-    "tsup": "^8.5.1",
-    "tsx": "^4.22.3",
-    "typescript": "^5.8.0",
-    "vite": "^6.0.0"
-  },
-  "publishConfig": {
-    "access": "public"
+    "build": "pnpm run build:shared && pnpm run build:client && pnpm run build:server && pnpm run build:web",
+    "build:shared": "pnpm --filter @iteam/shared build",
+    "build:client": "pnpm --filter @myersguo/iteam build",
+    "build:server": "pnpm --filter @iteam/server build",
+    "build:web": "pnpm --filter @iteam/web build",
+    "dev:web": "pnpm --filter @iteam/web dev",
+    "dev:server": "pnpm --filter @iteam/server dev",
+    "typecheck": "pnpm run build:shared && pnpm -r typecheck",
+    "clean": "pnpm -r clean"
   }
 }

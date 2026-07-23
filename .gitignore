@@ -3,6 +3,7 @@ node_modules/
 
 # build output
 dist/
+packages/server/lib/
 
 # local data / state
 .iteam/
@@ -23,3 +24,8 @@ state.db-journal
 
 # npm pack output
 *.tgz
+llm_wiki/
+.iteam-web.pid
+RESTRUCTURE_DESIGN.md
+output/
+packages/server/output/

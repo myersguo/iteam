@@ -2,31 +2,31 @@ import { createServer, type Server } from "node:http";
 import { spawn } from "node:child_process";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Agent } from "../src/types.js";
-import { IteamCore } from "../src/core.js";
-import { startHttpServer } from "../src/http-server.js";
-import { deriveAgentAuthToken } from "../src/lib.js";
-import { formatTaskRuntimeProgress } from "../src/agent-launcher.js";
-import { AcpDriver } from "../src/runtime/acp-driver.js";
-import { JsonStore } from "../src/store/json-store.js";
-import { SqliteStore } from "../src/store/sqlite-store.js";
+import type { Agent } from "../packages/shared/src/types.js";
+import { deriveAgentAuthToken } from "../packages/shared/src/lib.js";
+import { IteamCore } from "../packages/server/src/core.js";
+import { startHttpServer } from "../packages/server/src/http-server.js";
+import { JsonStore } from "../packages/server/src/store/json-store.js";
+import { SqliteStore } from "../packages/server/src/store/sqlite-store.js";
 import {
   MYSQL_SPACE_BACKFILL_QUERIES,
   planMysqlChannelUniqueMigration
-} from "../src/store/mysql-store.js";
-import { MYSQL_TABLES } from "../src/store/mysql-schema.js";
-import { notificationBelongsToThread } from "../src/runtime/codex-driver.js";
-import { detectRuntimes } from "../src/runtimes.js";
-import { deliveryAffinityIndex } from "../src/runtime/driver.js";
-import { renderAcpProfileArgs, resolveAcpRuntimeProfile } from "../src/runtime/acp-profiles.js";
-import { renderProfileArgs, resolveRuntimeProfile } from "../src/runtime/profiles.js";
-import { parseIteamCommand, stripLarkBotMention } from "../src/integrations/lark.js";
-import { legacyIteamMcpServerNames } from "../src/legacy-traex-mcp.js";
-import { agentEnv, prepareAgentWorkspace, shellSingleQuote } from "../src/workspace.js";
+} from "../packages/server/src/store/mysql-store.js";
+import { MYSQL_TABLES } from "../packages/server/src/store/mysql-schema.js";
+import { parseIteamCommand, stripLarkBotMention } from "../packages/server/src/integrations/lark.js";
+import { formatTaskRuntimeProgress } from "../packages/client/src/agent-launcher.js";
+import { AcpDriver } from "../packages/client/src/runtime/acp-driver.js";
+import { notificationBelongsToThread } from "../packages/client/src/runtime/codex-driver.js";
+import { detectRuntimes } from "../packages/client/src/runtimes.js";
+import { deliveryAffinityIndex } from "../packages/client/src/runtime/driver.js";
+import { renderAcpProfileArgs, resolveAcpRuntimeProfile } from "../packages/client/src/runtime/acp-profiles.js";
+import { renderProfileArgs, resolveRuntimeProfile } from "../packages/client/src/runtime/profiles.js";
+import { legacyIteamMcpServerNames } from "../packages/client/src/legacy-traex-mcp.js";
+import { agentEnv, prepareAgentWorkspace, shellSingleQuote } from "../packages/client/src/workspace.js";
 
 const execFileAsync = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -98,7 +98,7 @@ const smokeRuntimes = [
   { id: "daemon_only", name: "Daemon-only runtime", installed: true }
 ];
 const port = 18000 + Math.floor(Math.random() * 10000);
-const daemon = spawn(tsxBin, [resolve(root, "src/server.ts"), "--port", String(port)], {
+const daemon = spawn(tsxBin, [resolve(root, "packages/server/src/server.ts"), "--port", String(port)], {
   env: { ...process.env, ITEAM_HOME: home, ITEAM_PORT: String(port) },
   stdio: ["ignore", "pipe", "pipe"]
 });
@@ -270,6 +270,7 @@ try {
       bridgeCommand: "node",
       runtimeAuthEnv: {},
       wrapperPath: "",
+      runtimeHome: "/workspace/acp-pool-0/runtime-home",
       promptPath: ""
     },
     timeoutMs: 1000
@@ -313,6 +314,7 @@ try {
       bridgeCommand: "node",
       runtimeAuthEnv: {},
       wrapperPath: "",
+      runtimeHome: "/workspace/trae-pool-0/runtime-home",
       promptPath: ""
     },
     timeoutMs: 1000
@@ -383,6 +385,39 @@ try {
   ) {
     throw new Error("agent environment did not preserve logical workspace PWD and isolated worker state");
   }
+
+  // Runtime session isolation: a traex agent that has NOT opted into
+  // shareRuntimeHistory must have TRAE_HOME pointed at its private runtime home
+  // so its turns stay out of the shared `/resume` picker. Opting in leaves the
+  // inherited TRAE_HOME untouched.
+  const isolatedTraex: Agent = { ...workspaceAgent, id: "agent_isolated_traex", runtime: "traex" };
+  const isolatedTraexWorkspace = prepareAgentWorkspace({
+    agent: isolatedTraex,
+    serverUrl: "http://127.0.0.1:4318",
+    launchId: "launch_isolated_traex",
+    stateSuffix: "-pool-0"
+  });
+  const isolatedTraexEnv = agentEnv({
+    agent: isolatedTraex,
+    serverUrl: "http://127.0.0.1:4318",
+    workspace: isolatedTraexWorkspace
+  });
+  if (isolatedTraexEnv.TRAE_HOME !== isolatedTraexWorkspace.runtimeHome) {
+    throw new Error("isolated traex agent did not get a private TRAE_HOME for session history");
+  }
+  if (!isolatedTraexWorkspace.runtimeHome.startsWith(isolatedTraexWorkspace.dir)) {
+    throw new Error("private runtime home should live under the agent state dir");
+  }
+  const sharedTraex: Agent = { ...isolatedTraex, id: "agent_shared_traex", shareRuntimeHistory: true };
+  const sharedTraexEnv = agentEnv({
+    agent: sharedTraex,
+    serverUrl: "http://127.0.0.1:4318",
+    workspace: isolatedTraexWorkspace
+  });
+  if (sharedTraexEnv.TRAE_HOME === isolatedTraexWorkspace.runtimeHome) {
+    throw new Error("shareRuntimeHistory=true must not redirect TRAE_HOME to the private home");
+  }
+
   const expectedModes = [
     [preparedWorkspace.dir, 0o700],
     [preparedWorkspace.internal, 0o700],
@@ -517,7 +552,7 @@ try {
   await verifyAcpQueuedPromotion(home);
   await verifyStuckDeliveryCancellation(home);
   verifySqliteSpacePersistence(home);
-  await verifySsoLoginFlow(home);
+  await verifyOAuthLoginFlow(home);
   const mysqlSpaceBackfillSql = MYSQL_SPACE_BACKFILL_QUERIES.join("\n");
   for (const table of ["iteam_channels", "iteam_deliveries", "iteam_messages", "iteam_tasks", "iteam_scheduled_tasks"]) {
     if (!mysqlSpaceBackfillSql.includes(`UPDATE ${table}`)) {
@@ -525,7 +560,7 @@ try {
     }
   }
   const mysqlSchemaSql = MYSQL_TABLES.map(table => table.ddl).join("\n");
-  const mysqlStoreSource = readFileSync(resolve(root, "src/store/mysql-store.ts"), "utf8");
+  const mysqlStoreSource = readFileSync(resolve(root, "packages/server/src/store/mysql-store.ts"), "utf8");
   if (
     !mysqlSchemaSql.includes("CREATE TABLE IF NOT EXISTS iteam_spaces") ||
     !mysqlStoreSource.includes("FROM iteam_spaces") ||
@@ -606,7 +641,7 @@ try {
   const invite = await post(port, "/api/computers/connect-command", { serverUrl: `http://127.0.0.1:${port}` });
   if (!invite.command.includes("daemon connect")) throw new Error("connect command was not generated");
   const cliDaemon = spawn(tsxBin, [
-    resolve(root, "bin/iteam.ts"),
+    resolve(root, "packages/client/bin/iteam.ts"),
     "daemon",
     "connect",
     "--server-url",
@@ -833,9 +868,9 @@ try {
       stderr: "",
       exit_code: 0,
       changes: {
-        "/tmp/bytedcli-common-commands.md": {
+        "/tmp/agent-common-commands.md": {
           kind: "update",
-          diff: "--- a/bytedcli-common-commands.md\n+++ b/bytedcli-common-commands.md\n@@\n-old\n+new\n"
+          diff: "--- a/agent-common-commands.md\n+++ b/agent-common-commands.md\n@@\n-old\n+new\n"
         }
       }
     }
@@ -873,7 +908,7 @@ try {
   const stdoutArtifact = deliveryArtifacts.find((artifact: any) => artifact.kind === "command_stdout");
   const diffArtifact = deliveryArtifacts.find((artifact: any) =>
     artifact.kind === "file_diff" &&
-    String(artifact.relativePath || "").includes("bytedcli-common-commands.md")
+    String(artifact.relativePath || "").includes("agent-common-commands.md")
   );
   if (!stdoutArtifact || !diffArtifact) {
     throw new Error("delivery artifacts did not capture command stdout and file diff");
@@ -933,7 +968,7 @@ try {
     throw new Error("stale selected provider with a new App ID should create a separate Lark bot config");
   }
   const cliConfig = await execFileText(tsxBin, [
-    resolve(root, "bin/iteam.ts"),
+    resolve(root, "packages/client/bin/iteam.ts"),
     "bot",
     "lark",
     "config",
@@ -944,7 +979,7 @@ try {
   ], { ITEAM_URL: `http://127.0.0.1:${port}` });
   if (cliConfig.includes("cli_secret")) throw new Error("bot CLI config echoed raw app secret");
   const cliList = await execFileText(tsxBin, [
-    resolve(root, "bin/iteam.ts"),
+    resolve(root, "packages/client/bin/iteam.ts"),
     "bot",
     "lark",
     "list"
@@ -1421,10 +1456,69 @@ try {
     agentAuthToken: deriveAgentAuthToken(connectToken, agent.id)
   });
 
+  await verifyCliCommands(port, home);
+
   console.log("smoke ok");
 } finally {
   daemon.kill("SIGTERM");
   rmSync(home, { recursive: true, force: true });
+}
+
+/**
+ * Drive the API-facing `iteam` CLI (space/channel/message/config) against the
+ * live daemon. Uses --json so we can parse and assert instead of scraping
+ * console.table output. Runs with an isolated ITEAM_HOME so the CLI config file
+ * never touches the developer's real ~/.iteam.
+ */
+async function verifyCliCommands(port: number, home: string): Promise<void> {
+  const cliHome = join(home, "cli-home");
+  mkdirSync(cliHome, { recursive: true });
+  const env = { ITEAM_HOME: cliHome, ITEAM_URL: `http://127.0.0.1:${port}` };
+  const runCli = (args: string[]): Promise<string> =>
+    execFileText(tsxBin, [resolve(root, "packages/client/bin/iteam.ts"), ...args], env);
+
+  const cliJson = async <T>(args: string[]): Promise<T> => {
+    const raw = await runCli([...args, "--json"]);
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      throw new Error(`CLI --json output was not parseable for \`${args.join(" ")}\`: ${raw}`);
+    }
+  };
+
+  const spaces = await cliJson<any[]>(["space", "list"]);
+  if (!spaces.some(space => space.id === "space_default")) {
+    throw new Error("CLI space list did not include the default space");
+  }
+
+  const channel = await cliJson<any>(["channel", "create", "cli-smoke"]);
+  if (channel.target !== "#cli-smoke") {
+    throw new Error("CLI channel create did not return the expected target");
+  }
+
+  const message = await cliJson<any>(["message", "send", "#cli-smoke", "hello", "from", "cli"]);
+  if (message.text !== "hello from cli") {
+    throw new Error("CLI message send did not persist the joined text");
+  }
+
+  const readback = await runCli(["message", "read", "#cli-smoke"]);
+  if (!readback.includes("hello from cli")) {
+    throw new Error("CLI message read did not show the sent message");
+  }
+
+  // Auth mode is `none` in the smoke daemon, so whoami must say so rather than
+  // demand a login.
+  const whoami = await cliJson<any>(["auth", "whoami"]);
+  if (whoami.authMode !== "none") {
+    throw new Error("CLI auth whoami should report authMode=none for the local daemon");
+  }
+
+  // config set/get must round-trip through the isolated cli.json.
+  await runCli(["config", "set", "spaceId", "space_default"]);
+  const spaceIdValue = await cliJson<any>(["config", "get", "spaceId"]);
+  if (spaceIdValue.spaceId !== "space_default") {
+    throw new Error("CLI config set/get did not round-trip spaceId");
+  }
 }
 
 async function waitForHealth(port: number): Promise<void> {
@@ -1468,8 +1562,8 @@ async function waitForChildExit(child: ReturnType<typeof spawn>, timeoutMs: numb
   ]);
 }
 
-async function verifySsoLoginFlow(home: string): Promise<void> {
-  const sso = createServer((req, res) => {
+async function verifyOAuthLoginFlow(home: string): Promise<void> {
+  const oauth = createServer((req, res) => {
     const url = new URL(req.url || "/", "http://127.0.0.1");
     if (req.method === "GET" && url.pathname === "/oauth2/authorize") {
       const redirectUri = url.searchParams.get("redirect_uri") || "";
@@ -1503,9 +1597,7 @@ async function verifySsoLoginFlow(home: string): Promise<void> {
         name: "alice",
         nickname: "Alice Smoke",
         email: "alice@example.com",
-        picture: "https://example.com/alice.png",
-        tenant_alias: "bytedance",
-        operator_type: "BDEE"
+        picture: "https://example.com/alice.png"
       }));
       return;
     }
@@ -1567,11 +1659,11 @@ async function verifySsoLoginFlow(home: string): Promise<void> {
     }
     res.writeHead(404).end("not found");
   });
-  const ssoPort = await listenOnRandomPort(sso);
+  const oauthPort = await listenOnRandomPort(oauth);
   const githubPort = await listenOnRandomPort(github);
-  const ssoBase = `http://127.0.0.1:${ssoPort}`;
+  const oauthBase = `http://127.0.0.1:${oauthPort}`;
   const githubBase = `http://127.0.0.1:${githubPort}`;
-  const appHome = join(home, "sso-flow");
+  const appHome = join(home, "oauth-flow");
   mkdirSync(appHome, { recursive: true });
   const core = await IteamCore.create({
     store: new JsonStore(appHome),
@@ -1590,19 +1682,19 @@ async function verifySsoLoginFlow(home: string): Promise<void> {
       sessionTtlMs: 60 * 60 * 1000,
       stateTtlMs: 10 * 60 * 1000,
       cookieSecure: false,
+      cookieSameSite: "lax",
       providers: [{
-        id: "bytedance",
-        label: "ByteDance SSO",
-        type: "bytedance",
+        id: "oauth2",
+        label: "OAuth2",
+        type: "oauth2",
         clientId: "client_smoke",
         clientSecret: "secret_smoke",
-        authorizeUrl: `${ssoBase}/oauth2/authorize`,
-        tokenUrl: `${ssoBase}/oauth2/access_token`,
-        userinfoUrl: `${ssoBase}/oauth2/userinfo`,
-        logoutUrl: `${ssoBase}/oauth2/logout`,
+        authorizeUrl: `${oauthBase}/oauth2/authorize`,
+        tokenUrl: `${oauthBase}/oauth2/access_token`,
+        userinfoUrl: `${oauthBase}/oauth2/userinfo`,
+        logoutUrl: `${oauthBase}/oauth2/logout`,
         scope: "read",
-        tokenAuth: "basic",
-        extraAuthorizeParams: { access_type: "online" }
+        tokenAuth: "basic"
       }, {
         id: "github",
         label: "GitHub",
@@ -1628,42 +1720,49 @@ async function verifySsoLoginFlow(home: string): Promise<void> {
     }
 
     const jar = new Map<string, string>();
-    const login = await fetch(`http://127.0.0.1:${appPort}/auth/login?provider=bytedance&return_to=%2Fchat`, { redirect: "manual" });
-    if (login.status !== 302) throw new Error(`ByteDance SSO login should redirect, got ${login.status}`);
+    const login = await fetch(`http://127.0.0.1:${appPort}/auth/login?provider=oauth2&return_to=%2Fchat`, { redirect: "manual" });
+    if (login.status !== 302) throw new Error(`OAuth2 login should redirect, got ${login.status}`);
     rememberCookies(jar, login.headers);
     const authorizeLocation = login.headers.get("location") || "";
     if (!authorizeLocation.includes("/oauth2/authorize") || !authorizeLocation.includes("client_id=client_smoke")) {
-      throw new Error("ByteDance SSO login did not redirect to the configured authorize URL");
+      throw new Error("OAuth2 login did not redirect to the configured authorize URL");
     }
 
     const authorize = await fetch(authorizeLocation, { redirect: "manual" });
-    if (authorize.status !== 302) throw new Error(`fake SSO authorize should redirect, got ${authorize.status}`);
+    if (authorize.status !== 302) throw new Error(`fake OAuth2 authorize should redirect, got ${authorize.status}`);
     const callbackLocation = authorize.headers.get("location") || "";
     const callback = await fetch(callbackLocation, {
       redirect: "manual",
       headers: { cookie: cookieHeader(jar) }
     });
-    if (callback.status !== 302 || callback.headers.get("location") !== "/chat") {
-      throw new Error("SSO callback did not return to the original path");
+    const callbackReturn = callback.headers.get("location") || "";
+    if (callback.status !== 302 || !callbackReturn.startsWith("/chat#iteam_session=")) {
+      throw new Error("OAuth2 callback did not return to the original path");
     }
+    const callbackSession = new URL(callbackReturn, "http://127.0.0.1").hash.slice(1);
+    const callbackToken = new URLSearchParams(callbackSession).get("iteam_session") || "";
     rememberCookies(jar, callback.headers);
 
     const me = await fetch(`http://127.0.0.1:${appPort}/api/me`, { headers: { cookie: cookieHeader(jar) } }).then(r => r.json()) as any;
-    if (!me.authenticated || me.human?.name !== "Alice Smoke" || me.human?.email !== "alice@example.com" || me.human?.source !== "bytedance") {
-      throw new Error("SSO session did not expose the logged-in human");
+    if (!me.authenticated || me.human?.name !== "Alice Smoke" || me.human?.email !== "alice@example.com" || me.human?.source !== "oauth2") {
+      throw new Error("OAuth2 session did not expose the logged-in human");
+    }
+    const bearerMe = await fetch(`http://127.0.0.1:${appPort}/api/me`, { headers: { authorization: `Bearer ${callbackToken}` } }).then(r => r.json()) as any;
+    if (!bearerMe.authenticated || bearerMe.human?.name !== "Alice Smoke") {
+      throw new Error("OAuth2 bearer session did not expose the logged-in human");
     }
 
     const posted = await fetch(`http://127.0.0.1:${appPort}/api/messages`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie: cookieHeader(jar) },
-      body: JSON.stringify({ target: "#all", text: "hello from sso", authorId: "human-local" })
+      body: JSON.stringify({ target: "#all", text: "hello from oauth", authorId: "human-local" })
     }).then(r => r.json()) as any;
-    if (posted.authorId !== me.human.id) throw new Error("SSO message author was not forced to the logged-in human");
+    if (posted.authorId !== me.human.id) throw new Error("OAuth message author was not forced to the logged-in human");
 
     const impersonation = await fetch(`http://127.0.0.1:${appPort}/api/messages`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie: cookieHeader(jar) },
-      body: JSON.stringify({ target: "#all", text: "bad", authorId: "human_sso_someone_else" })
+      body: JSON.stringify({ target: "#all", text: "bad", authorId: "human_oauth_someone_else" })
     });
     if (impersonation.status !== 403) throw new Error(`OAuth human impersonation should be 403, got ${impersonation.status}`);
 
@@ -1681,7 +1780,7 @@ async function verifySsoLoginFlow(home: string): Promise<void> {
       redirect: "manual",
       headers: { cookie: cookieHeader(githubJar) }
     });
-    if (githubCallback.status !== 302 || githubCallback.headers.get("location") !== "/") {
+    if (githubCallback.status !== 302 || !(githubCallback.headers.get("location") || "").startsWith("/#iteam_session=")) {
       throw new Error("GitHub callback did not return to the original path");
     }
     rememberCookies(githubJar, githubCallback.headers);
@@ -1689,9 +1788,67 @@ async function verifySsoLoginFlow(home: string): Promise<void> {
     if (!githubMe.authenticated || githubMe.human?.name !== "Octo Cat" || githubMe.human?.email !== "octo@example.com" || githubMe.human?.source !== "github") {
       throw new Error("GitHub session did not expose the normalized GitHub human");
     }
+
+    const iframeAppHome = join(home, "oauth-flow-iframe");
+    mkdirSync(iframeAppHome, { recursive: true });
+    const iframeCore = await IteamCore.create({
+      store: new JsonStore(iframeAppHome),
+      serverInviteRoot: root
+    });
+    const iframePort = 18000 + Math.floor(Math.random() * 10000);
+    const iframeApp = startHttpServer({
+      core: iframeCore,
+      port: iframePort,
+      host: "127.0.0.1",
+      serveWeb: false,
+      authConfig: {
+        mode: "oauth",
+        publicUrl: `http://127.0.0.1:${iframePort}`,
+        sessionSecret: "session_secret_smoke_iframe",
+        sessionTtlMs: 60 * 60 * 1000,
+        stateTtlMs: 10 * 60 * 1000,
+        cookieSecure: true,
+        cookieSameSite: "none",
+        providers: [{
+          id: "oauth2",
+          label: "OAuth2",
+          type: "oauth2",
+          clientId: "client_smoke",
+          clientSecret: "secret_smoke",
+          authorizeUrl: `${oauthBase}/oauth2/authorize`,
+          tokenUrl: `${oauthBase}/oauth2/access_token`,
+          userinfoUrl: `${oauthBase}/oauth2/userinfo`,
+          logoutUrl: `${oauthBase}/oauth2/logout`,
+          scope: "read",
+          tokenAuth: "basic"
+        }]
+      }
+    });
+    try {
+      const iframeLogin = await fetch(`http://127.0.0.1:${iframePort}/auth/login?provider=oauth2&return_to=%2Fiframe`, { redirect: "manual" });
+      if (iframeLogin.status !== 302) throw new Error(`iframe OAuth2 login should redirect, got ${iframeLogin.status}`);
+      const iframeSetCookie = iframeLogin.headers.get("set-cookie") || "";
+      if (!iframeSetCookie.includes("SameSite=None") || !iframeSetCookie.includes("Secure")) {
+        throw new Error("iframe OAuth2 state cookie did not opt into SameSite=None; Secure");
+      }
+      const iframeAuthorize = await fetch(iframeLogin.headers.get("location") || "", { redirect: "manual" });
+      if (iframeAuthorize.status !== 302) throw new Error(`iframe fake OAuth2 authorize should redirect, got ${iframeAuthorize.status}`);
+      const iframeCallback = await fetch(iframeAuthorize.headers.get("location") || "", { redirect: "manual" });
+      const iframeReturn = iframeCallback.headers.get("location") || "";
+      if (iframeCallback.status !== 302 || !iframeReturn.startsWith("/iframe#iteam_session=")) {
+        throw new Error("iframe OAuth2 callback without state cookie did not use server-side state fallback");
+      }
+      const iframeToken = new URLSearchParams(new URL(iframeReturn, "http://127.0.0.1").hash.slice(1)).get("iteam_session") || "";
+      const iframeMe = await fetch(`http://127.0.0.1:${iframePort}/api/me`, { headers: { authorization: `Bearer ${iframeToken}` } }).then(r => r.json()) as any;
+      if (!iframeMe.authenticated || iframeMe.human?.name !== "Alice Smoke") {
+        throw new Error("iframe OAuth2 bearer session did not expose the logged-in human");
+      }
+    } finally {
+      await iframeApp.close();
+    }
   } finally {
     await app.close();
-    await new Promise<void>(resolve => sso.close(() => resolve()));
+    await new Promise<void>(resolve => oauth.close(() => resolve()));
     await new Promise<void>(resolve => github.close(() => resolve()));
   }
 }
@@ -2214,7 +2371,7 @@ async function verifyAcpDriverWithFakeRuntime(
   if (first.text.includes("preamble:")) {
     throw new Error("AcpDriver final response included process commentary emitted before a tool call");
   }
-  const resolvedExpectedCwd = expectedCwd || agent.workspacePath;
+  const resolvedExpectedCwd = realpathSync(expectedCwd || agent.workspacePath);
   const expectedProfileRuntimeCwd = expectedCwd ? resolvedExpectedCwd : "";
   const expectedProfileArgCwd = expectedCwd ? resolvedExpectedCwd : "";
   if (!first.text.includes(
@@ -2268,6 +2425,7 @@ async function verifyAcpDriverWithFakeRuntime(
 }
 
 async function verifyOneShotProfileCwd(home: string, expectedCwd: string): Promise<void> {
+  const resolvedExpectedCwd = realpathSync(expectedCwd);
   const agent: Agent = {
     id: "agent_custom_cwd",
     spaceId: "space_default",
@@ -2285,7 +2443,7 @@ async function verifyOneShotProfileCwd(home: string, expectedCwd: string): Promi
     createdAt: "",
     updatedAt: ""
   };
-  const driver = new (await import("../src/runtime/oneshot-driver.js")).OneshotDriver("custom_cwd", {
+  const driver = new (await import("../packages/client/src/runtime/oneshot-driver.js")).OneshotDriver("custom_cwd", {
     serverUrl: "http://127.0.0.1:0",
     launchId: "launch_custom_cwd"
   });
@@ -2296,9 +2454,9 @@ async function verifyOneShotProfileCwd(home: string, expectedCwd: string): Promi
   );
   const observed = JSON.parse(result.text) as { cwd: string; pwd: string; runtimeCwd: string };
   if (
-    observed.cwd !== expectedCwd ||
-    observed.pwd !== expectedCwd ||
-    observed.runtimeCwd !== expectedCwd
+    observed.cwd !== resolvedExpectedCwd ||
+    observed.pwd !== resolvedExpectedCwd ||
+    observed.runtimeCwd !== resolvedExpectedCwd
   ) {
     throw new Error(`one-shot profile cwd/env mismatch: ${result.text}`);
   }

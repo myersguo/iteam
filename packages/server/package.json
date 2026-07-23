@@ -1,0 +1,35 @@
+{
+  "name": "@iteam/server",
+  "version": "0.1.45",
+  "private": true,
+  "description": "iTeam server - persistent Node service with core domain logic, HTTP transport, SSE, and Lark runtime.",
+  "type": "module",
+  "license": "MIT",
+  "author": "myersguo",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "dist/cli/server.mjs",
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx ./src/server.ts",
+    "start": "node ./dist/cli/server.mjs",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@iteam/shared": "workspace:*",
+    "@larksuiteoapi/node-sdk": "^1.67.0",
+    "cron-parser": "^5.5.0"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^12.10.0",
+    "mysql2": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "tsup": "^8.5.1",
+    "tsx": "^4.22.3",
+    "typescript": "^5.8.0"
+  }
+}
