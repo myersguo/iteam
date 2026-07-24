@@ -67,7 +67,10 @@ export class LarkBotIntegration {
       appSecret: config.appSecret,
       ...(config.domain ? { domain: config.domain as any } : {})
     };
-    this.client = new Lark.Client(baseConfig);
+    this.client = new Lark.Client({
+      ...baseConfig,
+      loggerLevel: Lark.LoggerLevel.fatal
+    });
     this.wsClient = new Lark.WSClient({
       ...baseConfig,
       loggerLevel: Lark.LoggerLevel.info,
@@ -355,7 +358,51 @@ function buildLarkCardPayload(text: string, options: LarkSendOptions = {}): Lark
 }
 
 function normalizeCardMarkdown(text: string): string {
-  return String(text || "").trim();
+  return fenceMarkdownTables(String(text || "").trim());
+}
+
+function fenceMarkdownTables(markdown: string): string {
+  if (!markdown.includes("|")) return markdown;
+  const lines = markdown.split(/\r?\n/);
+  const out: string[] = [];
+  let inFence = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence;
+      out.push(line);
+      continue;
+    }
+    if (!inFence && isMarkdownTableStart(lines, i)) {
+      out.push("```text");
+      while (i < lines.length && isMarkdownTableLine(lines[i])) {
+        out.push(lines[i]);
+        i++;
+      }
+      out.push("```");
+      i--;
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
+function isMarkdownTableStart(lines: string[], index: number): boolean {
+  const current = lines[index];
+  const next = lines[index + 1];
+  return isMarkdownTableLine(current) && isMarkdownTableSeparator(next);
+}
+
+function isMarkdownTableLine(line: string | undefined): boolean {
+  const text = String(line || "").trim();
+  return text.includes("|") && text.replace(/\|/g, "").trim().length > 0;
+}
+
+function isMarkdownTableSeparator(line: string | undefined): boolean {
+  const text = String(line || "").trim();
+  if (!text.includes("|")) return false;
+  return /^[|:\-\s]+$/.test(text) && text.includes("-");
 }
 
 function truncateCardTitle(title: string): string {

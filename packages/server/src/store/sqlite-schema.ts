@@ -204,6 +204,7 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
   )`,
   `CREATE TABLE IF NOT EXISTS iteam_external_ingress_pairings (
     id            TEXT NOT NULL PRIMARY KEY,
+    space_id      TEXT NOT NULL DEFAULT 'space_default',
     pair_code     TEXT NOT NULL UNIQUE,
     target        TEXT NOT NULL,
     agent_id      TEXT NOT NULL,
@@ -217,6 +218,7 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
   )`,
   `CREATE TABLE IF NOT EXISTS iteam_external_ingress_policies (
     id            TEXT NOT NULL PRIMARY KEY,
+    space_id      TEXT NOT NULL DEFAULT 'space_default',
     token         TEXT NOT NULL,
     source        TEXT NOT NULL,
     target        TEXT NOT NULL,
@@ -227,6 +229,7 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
     updated_at    TEXT NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS iteam_external_bot_configs (
+    space_id   TEXT NOT NULL DEFAULT 'space_default',
     provider   TEXT NOT NULL PRIMARY KEY,
     alias      TEXT,
     app_id     TEXT NOT NULL,
@@ -241,6 +244,7 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
   )`,
   `CREATE TABLE IF NOT EXISTS iteam_external_bot_bindings (
     id               TEXT NOT NULL PRIMARY KEY,
+    space_id         TEXT NOT NULL DEFAULT 'space_default',
     provider         TEXT NOT NULL,
     tenant_key       TEXT NOT NULL,
     chat_id          TEXT NOT NULL,
@@ -253,6 +257,7 @@ export const SQLITE_TABLES: ReadonlyArray<string> = [
   )`,
   `CREATE TABLE IF NOT EXISTS iteam_external_message_links (
     id                       TEXT NOT NULL PRIMARY KEY,
+    space_id                 TEXT NOT NULL DEFAULT 'space_default',
     provider                 TEXT NOT NULL,
     external_conversation_id TEXT NOT NULL,
     external_message_id      TEXT,

@@ -4,7 +4,11 @@ import type { State } from "@iteam/shared";
 import { BaseStore, initialState } from "./base.js";
 
 /**
- * Default backend: a single JSON file at <home>/state.json.
+ * Legacy/dev-only backend: a single JSON file at <home>/state.json.
+ *
+ * JSON preserves the original in-memory snapshot semantics for local
+ * experiments, but it is not a supported repository backend. Production and
+ * normal local use should choose SQLite or MySQL.
  */
 export class JsonStore extends BaseStore {
   readonly file: string;

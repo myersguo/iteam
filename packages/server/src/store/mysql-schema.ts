@@ -273,6 +273,7 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
     name: "iteam_external_ingress_pairings",
     ddl: `CREATE TABLE IF NOT EXISTS iteam_external_ingress_pairings (
       id            VARCHAR(64)  NOT NULL PRIMARY KEY,
+      space_id      VARCHAR(64)  NOT NULL DEFAULT 'space_default',
       pair_code     VARCHAR(128) NOT NULL,
       target        VARCHAR(255) NOT NULL,
       agent_id      VARCHAR(64)  NOT NULL,
@@ -291,6 +292,7 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
     name: "iteam_external_ingress_policies",
     ddl: `CREATE TABLE IF NOT EXISTS iteam_external_ingress_policies (
       id            VARCHAR(64)  NOT NULL PRIMARY KEY,
+      space_id      VARCHAR(64)  NOT NULL DEFAULT 'space_default',
       token         VARCHAR(128) NOT NULL,
       source        VARCHAR(128) NOT NULL,
       target        VARCHAR(255) NOT NULL,
@@ -305,6 +307,7 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
   {
     name: "iteam_external_bot_configs",
     ddl: `CREATE TABLE IF NOT EXISTS iteam_external_bot_configs (
+      space_id   VARCHAR(64)  NOT NULL DEFAULT 'space_default',
       provider   VARCHAR(32)  NOT NULL PRIMARY KEY,
       alias      VARCHAR(128) DEFAULT NULL,
       app_id     VARCHAR(128) NOT NULL,
@@ -323,6 +326,7 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
     name: "iteam_external_bot_bindings",
     ddl: `CREATE TABLE IF NOT EXISTS iteam_external_bot_bindings (
       id               VARCHAR(64)  NOT NULL PRIMARY KEY,
+      space_id         VARCHAR(64)  NOT NULL DEFAULT 'space_default',
       provider         VARCHAR(32)  NOT NULL,
       tenant_key       VARCHAR(128) NOT NULL,
       chat_id          VARCHAR(128) NOT NULL,
@@ -339,6 +343,7 @@ export const MYSQL_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
     name: "iteam_external_message_links",
     ddl: `CREATE TABLE IF NOT EXISTS iteam_external_message_links (
       id                       VARCHAR(64)  NOT NULL PRIMARY KEY,
+      space_id                 VARCHAR(64)  NOT NULL DEFAULT 'space_default',
       provider                 VARCHAR(32)  NOT NULL,
       external_conversation_id VARCHAR(255) NOT NULL,
       external_message_id      VARCHAR(255) DEFAULT NULL,

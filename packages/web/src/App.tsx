@@ -244,6 +244,18 @@ function App() {
     await refresh(options.navigateHome ? "#all" : channel);
   }
 
+  async function deleteSpace(space: Space) {
+    if (space.id === "space_default") throw new Error("The default space cannot be deleted");
+    const spaces = state?.spaces || [];
+    const fallback = spaces.find(item => item.id !== space.id) || spaces.find(item => item.id === "space_default");
+    const nextSpaceId = fallback?.id || "space_default";
+    await api.del(`/api/spaces/${encodeURIComponent(space.id)}`);
+    await switchSpace(nextSpaceId, {
+      navigateHome: true,
+      spaces: spaces.filter(item => item.id !== space.id)
+    });
+  }
+
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const channelViewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Track the live channel so the (stable) SSE handlers always act on the
@@ -680,6 +692,7 @@ function App() {
         onResizeReset={() => setSidebarWidth(272)}
         onSwitchSpace={spaceId => void switchSpace(spaceId)}
         onCreateSpace={(name, description) => api.post<Space>("/api/spaces", { name, description })}
+        onDeleteSpace={deleteSpace}
         channel={channel}
         onSelectChannel={nextChannel => {
           setChannel(nextChannel);

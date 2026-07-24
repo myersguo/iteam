@@ -522,6 +522,11 @@ export class IteamCore {
     return this.store.snapshot().spaces || [];
   }
 
+  async readSpaces(): Promise<Space[]> {
+    const state = this.store.readState ? await this.store.readState() : this.store.snapshot();
+    return state.spaces || [];
+  }
+
   createSpace(input: { name: string; slug?: string; description?: string }): Space {
     const rawName = validateSpaceName(input.name);
     const slug = slugSpaceName(input.slug || rawName);
@@ -591,27 +596,13 @@ export class IteamCore {
   snapshotForSpace(spaceIdInput: string | null | undefined): State {
     const raw = this.store.snapshot();
     const spaceId = resolveSpaceId(raw, spaceIdInput);
-    return {
-      ...raw,
-      spaces: raw.spaces,
-      humans: raw.humans,
-      computers: (raw.computers || []).filter(item => item.spaceId === spaceId),
-      pendingComputerConnections: (raw.pendingComputerConnections || []).filter(item => item.spaceId === spaceId),
-      agents: (raw.agents || []).filter(item => item.spaceId === spaceId),
-      channels: (raw.channels || []).filter(item => item.spaceId === spaceId),
-      messages: (raw.messages || []).filter(item => item.spaceId === spaceId),
-      deliveries: (raw.deliveries || []).filter(item => item.spaceId === spaceId),
-      deliveryEvents: (raw.deliveryEvents || []).filter(item => item.spaceId === spaceId),
-      deliveryArtifacts: (raw.deliveryArtifacts || []).filter(item => item.spaceId === spaceId),
-      tasks: (raw.tasks || []).filter(item => item.spaceId === spaceId),
-      scheduledTasks: (raw.scheduledTasks || []).filter(item => item.spaceId === spaceId),
-      externalIngressPairings: (raw.externalIngressPairings || []).filter(item => item.spaceId === spaceId),
-      externalIngressPolicies: (raw.externalIngressPolicies || []).filter(item => item.spaceId === spaceId),
-      externalBotConfigs: (raw.externalBotConfigs || []).filter(item => item.spaceId === spaceId),
-      externalBotBindings: (raw.externalBotBindings || []).filter(item => item.spaceId === spaceId),
-      externalMessageLinks: (raw.externalMessageLinks || []).filter(item => item.spaceId === spaceId),
-      events: raw.events
-    };
+    return filterStateForSpace(raw, spaceId);
+  }
+
+  async readStateForSpace(spaceIdInput: string | null | undefined): Promise<State> {
+    const raw = this.store.readState ? await this.store.readState() : this.store.snapshot();
+    const spaceId = resolveSpaceId(raw, spaceIdInput);
+    return filterStateForSpace(raw, spaceId);
   }
 
   /**
@@ -631,16 +622,38 @@ export class IteamCore {
     }));
   }
 
+  async readChannels(spaceId?: string | null) {
+    const state = await this.readStateForSpace(spaceId);
+    const messages = state.messages || [];
+    return (state.channels || []).map(channel => ({
+      ...channel,
+      messageCount: messages.filter(message => parentTargetFromThread(message.target) === channel.target).length
+    }));
+  }
+
   listAgents(spaceId?: string | null) {
     return this.snapshotForSpace(spaceId).agents || [];
+  }
+
+  async readAgents(spaceId?: string | null) {
+    return (await this.readStateForSpace(spaceId)).agents || [];
   }
 
   listComputers(spaceId?: string | null) {
     return this.snapshotForSpace(spaceId).computers || [];
   }
 
+  async readComputers(spaceId?: string | null) {
+    return (await this.readStateForSpace(spaceId)).computers || [];
+  }
+
   listHumans() {
     return this.store.snapshot().humans || [];
+  }
+
+  async readHumans() {
+    const state = this.store.readState ? await this.store.readState() : this.store.snapshot();
+    return state.humans || [];
   }
 
   patchHuman(humanId: string, input: HumanPatchInput): Human {
@@ -689,12 +702,21 @@ export class IteamCore {
     return this.snapshotForSpace(spaceId).deliveries || [];
   }
 
-  listDeliveryEvents(filter: {
+  async readDeliveries(spaceId?: string | null) {
+    return (await this.readStateForSpace(spaceId)).deliveries || [];
+  }
+
+  async listDeliveryEvents(filter: {
     spaceId?: string | null;
     target?: string | null;
     deliveryId?: string | null;
     limit?: number | string | null;
-  } = {}): DeliveryEvent[] {
+  } = {}): Promise<DeliveryEvent[]> {
+    if (this.store.repository) {
+      await this.store.flush?.();
+      const spaceId = filter.spaceId !== undefined ? this.resolveSpaceId(filter.spaceId) : undefined;
+      return this.store.repository.listDeliveryEvents({ ...filter, spaceId });
+    }
     let events = this.store.snapshot().deliveryEvents || [];
     if (filter.spaceId !== undefined) {
       const spaceId = this.resolveSpaceId(filter.spaceId);
@@ -712,13 +734,18 @@ export class IteamCore {
       .slice(-limit);
   }
 
-  listDeliveryArtifacts(filter: {
+  async listDeliveryArtifacts(filter: {
     spaceId?: string | null;
     target?: string | null;
     deliveryId?: string | null;
     eventId?: string | null;
     limit?: number | string | null;
-  } = {}): DeliveryArtifact[] {
+  } = {}): Promise<DeliveryArtifact[]> {
+    if (this.store.repository) {
+      await this.store.flush?.();
+      const spaceId = filter.spaceId !== undefined ? this.resolveSpaceId(filter.spaceId) : undefined;
+      return this.store.repository.listDeliveryArtifacts({ ...filter, spaceId });
+    }
     let artifacts = this.store.snapshot().deliveryArtifacts || [];
     if (filter.spaceId !== undefined) {
       const spaceId = this.resolveSpaceId(filter.spaceId);
@@ -736,8 +763,14 @@ export class IteamCore {
       .slice(-limit);
   }
 
-  getDeliveryArtifact(artifactId: string, spaceId?: string | null): DeliveryArtifact {
+  async getDeliveryArtifact(artifactId: string, spaceId?: string | null): Promise<DeliveryArtifact> {
     const resolved = spaceId !== undefined ? this.resolveSpaceId(spaceId) : null;
+    if (this.store.repository) {
+      await this.store.flush?.();
+      const artifact = await this.store.repository.getDeliveryArtifact(artifactId, resolved);
+      if (!artifact) throw new HttpError(404, "delivery artifact not found");
+      return artifact;
+    }
     const artifact = (this.store.snapshot({ includeArtifactContent: true }).deliveryArtifacts || []).find(item =>
       item.id === artifactId && (!resolved || item.spaceId === resolved)
     );
@@ -749,6 +782,10 @@ export class IteamCore {
     return this.snapshotForSpace(spaceId).externalIngressPairings || [];
   }
 
+  async readIngressPairings(spaceId?: string | null) {
+    return (await this.readStateForSpace(spaceId)).externalIngressPairings || [];
+  }
+
   listIngressPolicies(spaceId?: string | null) {
     return (this.snapshotForSpace(spaceId).externalIngressPolicies || []).map(policy => ({
       ...policy,
@@ -756,8 +793,22 @@ export class IteamCore {
     }));
   }
 
+  async readIngressPolicies(spaceId?: string | null) {
+    return ((await this.readStateForSpace(spaceId)).externalIngressPolicies || []).map(policy => ({
+      ...policy,
+      token: maskToken(policy.token)
+    }));
+  }
+
   listExternalBotConfigs(spaceId?: string | null) {
     return (this.snapshotForSpace(spaceId).externalBotConfigs || []).map(config => ({
+      ...config,
+      appSecret: maskToken(config.appSecret)
+    }));
+  }
+
+  async readExternalBotConfigs(spaceId?: string | null) {
+    return ((await this.readStateForSpace(spaceId)).externalBotConfigs || []).map(config => ({
       ...config,
       appSecret: maskToken(config.appSecret)
     }));
@@ -799,12 +850,24 @@ export class IteamCore {
     return this.snapshotForSpace(spaceId).externalBotBindings || [];
   }
 
+  async readExternalBotBindings(spaceId?: string | null) {
+    return (await this.readStateForSpace(spaceId)).externalBotBindings || [];
+  }
+
   listExternalMessageLinks(spaceId?: string | null) {
     return this.snapshotForSpace(spaceId).externalMessageLinks || [];
   }
 
+  async readExternalMessageLinks(spaceId?: string | null) {
+    return (await this.readStateForSpace(spaceId)).externalMessageLinks || [];
+  }
+
   listPendingConnections(spaceId?: string | null) {
     return this.snapshotForSpace(spaceId).pendingComputerConnections || [];
+  }
+
+  async readPendingConnections(spaceId?: string | null) {
+    return (await this.readStateForSpace(spaceId)).pendingComputerConnections || [];
   }
 
   listTasks(filter: {
@@ -850,6 +913,49 @@ export class IteamCore {
     }));
   }
 
+  async readTasks(filter: {
+    target?: string | null;
+    status?: string | null;
+    assigneeId?: string | null;
+    createdBy?: string | null;
+    q?: string | null;
+    includeDone?: boolean;
+    spaceId?: string | null;
+  } = {}) {
+    const snapshot = filter.spaceId !== undefined
+      ? await this.readStateForSpace(filter.spaceId)
+      : (this.store.readState ? await this.store.readState() : this.store.snapshot());
+    const replyCounts = new Map<string, number>();
+    for (const message of snapshot.messages || []) {
+      const threadId = threadRootFromTarget(message.target);
+      if (!threadId) continue;
+      replyCounts.set(threadId, (replyCounts.get(threadId) || 0) + 1);
+    }
+    let tasks = snapshot.tasks || [];
+    if (filter.target) tasks = tasks.filter(task => task.target === filter.target);
+    const status = normalizeOptionalString(filter.status);
+    if (status && status !== "all") {
+      tasks = status === "open"
+        ? tasks.filter(task => isOpenTaskStatus(task.status))
+        : tasks.filter(task => task.status === status);
+    } else if (status !== "all" && !filter.includeDone) {
+      tasks = tasks.filter(task => isOpenTaskStatus(task.status));
+    }
+    if (filter.assigneeId) tasks = tasks.filter(task => task.assigneeId === filter.assigneeId);
+    if (filter.createdBy) tasks = tasks.filter(task => task.createdBy === filter.createdBy);
+    const query = normalizeOptionalString(filter.q)?.toLowerCase();
+    if (query) {
+      tasks = tasks.filter(task =>
+        task.title.toLowerCase().includes(query) ||
+        task.description.toLowerCase().includes(query)
+      );
+    }
+    return tasks.map(task => ({
+      ...task,
+      replyCount: replyCounts.get(task.messageId) || 0
+    }));
+  }
+
   listScheduledTasks(filter: { target?: string | null; status?: string | null; agentId?: string | null; spaceId?: string | null } = {}) {
     let tasks = this.store.snapshot().scheduledTasks || [];
     if (filter.spaceId !== undefined) {
@@ -862,9 +968,24 @@ export class IteamCore {
     return tasks;
   }
 
-  listMessagesByTarget(query: MessageQuery): Message[] {
+  async readScheduledTasks(filter: { target?: string | null; status?: string | null; agentId?: string | null; spaceId?: string | null } = {}) {
+    let tasks = filter.spaceId !== undefined
+      ? (await this.readStateForSpace(filter.spaceId)).scheduledTasks || []
+      : (this.store.readState ? (await this.store.readState()).scheduledTasks || [] : this.store.snapshot().scheduledTasks || []);
+    if (filter.target) tasks = tasks.filter(task => task.target === filter.target);
+    if (filter.status) tasks = tasks.filter(task => task.status === filter.status);
+    if (filter.agentId) tasks = tasks.filter(task => task.agentId === filter.agentId);
+    return tasks;
+  }
+
+  async listMessagesByTarget(query: MessageQuery): Promise<Message[]> {
     if (!query.target) {
       throw new HttpError(400, "target is required; use /api/messages/channel/:channelId for channel messages");
+    }
+    if (this.store.repository) {
+      await this.store.flush?.();
+      const spaceId = query.spaceId !== undefined ? this.resolveSpaceId(query.spaceId) : undefined;
+      return this.store.repository.listMessagesByTarget({ ...query, target: query.target, spaceId });
     }
     const snapshot = this.store.snapshot();
     const spaceId = query.spaceId !== undefined ? this.resolveSpaceId(query.spaceId) : null;
@@ -875,7 +996,18 @@ export class IteamCore {
     return paginateMessages(filtered, { limit, before: query.before ?? null });
   }
 
-  listMessagesByChannel(query: ChannelMessageQuery): Array<Message & { replyCount: number; depth?: number }> {
+  async listMessagesByChannel(query: ChannelMessageQuery): Promise<Array<Message & { replyCount: number; depth?: number }>> {
+    if (this.store.repository) {
+      await this.store.flush?.();
+      const spaceId = query.spaceId !== undefined ? this.resolveSpaceId(query.spaceId) : undefined;
+      const messages = await this.store.repository.listMessagesByChannel({ ...query, spaceId });
+      if (!messages.length) {
+        const snapshot = this.store.snapshot();
+        const channel = findChannel(snapshot, query.channelId, spaceId);
+        if (!channel) throw new HttpError(404, "channel not found");
+      }
+      return messages;
+    }
     const snapshot = this.store.snapshot();
     const spaceId = query.spaceId !== undefined ? this.resolveSpaceId(query.spaceId) : null;
     const channel = findChannel(snapshot, query.channelId, spaceId);
@@ -3982,4 +4114,28 @@ function maskToken(token: string | undefined | null): string {
   if (!token) return "<none>";
   if (token.length <= 12) return `${token.slice(0, 2)}…${token.slice(-2)}(len=${token.length})`;
   return `${token.slice(0, 6)}…${token.slice(-4)}(len=${token.length})`;
+}
+
+function filterStateForSpace(raw: State, spaceId: string): State {
+  return {
+    ...raw,
+    spaces: raw.spaces,
+    humans: raw.humans,
+    computers: (raw.computers || []).filter(item => item.spaceId === spaceId),
+    pendingComputerConnections: (raw.pendingComputerConnections || []).filter(item => item.spaceId === spaceId),
+    agents: (raw.agents || []).filter(item => item.spaceId === spaceId),
+    channels: (raw.channels || []).filter(item => item.spaceId === spaceId),
+    messages: (raw.messages || []).filter(item => item.spaceId === spaceId),
+    deliveries: (raw.deliveries || []).filter(item => item.spaceId === spaceId),
+    deliveryEvents: (raw.deliveryEvents || []).filter(item => item.spaceId === spaceId),
+    deliveryArtifacts: (raw.deliveryArtifacts || []).filter(item => item.spaceId === spaceId),
+    tasks: (raw.tasks || []).filter(item => item.spaceId === spaceId),
+    scheduledTasks: (raw.scheduledTasks || []).filter(item => item.spaceId === spaceId),
+    externalIngressPairings: (raw.externalIngressPairings || []).filter(item => item.spaceId === spaceId),
+    externalIngressPolicies: (raw.externalIngressPolicies || []).filter(item => item.spaceId === spaceId),
+    externalBotConfigs: (raw.externalBotConfigs || []).filter(item => item.spaceId === spaceId),
+    externalBotBindings: (raw.externalBotBindings || []).filter(item => item.spaceId === spaceId),
+    externalMessageLinks: (raw.externalMessageLinks || []).filter(item => item.spaceId === spaceId),
+    events: raw.events
+  };
 }

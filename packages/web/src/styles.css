@@ -2508,6 +2508,68 @@ h3 { font-size: 20px; line-height: 1.2; }
   box-shadow: 0 0 0 3px rgba(204, 120, 92, 0.18);
 }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.space-manager-list {
+  border-top: 1px solid var(--hairline);
+  margin-top: 24px;
+  padding-top: 18px;
+}
+.space-manager-list-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.space-manager-list-head .eyebrow {
+  margin: 0;
+}
+.space-manager-pager {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.space-manager-pager .btn {
+  min-height: 28px;
+  padding: 0 9px;
+}
+.space-manager-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 1.25fr);
+  gap: 14px;
+  align-items: center;
+  padding: 12px 0;
+  border-top: 1px solid var(--hairline-soft);
+}
+.space-manager-row:first-of-type {
+  border-top: 0;
+}
+.space-manager-row strong,
+.space-manager-row small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.space-manager-row strong {
+  color: var(--ink);
+  font-size: 14px;
+}
+.space-manager-row small {
+  color: var(--muted);
+  font-size: 12px;
+}
+.space-manager-delete {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+.space-manager-note {
+  justify-self: end;
+}
 
 .runtime-combobox-field { position: relative; }
 .runtime-combobox { position: relative; }

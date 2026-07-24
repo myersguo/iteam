@@ -2,7 +2,7 @@
 
 > 本地优先的人机协作工作区——把人、AI Agent、计算机和任务装进同一个聊天室。
 
-iTeam 是一个完全跑在本地的多 Agent 协作平台。它把 Codex CLI、Claude Code、Gemini CLI 等编码 Agent 接入一个统一的聊天 / 任务 / 看板界面，让你像和同事协作一样指挥它们。所有数据保存在本地 `~/.iteam/state.json`，不依赖任何云端服务。
+iTeam 是一个完全跑在本地的多 Agent 协作平台。它把 Codex CLI、Claude Code、Gemini CLI 等编码 Agent 接入一个统一的聊天 / 任务 / 看板界面，让你像和同事协作一样指挥它们。默认数据保存在本地 `~/.iteam/state.db`（SQLite），也可切换到 JSON 或 MySQL 后端。
 
 ## 核心能力
 
@@ -274,7 +274,7 @@ corepack pnpm exec tsx scripts/smoke.ts
 
 ## 设计哲学
 
-- **本地优先**：默认所有数据存于 `~/.iteam/state.json`，可手动备份与迁移
+- **本地优先**：默认所有数据存于 `~/.iteam/state.db`，可手动备份与迁移
 - **类型驱动**：`packages/shared/src/types.ts` 是领域唯一事实源，前端按需镜像
 - **无构建运行**：`tsx` 直接执行 TypeScript，开发即生产
 - **编辑式美学**：参见 [`DESIGN.md`](./DESIGN.md)，向 Anthropic Editorial 设计语言致敬
@@ -305,15 +305,15 @@ iteam daemon start
 
 ## 存储后端
 
-`Store` 已被抽象成 `IStore` 接口（见 `packages/server/src/store/`），通过环境变量 `ITEAM_STORE` 切换底层实现。所有后端共享 `snapshot / mutate / emit / subscribe` 语义，业务代码无需改动。
+`Store` 已被抽象成 `IStore` 接口（见 `packages/server/src/store/`），通过环境变量 `ITEAM_STORE` 切换底层实现。SQLite / MySQL 是正式支持的 repository-backed 后端：持久化业务读路径默认以数据库为事实来源；进程内 state 仅保留运行时兼容和通知语义。
 
 | 后端 | 启用方式 | 数据位置 | 额外依赖 |
 |---|---|---|---|
-| **JSON（默认）** | 不设置 / `ITEAM_STORE=json` | `~/.iteam/state.json` 单文件 | 无，零依赖纯本地 |
-| SQLite | `ITEAM_STORE=sqlite` | `~/.iteam/state.db`（可用 `ITEAM_SQLITE_FILE` 覆盖） | `npm i better-sqlite3` |
-| MySQL | `ITEAM_STORE=mysql` | 默认 db `iteam`，10 张 `iteam_*` 物理表 | `npm i mysql2` |
+| **SQLite（默认）** | 不设置 / `ITEAM_STORE=sqlite` | `~/.iteam/state.db`（可用 `ITEAM_SQLITE_FILE` 覆盖） | `npm i better-sqlite3` |
+| MySQL | `ITEAM_STORE=mysql` | 默认 db `iteam`，规范化的 `iteam_*` 物理表 | `npm i mysql2` |
+| JSON（legacy/dev-only） | `ITEAM_STORE=json` | `~/.iteam/state.json` 单文件 | 无，保留给本地实验和旧数据检查 |
 
-SQLite / MySQL 后端均使用 10 张关系表（`iteam_humans / iteam_computers / iteam_pending_connections / iteam_agents / iteam_channels / iteam_channel_members / iteam_messages / iteam_tasks / iteam_deliveries / iteam_events`），首次启动时由代码自动 `CREATE TABLE IF NOT EXISTS`，无需手动建表。SQLite 后端检测到旧的单行 `state` 表会自动迁移并清理。
+SQLite / MySQL 后端均使用规范化的 `iteam_*` 关系表（spaces、messages、tasks、deliveries、artifacts、外部入口等），首次启动时由代码自动 `CREATE TABLE IF NOT EXISTS`，无需手动建表。SQLite 后端检测到旧的单行 `state` 表会自动迁移并清理。
 
 MySQL 配置环境变量：
 
@@ -331,7 +331,7 @@ ITEAM_MYSQL_DATABASE=iteam
 
 iTeam 没有云端服务，部署本质上就是「在某台机器上把 daemon 跑起来 + 在浏览器访问 Web」。下列三种场景按由简到繁排列。
 
-### 场景 A：单机本地开发（默认 JSON 后端）
+### 场景 A：单机本地开发（默认 SQLite 后端）
 
 ```bash
 git clone <repo>
@@ -341,7 +341,7 @@ corepack pnpm run dev:server &    # 后端 http://127.0.0.1:4318
 corepack pnpm run dev:web         # Vite dev server
 ```
 
-数据落在 `~/.iteam/state.json`，备份直接拷贝该文件即可。
+数据落在 `~/.iteam/state.db`，备份可使用 SQLite `.backup` 或直接在 daemon 停止后拷贝该文件。
 
 ### 场景 B：长驻服务器（推荐 SQLite 后端）
 
@@ -440,14 +440,14 @@ corepack pnpm run dev:web         # Vite dev server
    FLUSH PRIVILEGES;
    ```
 
-   首次启动 daemon 时会自动创建 10 张 `iteam_*` 表，无需手动执行 DDL。
+   首次启动 daemon 时会自动创建所需的 `iteam_*` 表，无需手动执行 DDL。
 
 2. **配置 daemon**
 
    ```bash
    export ITEAM_HOME=/var/lib/iteam
    export ITEAM_STORE=mysql
-   export ITEAM_MYSQL_URL=mysql://iteam:change-me@db.internal:3306/iteam
+   export ITEAM_MYSQL_URL=mysql://iteam:change-me@db.example.com:3306/iteam
    export ITEAM_PORT=4318
 
    npm install               # 含 mysql2
@@ -459,7 +459,7 @@ corepack pnpm run dev:web         # Vite dev server
 
 3. **多机接入**
 
-   `ITEAM_HOME` 仍是本地目录（用于存放每个 Agent 的 workspace 文件），但「状态」存在 MySQL 里，多个 daemon 实例可指向同一个数据库实现共享。注意：当前实现是「整状态全量重写 + 串行写链」的粗粒度持久化，单 daemon 写入是原子的；多 daemon 同写需自行加协调层。
+   `ITEAM_HOME` 仍是本地目录（用于存放每个 Agent 的 workspace 文件），但持久业务数据存在 MySQL 里，多个 daemon 实例可指向同一个数据库实现共享。当前 SQL 后端采用 repository-backed 读模型与行级增量持久化；单 daemon 写入通过事务保持一致，多 daemon 同写仍建议引入协调层或进一步的乐观锁/版本控制。
 
 4. **备份**
 

@@ -427,6 +427,12 @@ Messages use this canonical shape:
 
 Reuse the exact target when replying. Mention teammates by their @handle, not internal ids.
 
+## Privacy and external data
+
+Treat results from Lark/Feishu tools, including \`lark-cli\`, as private evidence by default. In replies that may be sent back to a Feishu group, do not paste raw chat names, group names, member names, message text, message IDs, chat IDs, open IDs, phone numbers, emails, or search-result rows from Lark/Feishu.
+
+When you used Lark/Feishu search or message-read tools, summarize findings without exposing the source details. Prefer safe phrasing such as "found related discussion in a few chats" or "several people discussed this" instead of naming chats, members, or quoting messages. Share exact Lark/Feishu content only when the user explicitly asks for it and the current reply target is a clearly authorized private context.
+
 ## Scheduled task capability
 
 iTeam supports server-owned scheduled tasks. When a human message mentions you and includes a recurring cadence such as "每隔 10 分钟...", "every 1 hour...", or "工作日 09:00 到 19:00 每小时...", decide whether a real scheduled task should be created. To create one, include exactly one valid JSON directive anywhere in your reply:

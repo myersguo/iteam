@@ -2,7 +2,7 @@
 
 > A local-first human + AI collaboration workspace — people, AI agents, computers, and tasks in one chat-centric interface.
 
-iTeam is a fully local multi-agent collaboration platform. It connects coding agents like Codex CLI, Claude Code, Gemini CLI, and others into a unified chat / task / board UI, so you can coordinate them like teammates. By default, data is stored locally in `~/.iteam/state.json` (or SQLite/MySQL if configured).
+iTeam is a fully local multi-agent collaboration platform. It connects coding agents like Codex CLI, Claude Code, Gemini CLI, and others into a unified chat / task / board UI, so you can coordinate them like teammates. By default, data is stored locally in `~/.iteam/state.db` (SQLite); JSON and MySQL backends are also available.
 
 For the original Chinese documentation, see [README_CN.md](./README_CN.md).
 
@@ -282,13 +282,15 @@ Notes:
 
 ## Storage backends
 
-`IStore` abstraction lives in `packages/server/src/store/`; switch backend via `ITEAM_STORE`:
+`IStore` abstraction lives in `packages/server/src/store/`; switch backend via `ITEAM_STORE`. SQLite and MySQL are repository-backed: user-visible reads come from the database, while the in-process state snapshot remains for runtime compatibility and notifications.
 
 | Backend | Enable via | Data location | Extra dependency |
 |---|---|---|---|
-| JSON (default) | unset / `ITEAM_STORE=json` | `~/.iteam/state.json` | none |
-| SQLite | `ITEAM_STORE=sqlite` | `~/.iteam/state.db` (`ITEAM_SQLITE_FILE` to override) | `better-sqlite3` |
+| SQLite (default) | unset / `ITEAM_STORE=sqlite` | `~/.iteam/state.db` (`ITEAM_SQLITE_FILE` to override) | `better-sqlite3` |
 | MySQL | `ITEAM_STORE=mysql` | DB `iteam`, tables `iteam_*` | `mysql2` |
+| JSON (legacy/dev-only) | `ITEAM_STORE=json` | `~/.iteam/state.json` | none |
+
+The SQL backends persist normalized `iteam_*` tables and update changed rows transactionally, so unrelated database edits are not overwritten by later writes from the daemon.
 
 MySQL config (either URL or split vars):
 

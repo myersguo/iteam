@@ -325,9 +325,12 @@ export abstract class BaseStore implements IStore {
 
   protected setStateAfterLoad(state: State): void {
     this.state = sanitizeState(state);
+    this.afterStateLoaded(this.state);
     // Persist sanitized state so the cleanup is durable.
     this.persist(this.state);
   }
+
+  protected afterStateLoaded(_state: State): void {}
 
   snapshot(options: { includeArtifactContent?: boolean } = {}): State {
     if (options.includeArtifactContent) return clone(this.state);

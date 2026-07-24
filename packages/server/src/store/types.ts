@@ -1,4 +1,5 @@
 import type { State, StoreEvent } from "@iteam/shared";
+import type { IteamRepository } from "../repository/types.js";
 
 export type StateMutator<T> = (state: State) => T;
 export type StateListener = (event: StoreEvent) => void;
@@ -39,6 +40,18 @@ export interface IStore {
   notify(type: string, payload: unknown): void;
   /** Register a listener; returns an unsubscribe function. */
   subscribe(listener: StateListener): () => void;
+  /**
+   * Database-backed repository for persistent business reads. SQL backends
+   * implement this so user-visible reads do not depend on the process-local
+   * State snapshot. Legacy/dev stores may leave it undefined.
+   */
+  readonly repository?: IteamRepository;
+  /** Rebuild persistent state from the backing store. SQL backends implement
+   * this for DB-authoritative aggregate reads such as `/api/state`; legacy/dev
+   * stores may omit it and continue using the in-memory snapshot. */
+  readState?(): Promise<State>;
+  /** Wait for queued asynchronous writes to reach the backing store. */
+  flush?(): Promise<void>;
   /** Close any underlying resources (DB handles, etc). Optional for JSON. */
   close?(): Promise<void> | void;
 }

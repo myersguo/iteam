@@ -157,6 +157,7 @@ export function WorkspaceSidebar({
   onResizeReset,
   onSwitchSpace,
   onCreateSpace,
+  onDeleteSpace,
   channel,
   onSelectChannel,
   onOpenTasks,
@@ -185,6 +186,7 @@ export function WorkspaceSidebar({
   onResizeReset: () => void;
   onSwitchSpace: (spaceId: string) => void;
   onCreateSpace: (name: string, description: string) => Promise<import("../types").Space>;
+  onDeleteSpace: (space: import("../types").Space) => Promise<void>;
   channel: string;
   onSelectChannel: (channel: string) => void;
   onOpenTasks: () => void;
@@ -223,6 +225,7 @@ export function WorkspaceSidebar({
           onSelect={onSwitchSpace}
           onCreated={space => onSwitchSpace(space.id)}
           createSpace={onCreateSpace}
+          deleteSpace={onDeleteSpace}
         />
       </header>
       {(section === "chat" || section === "tasks") && (

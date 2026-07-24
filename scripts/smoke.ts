@@ -319,7 +319,7 @@ try {
     },
     timeoutMs: 1000
   });
-  if (!renderedTraeArgs.includes("-c") || !renderedTraeArgs.includes("model=\"Gemini-3-Flash-Preview\"")) {
+  if (!renderedTraeArgs.includes("-m") || !renderedTraeArgs.includes("Gemini-3-Flash-Preview")) {
     throw new Error("built-in Traex ACP profile did not render the selected model override");
   }
   const workspaceAgent: Agent = {

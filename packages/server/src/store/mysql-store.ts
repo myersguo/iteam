@@ -23,8 +23,18 @@ import type {
   Task
 } from "@iteam/shared";
 import { nowIso } from "@iteam/shared";
+import { SqlIteamRepository } from "../repository/sql-repository.js";
+import type { IteamRepository } from "../repository/types.js";
 import { BaseStore, DEFAULT_SPACE_ID, initialState } from "./base.js";
 import { MYSQL_TABLES } from "./mysql-schema.js";
+import {
+  baselineFromSpecs,
+  baselineFromState,
+  buildSqlTableSpecs,
+  emptySqlPersistBaseline,
+  type SqlPersistBaseline,
+  type SqlTableSpec
+} from "./sql-sync.js";
 
 const requireCjs = createRequire(import.meta.url);
 
@@ -207,10 +217,10 @@ interface MysqlDriver {
  *   humans, computers, pending_connections, agents, channels,
  *   channel_members, messages, tasks, deliveries, events.
  *
- * Load rebuilds State from these tables. Persist serializes the in-memory
- * State back to them inside a single transaction (full wipe+reinsert per
- * table). This preserves BaseStore's coarse-grained semantics so the rest of
- * the daemon (mutate/snapshot/emit) doesn't need to know.
+ * Load rebuilds State from these tables for runtime compatibility. Persistent
+ * business reads use the repository interface directly against MySQL, and
+ * persist synchronizes changed rows inside a single transaction instead of
+ * wiping untouched rows.
  *
  * Because BaseStore.persist is synchronous, writes are queued in a serial
  * promise chain. The constructor blocks via prepare() (called from factory).
@@ -218,11 +228,24 @@ interface MysqlDriver {
  * Requires `mysql2` to be installed when ITEAM_STORE=mysql.
  */
 export class MysqlStore extends BaseStore {
+  readonly repository: IteamRepository;
   private pool!: MysqlPool;
   private writeChain: Promise<void> = Promise.resolve();
+  private persistBaseline: SqlPersistBaseline = emptySqlPersistBaseline();
+  private loadedFromEmptyDatabase = false;
 
   constructor(home: string) {
     super(home);
+    this.repository = new SqlIteamRepository({
+      all: async <T = unknown>(sql: string, params: unknown[] = []) => {
+        const [rows] = await this.pool.query<T[]>(sql, params);
+        return rows;
+      },
+      get: async <T = unknown>(sql: string, params: unknown[] = []) => {
+        const [rows] = await this.pool.query<T[]>(sql, params);
+        return Array.isArray(rows) && rows[0] ? rows[0] : null;
+      }
+    });
     // pool / load are deferred until prepare() — see store/factory.ts.
   }
 
@@ -261,6 +284,7 @@ export class MysqlStore extends BaseStore {
     await this.runColumnMigrations();
 
     const loaded = await this.loadFromTables();
+    if (!this.loadedFromEmptyDatabase) this.persistBaseline = baselineFromState(loaded);
     this.setStateAfterLoad(loaded);
   }
 
@@ -348,6 +372,31 @@ export class MysqlStore extends BaseStore {
       "iteam_deliveries",
       "lifecycle",
       "JSON DEFAULT NULL"
+    );
+    await this.addColumnIfMissing(
+      "iteam_external_ingress_pairings",
+      "space_id",
+      "VARCHAR(64) NOT NULL DEFAULT 'space_default'"
+    );
+    await this.addColumnIfMissing(
+      "iteam_external_ingress_policies",
+      "space_id",
+      "VARCHAR(64) NOT NULL DEFAULT 'space_default'"
+    );
+    await this.addColumnIfMissing(
+      "iteam_external_bot_configs",
+      "space_id",
+      "VARCHAR(64) NOT NULL DEFAULT 'space_default'"
+    );
+    await this.addColumnIfMissing(
+      "iteam_external_bot_bindings",
+      "space_id",
+      "VARCHAR(64) NOT NULL DEFAULT 'space_default'"
+    );
+    await this.addColumnIfMissing(
+      "iteam_external_message_links",
+      "space_id",
+      "VARCHAR(64) NOT NULL DEFAULT 'space_default'"
     );
     await this.addColumnIfMissing(
       "iteam_external_bot_configs",
@@ -750,6 +799,7 @@ export class MysqlStore extends BaseStore {
 
     const [ingressPairingRows] = await this.pool.query<Array<{
       id: string;
+      space_id: string | null;
       pair_code: string;
       target: string;
       agent_id: string;
@@ -764,6 +814,7 @@ export class MysqlStore extends BaseStore {
 
     const [ingressPolicyRows] = await this.pool.query<Array<{
       id: string;
+      space_id: string | null;
       token: string;
       source: string;
       target: string;
@@ -775,6 +826,7 @@ export class MysqlStore extends BaseStore {
     }>>("SELECT * FROM iteam_external_ingress_policies ORDER BY created_at ASC");
 
     const [externalBotConfigRows] = await this.pool.query<Array<{
+      space_id: string | null;
       provider: string;
       alias: string | null;
       app_id: string;
@@ -790,6 +842,7 @@ export class MysqlStore extends BaseStore {
 
     const [externalBotBindingRows] = await this.pool.query<Array<{
       id: string;
+      space_id: string | null;
       provider: string;
       tenant_key: string;
       chat_id: string;
@@ -803,6 +856,7 @@ export class MysqlStore extends BaseStore {
 
     const [externalMessageLinkRows] = await this.pool.query<Array<{
       id: string;
+      space_id: string | null;
       provider: string;
       external_conversation_id: string;
       external_message_id: string | null;
@@ -822,6 +876,28 @@ export class MysqlStore extends BaseStore {
       payload: string | unknown;
       created_at: string;
     }>>("SELECT * FROM iteam_events ORDER BY created_at ASC LIMIT 500");
+
+    this.loadedFromEmptyDatabase = [
+      spaceRows,
+      humanRows,
+      computerRows,
+      pendingRows,
+      agentRows,
+      channelRows,
+      memberRows,
+      messageRows,
+      taskRows,
+      deliveryRows,
+      deliveryEventRows,
+      deliveryArtifactRows,
+      scheduledTaskRows,
+      ingressPairingRows,
+      ingressPolicyRows,
+      externalBotConfigRows,
+      externalBotBindingRows,
+      externalMessageLinkRows,
+      eventRows
+    ].every(rows => rows.length === 0);
 
     const humans: Human[] = humanRows.map(row => ({
       id: row.id,
@@ -1020,7 +1096,7 @@ export class MysqlStore extends BaseStore {
 
     const externalIngressPairings: ExternalIngressPairing[] = ingressPairingRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       pairCode: row.pair_code,
       target: row.target,
       agentId: row.agent_id,
@@ -1035,7 +1111,7 @@ export class MysqlStore extends BaseStore {
 
     const externalIngressPolicies: ExternalIngressPolicy[] = ingressPolicyRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       token: row.token,
       source: row.source,
       target: row.target,
@@ -1047,7 +1123,7 @@ export class MysqlStore extends BaseStore {
     }));
 
     const externalBotConfigs: ExternalBotConfig[] = externalBotConfigRows.map(row => ({
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       provider: row.provider,
       alias: row.alias,
       appId: row.app_id,
@@ -1063,7 +1139,7 @@ export class MysqlStore extends BaseStore {
 
     const externalBotBindings: ExternalBotBinding[] = externalBotBindingRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       provider: row.provider,
       tenantKey: row.tenant_key,
       chatId: row.chat_id,
@@ -1077,7 +1153,7 @@ export class MysqlStore extends BaseStore {
 
     const externalMessageLinks: ExternalMessageLink[] = externalMessageLinkRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       provider: row.provider,
       externalConversationId: row.external_conversation_id,
       externalMessageId: row.external_message_id,
@@ -1133,447 +1209,37 @@ export class MysqlStore extends BaseStore {
     };
   }
 
+  async readState(): Promise<State> {
+    await this.flush();
+    return this.loadFromTables();
+  }
+
+  async flush(): Promise<void> {
+    await this.writeChain;
+  }
+
   // ---------------------------------------------------------------------------
-  // Persist: synchronize the entire State to the 10 tables in one transaction.
+  // Persist: synchronize changed rows to SQL tables in one transaction.
   // ---------------------------------------------------------------------------
   protected persist(state: State): void {
     const snapshot = JSON.parse(JSON.stringify(state)) as State;
     this.writeChain = this.writeChain
-      .then(() => this.writeSnapshot(snapshot))
+      .then(() => this.writeSnapshotIncremental(snapshot))
       .catch(error => {
         console.error("[mysql-store] persist failed:", (error as Error).message);
       });
   }
 
-  private async writeSnapshot(state: State): Promise<void> {
+  private async writeSnapshotIncremental(state: State): Promise<void> {
+    const specs = buildSqlTableSpecs(state);
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
-
-      await conn.query("DELETE FROM iteam_spaces");
-      if (state.spaces.length) {
-        await conn.query(
-          "INSERT INTO iteam_spaces (id, name, slug, description, created_at, updated_at) VALUES ?",
-          [
-            state.spaces.map(space => [
-              space.id,
-              space.name,
-              space.slug,
-              space.description ?? null,
-              space.createdAt,
-              space.updatedAt
-            ])
-          ]
-        );
+      for (const spec of specs) {
+        await this.syncTableIncremental(conn, spec);
       }
-
-      await conn.query("DELETE FROM iteam_humans");
-      if (state.humans.length) {
-        await conn.query(
-          "INSERT INTO iteam_humans (id, name, handle, role, source, username, email, avatar_url, external_id) VALUES ?",
-          [state.humans.map(h => [
-            h.id,
-            h.name,
-            h.handle,
-            h.role ?? null,
-            h.source ?? null,
-            h.username ?? null,
-            h.email ?? null,
-            h.avatarUrl ?? null,
-            h.externalId ?? null
-          ])]
-        );
-      }
-
-      await conn.query("DELETE FROM iteam_computers");
-      if (state.computers.length) {
-        await conn.query(
-          "INSERT INTO iteam_computers (id, space_id, name, fingerprint_id, fingerprint_hostname, fingerprint_os, fingerprint_arch, status, daemon_version, runtimes, agent_ids, connection_id, connect_token, created_at, first_connected_at, last_seen_at) VALUES ?",
-          [
-            state.computers.map(c => [
-              c.id,
-              c.spaceId || DEFAULT_SPACE_ID,
-              c.name,
-              c.fingerprint.id,
-              c.fingerprint.hostname,
-              c.fingerprint.os,
-              c.fingerprint.arch,
-              c.status,
-              c.daemonVersion,
-              JSON.stringify(c.runtimes || []),
-              JSON.stringify(c.agentIds || []),
-              c.connectionId,
-              c.connectToken ?? null,
-              c.createdAt,
-              c.firstConnectedAt ?? null,
-              c.lastSeenAt ?? null
-            ])
-          ]
-        );
-      }
-
-      await conn.query("DELETE FROM iteam_pending_connections");
-      if (state.pendingComputerConnections.length) {
-        await conn.query(
-          "INSERT INTO iteam_pending_connections (id, space_id, token, status, created_at, connected_computer_id, label, connected_at) VALUES ?",
-          [
-            state.pendingComputerConnections.map(p => [
-              p.id,
-              p.spaceId || DEFAULT_SPACE_ID,
-              p.token,
-              p.status,
-              p.createdAt,
-              p.connectedComputerId,
-              p.label ?? null,
-              p.connectedAt ?? null
-            ])
-          ]
-        );
-      }
-
-      await conn.query("DELETE FROM iteam_agents");
-      if (state.agents.length) {
-        await conn.query(
-          "INSERT INTO iteam_agents (id, space_id, name, handle, description, runtime, model, reasoning, computer_id, status, desired_status, launch_id, pid, workspace_path, created_at, updated_at, env, share_runtime_history, last_started_at, last_runtime_status) VALUES ?",
-          [
-            state.agents.map(a => [
-              a.id,
-              a.spaceId || DEFAULT_SPACE_ID,
-              a.name,
-              a.handle,
-              a.description,
-              a.runtime,
-              a.model,
-              a.reasoning ?? null,
-              a.computerId,
-              a.status,
-              a.desiredStatus,
-              a.launchId,
-              a.pid,
-              a.workspacePath,
-              a.createdAt,
-              a.updatedAt,
-              JSON.stringify(a.env || {}),
-              a.shareRuntimeHistory ? 1 : 0,
-              a.lastStartedAt ?? null,
-              a.lastRuntimeStatus ? JSON.stringify(a.lastRuntimeStatus) : null
-            ])
-          ]
-        );
-      }
-
-      // channels + channel_members are linked, so wipe both before inserting.
-      await conn.query("DELETE FROM iteam_channel_members");
-      await conn.query("DELETE FROM iteam_channels");
-      if (state.channels.length) {
-        await conn.query(
-          "INSERT INTO iteam_channels (id, space_id, name, target, kind, description, default_agent_id, created_at) VALUES ?",
-          [
-            state.channels.map(c => [
-              c.id,
-              c.spaceId || DEFAULT_SPACE_ID,
-              c.name,
-              c.target,
-              c.kind,
-              c.description ?? null,
-              c.defaultAgentId ?? null,
-              c.createdAt
-            ])
-          ]
-        );
-        const memberRows: Array<[string, string]> = [];
-        for (const channel of state.channels) {
-          for (const memberId of channel.memberIds || []) {
-            memberRows.push([channel.id, memberId]);
-          }
-        }
-        if (memberRows.length) {
-          await conn.query(
-            "INSERT INTO iteam_channel_members (channel_id, member_id) VALUES ?",
-            [memberRows]
-          );
-        }
-      }
-
-      await conn.query("DELETE FROM iteam_messages");
-      if (state.messages.length) {
-        await conn.query(
-          "INSERT INTO iteam_messages (id, space_id, target, author_id, type, text, mentions, created_at, thread_id, task_id) VALUES ?",
-          [
-            state.messages.map(m => [
-              m.id,
-              m.spaceId || DEFAULT_SPACE_ID,
-              m.target,
-              m.authorId,
-              m.type,
-              m.text,
-              JSON.stringify(m.mentions || []),
-              m.createdAt,
-              m.threadId,
-              m.taskId ?? null
-            ])
-          ]
-        );
-      }
-
-      await conn.query("DELETE FROM iteam_tasks");
-      if (state.tasks.length) {
-        await conn.query(
-          "INSERT INTO iteam_tasks (id, space_id, number, target, title, description, status, assignee_id, created_by, message_id, thread_target, created_at, updated_at) VALUES ?",
-          [
-            state.tasks.map(t => [
-              t.id,
-              t.spaceId || DEFAULT_SPACE_ID,
-              t.number,
-              t.target,
-              t.title,
-              t.description,
-              t.status,
-              t.assigneeId,
-              t.createdBy,
-              t.messageId,
-              t.threadTarget,
-              t.createdAt,
-              t.updatedAt
-            ])
-          ]
-        );
-      }
-
-      await conn.query("DELETE FROM iteam_deliveries");
-      if (state.deliveries.length) {
-        await conn.query(
-          "INSERT INTO iteam_deliveries (id, space_id, message_id, root_message_id, parent_delivery_id, depth, agent_id, computer_id, target, session_key, source, status, attempts, created_at, updated_at, error, lifecycle) VALUES ?",
-          [
-            state.deliveries.map(d => [
-              d.id,
-              d.spaceId || DEFAULT_SPACE_ID,
-              d.messageId,
-              d.rootMessageId,
-              d.parentDeliveryId,
-              d.depth,
-              d.agentId,
-              d.computerId,
-              d.target,
-              d.sessionKey ?? null,
-              d.source ?? null,
-              d.status,
-              d.attempts,
-              d.createdAt,
-              d.updatedAt,
-              d.error ?? null,
-              JSON.stringify(d.lifecycle || [])
-            ])
-          ]
-        );
-      }
-
-      await conn.query("DELETE FROM iteam_delivery_events");
-      if (state.deliveryEvents.length) {
-        await conn.query(
-          "INSERT INTO iteam_delivery_events (id, space_id, delivery_id, agent_id, target, kind, title, text, tool_name, tool_call_id, status, sequence, created_at, payload) VALUES ?",
-          [
-            state.deliveryEvents.map(event => [
-              event.id,
-              event.spaceId || DEFAULT_SPACE_ID,
-              event.deliveryId,
-              event.agentId,
-              event.target,
-              event.kind,
-              event.title ?? null,
-              event.text ?? null,
-              event.toolName ?? null,
-              event.toolCallId ?? null,
-              event.status ?? null,
-              event.sequence ?? 0,
-              event.createdAt,
-              JSON.stringify(event.payload ?? null)
-            ])
-          ]
-        );
-      }
-
-      await conn.query("DELETE FROM iteam_delivery_artifacts");
-      if (state.deliveryArtifacts.length) {
-        await conn.query(
-          "INSERT INTO iteam_delivery_artifacts (id, space_id, delivery_id, event_id, agent_id, target, kind, title, summary, mime, size, sha256, storage, path, relative_path, content, metadata, created_at) VALUES ?",
-          [
-            state.deliveryArtifacts.map(artifact => [
-              artifact.id,
-              artifact.spaceId || DEFAULT_SPACE_ID,
-              artifact.deliveryId,
-              artifact.eventId ?? null,
-              artifact.agentId,
-              artifact.target,
-              artifact.kind,
-              artifact.title,
-              artifact.summary ?? null,
-              artifact.mime,
-              artifact.size ?? 0,
-              artifact.sha256 ?? null,
-              artifact.storage || "db",
-              artifact.path ?? null,
-              artifact.relativePath ?? null,
-              artifact.content ?? null,
-              JSON.stringify(artifact.metadata ?? null),
-              artifact.createdAt
-            ])
-          ]
-        );
-      }
-
-      await conn.query("DELETE FROM iteam_scheduled_tasks");
-      if (state.scheduledTasks.length) {
-        await conn.query(
-          "INSERT INTO iteam_scheduled_tasks (id, space_id, target, agent_id, prompt, session_key, interval_ms, cron_expression, timezone, status, next_run_at, last_run_at, last_message_id, run_count, created_by, created_at, updated_at) VALUES ?",
-          [
-            state.scheduledTasks.map(task => [
-              task.id,
-              task.spaceId || DEFAULT_SPACE_ID,
-              task.target,
-              task.agentId,
-              task.prompt,
-              task.sessionKey ?? null,
-              task.intervalMs ?? 0,
-              task.cronExpression ?? null,
-              task.timezone ?? null,
-              task.status,
-              task.nextRunAt,
-              task.lastRunAt ?? null,
-              task.lastMessageId ?? null,
-              task.runCount ?? 0,
-              task.createdBy,
-              task.createdAt,
-              task.updatedAt
-            ])
-          ]
-        );
-      }
-
-      await conn.query("DELETE FROM iteam_external_ingress_pairings");
-      if (state.externalIngressPairings.length) {
-        await conn.query(
-          "INSERT INTO iteam_external_ingress_pairings (id, pair_code, target, agent_id, label, context_rules, status, expires_at, created_at, consumed_at, policy_id) VALUES ?",
-          [
-            state.externalIngressPairings.map(pairing => [
-              pairing.id,
-              pairing.pairCode,
-              pairing.target,
-              pairing.agentId,
-              pairing.label ?? null,
-              pairing.contextRules ? JSON.stringify(pairing.contextRules) : null,
-              pairing.status,
-              pairing.expiresAt,
-              pairing.createdAt,
-              pairing.consumedAt ?? null,
-              pairing.policyId ?? null
-            ])
-          ]
-        );
-      }
-
-      await conn.query("DELETE FROM iteam_external_ingress_policies");
-      if (state.externalIngressPolicies.length) {
-        await conn.query(
-          "INSERT INTO iteam_external_ingress_policies (id, token, source, target, agent_id, context_rules, status, created_at, updated_at) VALUES ?",
-          [
-            state.externalIngressPolicies.map(policy => [
-              policy.id,
-              policy.token,
-              policy.source,
-              policy.target,
-              policy.agentId,
-              policy.contextRules ? JSON.stringify(policy.contextRules) : null,
-              policy.status,
-              policy.createdAt,
-              policy.updatedAt
-            ])
-          ]
-        );
-      }
-
-      await conn.query("DELETE FROM iteam_external_bot_configs");
-      if (state.externalBotConfigs.length) {
-        await conn.query(
-          "INSERT INTO iteam_external_bot_configs (provider, alias, app_id, app_secret, domain, enabled, status, status_message, last_connected_at, created_at, updated_at) VALUES ?",
-          [
-            state.externalBotConfigs.map(config => [
-              config.provider,
-              config.alias ?? null,
-              config.appId,
-              config.appSecret ?? null,
-              config.domain ?? null,
-              config.enabled ? 1 : 0,
-              config.status ?? null,
-              config.statusMessage ?? null,
-              config.lastConnectedAt ?? null,
-              config.createdAt,
-              config.updatedAt
-            ])
-          ]
-        );
-      }
-
-      await conn.query("DELETE FROM iteam_external_bot_bindings");
-      if (state.externalBotBindings.length) {
-        await conn.query(
-          "INSERT INTO iteam_external_bot_bindings (id, provider, tenant_key, chat_id, chat_type, default_target, default_agent_id, status, created_at, updated_at) VALUES ?",
-          [
-            state.externalBotBindings.map(binding => [
-              binding.id,
-              binding.provider,
-              binding.tenantKey,
-              binding.chatId,
-              binding.chatType ?? null,
-              binding.defaultTarget ?? null,
-              binding.defaultAgentId ?? null,
-              binding.status,
-              binding.createdAt,
-              binding.updatedAt
-            ])
-          ]
-        );
-      }
-
-      await conn.query("DELETE FROM iteam_external_message_links");
-      if (state.externalMessageLinks.length) {
-        await conn.query(
-          "INSERT INTO iteam_external_message_links (id, provider, external_conversation_id, external_message_id, external_thread_id, external_root_message_id, external_parent_message_id, external_reply_to_message_id, message_id, root_message_id, direction, created_at) VALUES ?",
-          [
-            state.externalMessageLinks.map(link => [
-              link.id,
-              link.provider,
-              link.externalConversationId,
-              link.externalMessageId ?? null,
-              link.externalThreadId ?? null,
-              link.externalRootMessageId ?? null,
-              link.externalParentMessageId ?? null,
-              link.externalReplyToMessageId ?? null,
-              link.messageId,
-              link.rootMessageId ?? null,
-              link.direction,
-              link.createdAt
-            ])
-          ]
-        );
-      }
-
-      await conn.query("DELETE FROM iteam_events");
-      if (state.events.length) {
-        await conn.query(
-          "INSERT INTO iteam_events (id, type, payload, created_at) VALUES ?",
-          [
-            state.events.map(e => [
-              e.id,
-              e.type,
-              JSON.stringify(e.payload ?? null),
-              e.createdAt
-            ])
-          ]
-        );
-      }
-
       await conn.commit();
+      this.persistBaseline = baselineFromSpecs(specs);
     } catch (error) {
       await conn.rollback();
       throw error;
@@ -1582,8 +1248,40 @@ export class MysqlStore extends BaseStore {
     }
   }
 
+  private async syncTableIncremental(conn: MysqlConnection, spec: SqlTableSpec): Promise<void> {
+    const previous = this.persistBaseline.get(spec.table) || new Map<string, string>();
+    const current = new Map(spec.rows.map(row => [row.key, row.fingerprint]));
+    for (const row of spec.rows) {
+      if (previous.get(row.key) === row.fingerprint) continue;
+      await this.upsertRow(conn, spec, row.values);
+    }
+    for (const [key] of previous) {
+      if (current.has(key)) continue;
+      const keyValues = JSON.parse(key) as unknown[];
+      await this.deleteRow(conn, spec, keyValues);
+    }
+  }
+
+  private async upsertRow(conn: MysqlConnection, spec: SqlTableSpec, values: unknown[]): Promise<void> {
+    const columns = spec.columns.map(mysqlIdentifier).join(", ");
+    const placeholders = spec.columns.map(() => "?").join(", ");
+    const updateColumns = spec.columns.filter(column => !spec.keyColumns.includes(column));
+    const updateClause = updateColumns.length
+      ? updateColumns.map(column => `${mysqlIdentifier(column)} = VALUES(${mysqlIdentifier(column)})`).join(", ")
+      : `${mysqlIdentifier(spec.keyColumns[0])} = ${mysqlIdentifier(spec.keyColumns[0])}`;
+    await conn.query(
+      `INSERT INTO ${mysqlIdentifier(spec.table)} (${columns}) VALUES (${placeholders}) ON DUPLICATE KEY UPDATE ${updateClause}`,
+      values
+    );
+  }
+
+  private async deleteRow(conn: MysqlConnection, spec: SqlTableSpec, keyValues: unknown[]): Promise<void> {
+    const where = spec.keyColumns.map(column => `${mysqlIdentifier(column)} = ?`).join(" AND ");
+    await conn.query(`DELETE FROM ${mysqlIdentifier(spec.table)} WHERE ${where}`, keyValues);
+  }
+
   async close(): Promise<void> {
-    await this.writeChain;
+    await this.flush();
     await this.pool.end();
   }
 }
@@ -1607,4 +1305,8 @@ function parseJsonField<T>(value: unknown, fallback: T): T {
 
 function escapeMysqlIdentifier(value: string): string {
   return value.replaceAll("`", "``");
+}
+
+function mysqlIdentifier(value: string): string {
+  return `\`${escapeMysqlIdentifier(value)}\``;
 }

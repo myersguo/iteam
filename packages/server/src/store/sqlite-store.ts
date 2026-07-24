@@ -22,8 +22,18 @@ import type {
   StoreEvent,
   Task
 } from "@iteam/shared";
+import { SqlIteamRepository } from "../repository/sql-repository.js";
+import type { IteamRepository } from "../repository/types.js";
 import { BaseStore, DEFAULT_SPACE_ID, initialState, sanitizeState } from "./base.js";
 import { SQLITE_INDEXES, SQLITE_TABLES } from "./sqlite-schema.js";
+import {
+  baselineFromSpecs,
+  baselineFromState,
+  buildSqlTableSpecs,
+  emptySqlPersistBaseline,
+  type SqlPersistBaseline,
+  type SqlTableSpec
+} from "./sql-sync.js";
 
 const requireCjs = createRequire(import.meta.url);
 
@@ -48,10 +58,9 @@ interface BetterSqlite3Ctor {
 /**
  * SQLite backend, P1+P2 implementation.
  *
- * Mirrors MysqlStore: 10 normalized tables (see ./sqlite-schema.ts), full
- * State rebuild on load, full transactional rewrite on persist. Synchronous
- * because better-sqlite3 is synchronous, so persist() is naturally atomic
- * with mutate().
+ * Mirrors MysqlStore: 10 normalized tables (see ./sqlite-schema.ts), database
+ * backed repository reads, and transactional row-level incremental persistence.
+ * Synchronous better-sqlite3 transactions keep each persist atomic.
  *
  * On startup, migrates a legacy single-row `state` table into the new schema
  * if found, then drops it.
@@ -59,8 +68,12 @@ interface BetterSqlite3Ctor {
  * Requires `better-sqlite3` to be installed when ITEAM_STORE=sqlite.
  */
 export class SqliteStore extends BaseStore {
+  readonly repository: IteamRepository;
   private db: SqliteDatabase;
   private writeAll: (state: State) => void;
+  private writeIncremental: (state: State) => void;
+  private persistBaseline: SqlPersistBaseline = emptySqlPersistBaseline();
+  private loadedFromEmptyDatabase = false;
 
   constructor(home: string, file?: string) {
     super(home);
@@ -75,6 +88,10 @@ export class SqliteStore extends BaseStore {
     }
     const dbFile = file || process.env.ITEAM_SQLITE_FILE || join(home, "state.db");
     this.db = new BetterSqlite3(dbFile);
+    this.repository = new SqlIteamRepository({
+      all: async <T = unknown>(sql: string, params: unknown[] = []) => this.db.prepare(sql).all(...params) as T[],
+      get: async <T = unknown>(sql: string, params: unknown[] = []) => (this.db.prepare(sql).get(...params) as T | undefined) ?? null
+    });
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
 
@@ -82,11 +99,13 @@ export class SqliteStore extends BaseStore {
     for (const idx of SQLITE_INDEXES) this.db.exec(idx);
     this.runColumnMigrations();
 
-    // Compose the transactional writer once; reused on every persist().
+    // Compose transactional writers once; reused on every persist().
     this.writeAll = this.db.transaction((s: State) => this.writeAllUnwrapped(s));
+    this.writeIncremental = this.db.transaction((s: State) => this.writeIncrementalUnwrapped(s));
 
     const migrated = this.migrateLegacyStateTable();
     const loaded = migrated ?? this.loadFromTables();
+    if (!this.loadedFromEmptyDatabase) this.persistBaseline = baselineFromState(loaded);
     this.setStateAfterLoad(loaded);
   }
 
@@ -116,6 +135,11 @@ export class SqliteStore extends BaseStore {
     this.addColumnIfMissing("iteam_deliveries", "session_key", "TEXT");
     this.addColumnIfMissing("iteam_deliveries", "source", "TEXT");
     this.addColumnIfMissing("iteam_deliveries", "lifecycle", "TEXT");
+    this.addColumnIfMissing("iteam_external_ingress_pairings", "space_id", "TEXT NOT NULL DEFAULT 'space_default'");
+    this.addColumnIfMissing("iteam_external_ingress_policies", "space_id", "TEXT NOT NULL DEFAULT 'space_default'");
+    this.addColumnIfMissing("iteam_external_bot_configs", "space_id", "TEXT NOT NULL DEFAULT 'space_default'");
+    this.addColumnIfMissing("iteam_external_bot_bindings", "space_id", "TEXT NOT NULL DEFAULT 'space_default'");
+    this.addColumnIfMissing("iteam_external_message_links", "space_id", "TEXT NOT NULL DEFAULT 'space_default'");
     this.addColumnIfMissing("iteam_external_bot_configs", "alias", "TEXT");
     this.addColumnIfMissing("iteam_external_bot_configs", "status", "TEXT");
     this.addColumnIfMissing("iteam_external_bot_configs", "status_message", "TEXT");
@@ -717,6 +741,7 @@ export class SqliteStore extends BaseStore {
       .prepare("SELECT * FROM iteam_external_ingress_pairings ORDER BY created_at ASC")
       .all() as Array<{
         id: string;
+        space_id: string | null;
         pair_code: string;
         target: string;
         agent_id: string;
@@ -733,6 +758,7 @@ export class SqliteStore extends BaseStore {
       .prepare("SELECT * FROM iteam_external_ingress_policies ORDER BY created_at ASC")
       .all() as Array<{
         id: string;
+        space_id: string | null;
         token: string;
         source: string;
         target: string;
@@ -746,6 +772,7 @@ export class SqliteStore extends BaseStore {
     const externalBotConfigRows = this.db
       .prepare("SELECT * FROM iteam_external_bot_configs ORDER BY created_at ASC")
       .all() as Array<{
+        space_id: string | null;
         provider: string;
         alias: string | null;
         app_id: string;
@@ -763,6 +790,7 @@ export class SqliteStore extends BaseStore {
       .prepare("SELECT * FROM iteam_external_bot_bindings ORDER BY created_at ASC")
       .all() as Array<{
         id: string;
+        space_id: string | null;
         provider: string;
         tenant_key: string;
         chat_id: string;
@@ -778,6 +806,7 @@ export class SqliteStore extends BaseStore {
       .prepare("SELECT * FROM iteam_external_message_links ORDER BY created_at ASC")
       .all() as Array<{
         id: string;
+        space_id: string | null;
         provider: string;
         external_conversation_id: string;
         external_message_id: string | null;
@@ -794,6 +823,28 @@ export class SqliteStore extends BaseStore {
     const eventRows = this.db
       .prepare("SELECT * FROM iteam_events ORDER BY created_at ASC LIMIT 500")
       .all() as Array<{ id: string; type: string; payload: string; created_at: string }>;
+
+    this.loadedFromEmptyDatabase = [
+      spaceRows,
+      humanRows,
+      computerRows,
+      pendingRows,
+      agentRows,
+      channelRows,
+      memberRows,
+      messageRows,
+      taskRows,
+      deliveryRows,
+      deliveryEventRows,
+      deliveryArtifactRows,
+      scheduledTaskRows,
+      ingressPairingRows,
+      ingressPolicyRows,
+      externalBotConfigRows,
+      externalBotBindingRows,
+      externalMessageLinkRows,
+      eventRows
+    ].every(rows => rows.length === 0);
 
     const humans: Human[] = humanRows.map(row => ({
       id: row.id,
@@ -992,7 +1043,7 @@ export class SqliteStore extends BaseStore {
 
     const externalIngressPairings: ExternalIngressPairing[] = ingressPairingRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       pairCode: row.pair_code,
       target: row.target,
       agentId: row.agent_id,
@@ -1007,7 +1058,7 @@ export class SqliteStore extends BaseStore {
 
     const externalIngressPolicies: ExternalIngressPolicy[] = ingressPolicyRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       token: row.token,
       source: row.source,
       target: row.target,
@@ -1019,7 +1070,7 @@ export class SqliteStore extends BaseStore {
     }));
 
     const externalBotConfigs: ExternalBotConfig[] = externalBotConfigRows.map(row => ({
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       provider: row.provider,
       alias: row.alias,
       appId: row.app_id,
@@ -1035,7 +1086,7 @@ export class SqliteStore extends BaseStore {
 
     const externalBotBindings: ExternalBotBinding[] = externalBotBindingRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       provider: row.provider,
       tenantKey: row.tenant_key,
       chatId: row.chat_id,
@@ -1049,7 +1100,7 @@ export class SqliteStore extends BaseStore {
 
     const externalMessageLinks: ExternalMessageLink[] = externalMessageLinkRows.map(row => ({
       id: row.id,
-      spaceId: DEFAULT_SPACE_ID,
+      spaceId: row.space_id || DEFAULT_SPACE_ID,
       provider: row.provider,
       externalConversationId: row.external_conversation_id,
       externalMessageId: row.external_message_id,
@@ -1104,11 +1155,55 @@ export class SqliteStore extends BaseStore {
     };
   }
 
+  async readState(): Promise<State> {
+    return sanitizeState(this.loadFromTables());
+  }
+
   // ---------------------------------------------------------------------------
   // Persist: synchronous, atomic via better-sqlite3 transaction()
   // ---------------------------------------------------------------------------
   protected persist(state: State): void {
-    this.writeAll(state);
+    this.writeIncremental(state);
+  }
+
+  private writeIncrementalUnwrapped(state: State): void {
+    const specs = buildSqlTableSpecs(state);
+    for (const spec of specs) {
+      this.syncTableIncremental(spec);
+    }
+    this.persistBaseline = baselineFromSpecs(specs);
+  }
+
+  private syncTableIncremental(spec: SqlTableSpec): void {
+    const previous = this.persistBaseline.get(spec.table) || new Map<string, string>();
+    const current = new Map(spec.rows.map(row => [row.key, row.fingerprint]));
+    for (const row of spec.rows) {
+      if (previous.get(row.key) === row.fingerprint) continue;
+      this.upsertRow(spec, row.values);
+    }
+    for (const [key] of previous) {
+      if (current.has(key)) continue;
+      const keyValues = JSON.parse(key) as unknown[];
+      this.deleteRow(spec, keyValues);
+    }
+  }
+
+  private upsertRow(spec: SqlTableSpec, values: unknown[]): void {
+    const columns = spec.columns.map(sqliteIdentifier).join(", ");
+    const placeholders = spec.columns.map(() => "?").join(", ");
+    const updateColumns = spec.columns.filter(column => !spec.keyColumns.includes(column));
+    const conflict = spec.keyColumns.map(sqliteIdentifier).join(", ");
+    const suffix = updateColumns.length
+      ? `DO UPDATE SET ${updateColumns.map(column => `${sqliteIdentifier(column)} = excluded.${sqliteIdentifier(column)}`).join(", ")}`
+      : "DO NOTHING";
+    this.db.prepare(
+      `INSERT INTO ${sqliteIdentifier(spec.table)} (${columns}) VALUES (${placeholders}) ON CONFLICT(${conflict}) ${suffix}`
+    ).run(...values);
+  }
+
+  private deleteRow(spec: SqlTableSpec, keyValues: unknown[]): void {
+    const where = spec.keyColumns.map(column => `${sqliteIdentifier(column)} = ?`).join(" AND ");
+    this.db.prepare(`DELETE FROM ${sqliteIdentifier(spec.table)} WHERE ${where}`).run(...keyValues);
   }
 
   private writeAllUnwrapped(state: State): void {
@@ -1403,11 +1498,12 @@ export class SqliteStore extends BaseStore {
     this.db.exec("DELETE FROM iteam_external_ingress_pairings");
     if (state.externalIngressPairings.length) {
       const stmt = this.db.prepare(
-        "INSERT INTO iteam_external_ingress_pairings (id, pair_code, target, agent_id, label, context_rules, status, expires_at, created_at, consumed_at, policy_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO iteam_external_ingress_pairings (id, space_id, pair_code, target, agent_id, label, context_rules, status, expires_at, created_at, consumed_at, policy_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       );
       for (const pairing of state.externalIngressPairings) {
         stmt.run(
           pairing.id,
+          pairing.spaceId || DEFAULT_SPACE_ID,
           pairing.pairCode,
           pairing.target,
           pairing.agentId,
@@ -1425,11 +1521,12 @@ export class SqliteStore extends BaseStore {
     this.db.exec("DELETE FROM iteam_external_ingress_policies");
     if (state.externalIngressPolicies.length) {
       const stmt = this.db.prepare(
-        "INSERT INTO iteam_external_ingress_policies (id, token, source, target, agent_id, context_rules, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO iteam_external_ingress_policies (id, space_id, token, source, target, agent_id, context_rules, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       );
       for (const policy of state.externalIngressPolicies) {
         stmt.run(
           policy.id,
+          policy.spaceId || DEFAULT_SPACE_ID,
           policy.token,
           policy.source,
           policy.target,
@@ -1445,11 +1542,12 @@ export class SqliteStore extends BaseStore {
     this.db.exec("DELETE FROM iteam_external_bot_configs");
     if (state.externalBotConfigs.length) {
       const stmt = this.db.prepare(
-        "INSERT INTO iteam_external_bot_configs (provider, alias, app_id, app_secret, domain, enabled, status, status_message, last_connected_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO iteam_external_bot_configs (provider, space_id, alias, app_id, app_secret, domain, enabled, status, status_message, last_connected_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       );
       for (const config of state.externalBotConfigs) {
         stmt.run(
           config.provider,
+          config.spaceId || DEFAULT_SPACE_ID,
           config.alias ?? null,
           config.appId,
           config.appSecret ?? null,
@@ -1467,11 +1565,12 @@ export class SqliteStore extends BaseStore {
     this.db.exec("DELETE FROM iteam_external_bot_bindings");
     if (state.externalBotBindings.length) {
       const stmt = this.db.prepare(
-        "INSERT INTO iteam_external_bot_bindings (id, provider, tenant_key, chat_id, chat_type, default_target, default_agent_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO iteam_external_bot_bindings (id, space_id, provider, tenant_key, chat_id, chat_type, default_target, default_agent_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       );
       for (const binding of state.externalBotBindings) {
         stmt.run(
           binding.id,
+          binding.spaceId || DEFAULT_SPACE_ID,
           binding.provider,
           binding.tenantKey,
           binding.chatId,
@@ -1488,11 +1587,12 @@ export class SqliteStore extends BaseStore {
     this.db.exec("DELETE FROM iteam_external_message_links");
     if (state.externalMessageLinks.length) {
       const stmt = this.db.prepare(
-        "INSERT INTO iteam_external_message_links (id, provider, external_conversation_id, external_message_id, external_thread_id, external_root_message_id, external_parent_message_id, external_reply_to_message_id, message_id, root_message_id, direction, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO iteam_external_message_links (id, space_id, provider, external_conversation_id, external_message_id, external_thread_id, external_root_message_id, external_parent_message_id, external_reply_to_message_id, message_id, root_message_id, direction, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       );
       for (const link of state.externalMessageLinks) {
         stmt.run(
           link.id,
+          link.spaceId || DEFAULT_SPACE_ID,
           link.provider,
           link.externalConversationId,
           link.externalMessageId ?? null,
@@ -1535,4 +1635,8 @@ function parseJsonField<T>(value: unknown, fallback: T): T {
     }
   }
   return value as T;
+}
+
+function sqliteIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
 }

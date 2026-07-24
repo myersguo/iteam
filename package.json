@@ -28,6 +28,7 @@
     "dev:web": "pnpm --filter @iteam/web dev",
     "dev:server": "pnpm --filter @iteam/server dev",
     "typecheck": "pnpm run build:shared && pnpm -r typecheck",
+    "verify:repository-storage": "pnpm exec tsx scripts/verify-repository-storage.ts",
     "clean": "pnpm -r clean"
   }
 }

@@ -19,7 +19,7 @@ export interface ResolvedAcpRuntimeProfile extends AcpRuntimeProfile {
 const TRAEX_ACP_RUNTIME_PROFILE: AcpRuntimeProfile = {
   command: "traex",
   args: [
-    "{{modelConfigArgs}}",
+    "{{modelArgs}}",
     "--add-dir", "{{workspaceDir}}",
     "acp", "serve",
     "--yolo",

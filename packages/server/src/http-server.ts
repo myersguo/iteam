@@ -285,9 +285,9 @@ async function route(
   }
 
   if (req.method === "GET" && url.pathname === "/api/state") {
-    return sendJson(res, 200, core.snapshotForSpace(spaceId));
+    return sendJson(res, 200, await core.readStateForSpace(spaceId));
   }
-  if (req.method === "GET" && url.pathname === "/api/spaces") return sendJson(res, 200, core.listSpaces());
+  if (req.method === "GET" && url.pathname === "/api/spaces") return sendJson(res, 200, await core.readSpaces());
   if (req.method === "POST" && url.pathname === "/api/spaces") {
     const body = await parseJsonBody<any>(req);
     return sendJson(res, 201, core.createSpace(body));
@@ -299,13 +299,13 @@ async function route(
     core.deleteSpace(targetSpaceId);
     return sendJson(res, 200, { ok: true });
   }
-  if (req.method === "GET" && url.pathname === "/api/channels") return sendJson(res, 200, core.listChannels(spaceId));
-  if (req.method === "GET" && url.pathname === "/api/agents") return sendJson(res, 200, core.listAgents(spaceId));
-  if (req.method === "GET" && url.pathname === "/api/computers") return sendJson(res, 200, core.listComputers(spaceId));
-  if (req.method === "GET" && url.pathname === "/api/humans") return sendJson(res, 200, core.listHumans());
-  if (req.method === "GET" && url.pathname === "/api/deliveries") return sendJson(res, 200, core.listDeliveries(spaceId));
+  if (req.method === "GET" && url.pathname === "/api/channels") return sendJson(res, 200, await core.readChannels(spaceId));
+  if (req.method === "GET" && url.pathname === "/api/agents") return sendJson(res, 200, await core.readAgents(spaceId));
+  if (req.method === "GET" && url.pathname === "/api/computers") return sendJson(res, 200, await core.readComputers(spaceId));
+  if (req.method === "GET" && url.pathname === "/api/humans") return sendJson(res, 200, await core.readHumans());
+  if (req.method === "GET" && url.pathname === "/api/deliveries") return sendJson(res, 200, await core.readDeliveries(spaceId));
   if (req.method === "GET" && url.pathname === "/api/delivery-events") {
-    return sendJson(res, 200, core.listDeliveryEvents({
+    return sendJson(res, 200, await core.listDeliveryEvents({
       target: url.searchParams.get("target"),
       deliveryId: url.searchParams.get("deliveryId"),
       limit: url.searchParams.get("limit"),
@@ -313,7 +313,7 @@ async function route(
     }));
   }
   if (req.method === "GET" && url.pathname === "/api/delivery-artifacts") {
-    return sendJson(res, 200, core.listDeliveryArtifacts({
+    return sendJson(res, 200, await core.listDeliveryArtifacts({
       target: url.searchParams.get("target"),
       deliveryId: url.searchParams.get("deliveryId"),
       eventId: url.searchParams.get("eventId"),
@@ -323,7 +323,7 @@ async function route(
   }
   const artifactContent = url.pathname.match(/^\/api\/delivery-artifacts\/([^/]+)\/content$/);
   if (req.method === "GET" && artifactContent) {
-    const artifact = core.getDeliveryArtifact(decodeURIComponent(artifactContent[1]), spaceId);
+    const artifact = await core.getDeliveryArtifact(decodeURIComponent(artifactContent[1]), spaceId);
     res.writeHead(200, {
       "content-type": artifact.mime || "text/plain; charset=utf-8",
       "cache-control": "no-store",
@@ -334,19 +334,19 @@ async function route(
   }
   const artifactDetail = url.pathname.match(/^\/api\/delivery-artifacts\/([^/]+)$/);
   if (req.method === "GET" && artifactDetail) {
-    return sendJson(res, 200, core.getDeliveryArtifact(decodeURIComponent(artifactDetail[1]), spaceId));
+    return sendJson(res, 200, await core.getDeliveryArtifact(decodeURIComponent(artifactDetail[1]), spaceId));
   }
-  if (req.method === "GET" && url.pathname === "/api/ingress/pairing-codes") return sendJson(res, 200, core.listIngressPairings(spaceId));
-  if (req.method === "GET" && url.pathname === "/api/ingress/policies") return sendJson(res, 200, core.listIngressPolicies(spaceId));
-  if (req.method === "GET" && url.pathname === "/api/external/bot-configs") return sendJson(res, 200, core.listExternalBotConfigs(spaceId));
-  if (req.method === "GET" && url.pathname === "/api/external/bot-bindings") return sendJson(res, 200, core.listExternalBotBindings(spaceId));
-  if (req.method === "GET" && url.pathname === "/api/external/message-links") return sendJson(res, 200, core.listExternalMessageLinks(spaceId));
+  if (req.method === "GET" && url.pathname === "/api/ingress/pairing-codes") return sendJson(res, 200, await core.readIngressPairings(spaceId));
+  if (req.method === "GET" && url.pathname === "/api/ingress/policies") return sendJson(res, 200, await core.readIngressPolicies(spaceId));
+  if (req.method === "GET" && url.pathname === "/api/external/bot-configs") return sendJson(res, 200, await core.readExternalBotConfigs(spaceId));
+  if (req.method === "GET" && url.pathname === "/api/external/bot-bindings") return sendJson(res, 200, await core.readExternalBotBindings(spaceId));
+  if (req.method === "GET" && url.pathname === "/api/external/message-links") return sendJson(res, 200, await core.readExternalMessageLinks(spaceId));
   if (req.method === "GET" && url.pathname === "/api/pending-connections") {
-    return sendJson(res, 200, core.listPendingConnections(spaceId));
+    return sendJson(res, 200, await core.readPendingConnections(spaceId));
   }
 
   if (req.method === "GET" && url.pathname === "/api/tasks") {
-    return sendJson(res, 200, core.listTasks({
+    return sendJson(res, 200, await core.readTasks({
       target: url.searchParams.get("target"),
       status: url.searchParams.get("status"),
       assigneeId: url.searchParams.get("assigneeId"),
@@ -358,7 +358,7 @@ async function route(
   }
 
   if (req.method === "GET" && url.pathname === "/api/scheduled-tasks") {
-    return sendJson(res, 200, core.listScheduledTasks({
+    return sendJson(res, 200, await core.readScheduledTasks({
       target: url.searchParams.get("target"),
       status: url.searchParams.get("status"),
       agentId: url.searchParams.get("agentId"),
@@ -368,7 +368,7 @@ async function route(
 
   if (req.method === "GET" && url.pathname.startsWith("/api/messages/channel/")) {
     const channelId = decodeURIComponent(url.pathname.slice("/api/messages/channel/".length));
-    return sendJson(res, 200, core.listMessagesByChannel({
+    return sendJson(res, 200, await core.listMessagesByChannel({
       channelId,
       limit: url.searchParams.get("limit"),
       before: url.searchParams.get("before"),
@@ -377,7 +377,7 @@ async function route(
   }
 
   if (req.method === "GET" && url.pathname === "/api/messages") {
-    return sendJson(res, 200, core.listMessagesByTarget({
+    return sendJson(res, 200, await core.listMessagesByTarget({
       target: url.searchParams.get("target") ?? undefined,
       limit: url.searchParams.get("limit"),
       before: url.searchParams.get("before"),
